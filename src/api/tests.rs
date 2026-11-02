@@ -282,7 +282,8 @@ async fn preauthorization_secrets_execution_and_lifecycle_are_interoperable() {
     };
     let mut args = run_arguments(handle, command);
     args["stdin"] = json!("fixture stdin\n");
-    args["timeout_seconds"] = json!(10);
+    // Compare transport semantics independently of cold PowerShell startup on CI.
+    // Explicit deadlines and interruption have dedicated tests.
     let (status, mut output) = http(&app, Operation::Run, args.clone()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(output["stdout"], "fixture stdin\n");
@@ -704,6 +705,9 @@ async fn http_destroy_cancels_an_inflight_run_and_invalidates_its_handle() {
     )
     .await;
     let handle = entered["handle"].as_str().unwrap();
+    // Start the persistent interpreter before timing cancellation of a command.
+    let (_, ready) = http(&app, Operation::Run, run_arguments(handle, "echo ready")).await;
+    assert_eq!(ready["success"], true, "{ready}");
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("started");
     let path = marker.to_string_lossy();
