@@ -8,7 +8,7 @@ pub const INVALID_TIMEOUT: &str =
 
 pub fn server_instructions() -> String {
     format!(
-        "{SERVER_INSTRUCTIONS} This server uses {} on {}; use that shell's syntax. Commands have no default execution timeout. Client timeout or HTTP disconnection alone does not stop commands. Explicit execution timeout or cancellation ends the entire handle and its process trees. No background-task or interactive-terminal API is provided. Tokens and handles are credentials; do not repeat them in prose or logs. {}",
+        "{SERVER_INSTRUCTIONS} This server uses {} on {}; use that shell's syntax. Commands have no default execution timeout. An execution timeout interrupts only that command and preserves the persistent shell and authorization session. Client timeout or HTTP disconnection alone does not stop commands. Explicit cancellation destroys the session. Do not use exit in commands: it exits the persistent shell and invalidates the session. No background-task or interactive-terminal API is provided. Tokens and handles are credentials; do not repeat them in prose or logs. {}",
         crate::shell::ShellKind::native().name(),
         std::env::consts::OS,
         identity_description()
@@ -81,7 +81,7 @@ fn run_output() -> Value {
             "truncated":{"type":"boolean"}, "stdout_truncated":{"type":"boolean"}, "stderr_truncated":{"type":"boolean"},
             "duration_ms":{"type":"integer","minimum":0},
             "timed_out":{"type":"boolean"}, "session_alive":{"type":"boolean"}, "session_ended":{"type":"boolean"},
-            "session_ended_reason":{"type":["string","null"],"description":"timeout, cancelled, shell_exited, or null."},
+            "session_ended_reason":{"type":["string","null"],"description":"cancelled, shell_exited, shell_unresponsive, or null. A normally interrupted command timeout leaves this null; shell_unresponsive means interruption could not restore the protocol."},
             "cwd":{"type":["string","null"],"description":"Shell directory after completion; null if interruption prevented reporting it."},
             "identity":{"type":"object","description":"Actual operating-system execution identity, not a requested or inferred account."}
         },
@@ -96,7 +96,7 @@ pub fn tool_definitions() -> Value {
             "handle":{"type":"string","description":"Secret handle returned by either enter tool."},
             "command":{"type":"string","description":format!("{shell} source code, passed verbatim to the parser; NUL bytes rejected.")},
             "stdin":{"type":"string","description":"Optional UTF-8 standard input for this command only. EOF follows the supplied text; omitted means immediate EOF. No subsequent input or terminal is available."},
-            "timeout_seconds":{"type":["integer","null"],"minimum":1,"description":"Positive execution deadline, or omitted/null for unlimited. Timeout destroys all shells associated with this handle and returns partial output."}
+            "timeout_seconds":{"type":["integer","null"],"minimum":1,"description":"Positive execution deadline, or omitted/null for unlimited. Timeout interrupts only this execution and its new child processes, returns partial output, and preserves the persistent shell and session. Inspect session_alive before continuing if the shell cannot recover."}
         }, "required":["handle","command"], "additionalProperties":false
     });
     if cfg!(windows) {
@@ -154,7 +154,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name":"run", "title":format!("Run {shell} with an explicit execution identity"),
-            "description":format!("{} Run source verbatim. Variables, directory and environment persist separately for each identity. stdout and stderr are separate; stderr text alone does not mean failure. A nonzero command exit code does not end the shell. Explicit exit, execution timeout or cancellation invalidates the entire handle and kills all associated process trees. Partial output is returned on execution timeout. Client timeout/disconnection alone does not cancel execution. No default execution timeout, background jobs, ongoing stdin or interactive terminal. MCP cancellation of run requires the transport session header issued by initialize.", identity_description()),
+            "description":format!("{} Run source verbatim. Variables, directory and environment persist separately for each identity. stdout and stderr are separate; stderr text alone does not mean failure. A nonzero command exit code does not end the shell. Do not use exit: it exits the persistent shell and invalidates the entire session. Execution timeout interrupts only this command and returns partial output while preserving the session. Explicit cancellation still destroys the session and its process trees. Client timeout/disconnection alone does not cancel execution. No default execution timeout, background jobs, ongoing stdin or interactive terminal. MCP cancellation of run requires the transport session header issued by initialize.", identity_description()),
             "inputSchema":run_input, "outputSchema":run_output()
         },
         {

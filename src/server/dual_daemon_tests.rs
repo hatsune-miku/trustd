@@ -289,7 +289,7 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
 }
 
 #[tokio::test]
-async fn either_backend_timeout_closes_the_entire_handle() {
+async fn either_backend_timeout_preserves_both_backends_and_the_handle() {
     for sudo in [false, true] {
         let (root, user, token, _, serving) = pair().await;
         let entered = user.enter(&token).await.unwrap();
@@ -302,22 +302,15 @@ async fn either_backend_timeout_closes_the_entire_handle() {
             )
             .await
             .unwrap();
-        assert!(result.timed_out && result.session_ended);
-        assert!(
-            user.run(&entered.handle, "echo never", !sudo, None)
+        assert!(result.timed_out && !result.session_ended && result.session_alive);
+        for identity in [sudo, !sudo] {
+            let next = user
+                .run(&entered.handle, "echo alive", identity, Some(10))
                 .await
-                .is_err()
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if root.sessions.lock().await.by_handle.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("timed-out user shell left the privileged shell alive");
+                .unwrap();
+            assert!(next.success && next.stdout.contains("alive"));
+        }
+        assert!(!root.sessions.lock().await.by_handle.is_empty());
         user.shutdown().await;
         root.shutdown().await;
         serving.abort();

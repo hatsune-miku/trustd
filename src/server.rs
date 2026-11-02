@@ -1563,19 +1563,14 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(200)).await;
         request.abort();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while state
-                .sessions
-                .lock()
-                .await
-                .by_handle
-                .contains_key(&entered.handle)
-            {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            state.run(&entered.handle, "echo recovered", true, None),
+        )
         .await
-        .expect("a disconnected request must still remove the entire timed-out handle");
+        .expect("a disconnected request must still interrupt its timed-out command")
+        .unwrap();
+        assert!(next.success && next.stdout.contains("recovered"));
         state.shutdown().await;
     }
 

@@ -67,7 +67,7 @@ async fn run(
         waiting.await;
     }
     Ok(Json(
-        json!({"stdout":"ok","session_ended":args["command"] == "wait"}),
+        json!({"stdout":"ok","session_ended":args["command"] == "wait", "timed_out":args["command"] == "timeout"}),
     ))
 }
 
@@ -154,6 +154,21 @@ fn field_projection_omits_missing_null_and_empty_required_without_losing_propert
             "required":["key"],"additionalProperties":false
         })
     );
+}
+
+#[tokio::test]
+async fn command_timeout_keeps_the_adapters_authorized_handle() {
+    let (address, state, task) = fake().await;
+    let adapter = Adapter::new(address, None).unwrap();
+    call(&adapter, approval()).await.unwrap();
+    let result = call(&adapter, command("timeout")).await.unwrap();
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(state.sessions.lock().await.len(), 1);
+    assert!(adapter.handle.lock().await.is_some());
+    call(&adapter, command("next")).await.unwrap();
+    assert_eq!(state.sessions.lock().await.len(), 1);
+    adapter.close().await.unwrap();
+    task.abort();
 }
 
 #[test]

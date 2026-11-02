@@ -3,7 +3,7 @@ name = "localshelld-native-dialog"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Small, Windows-only native consent presentation adapter"
+description = "Native Win32 and AppKit consent presentation adapters"
 license = "MIT"
 
 [target.'cfg(windows)'.dependencies]
@@ -17,6 +17,21 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSDate", "NSRunLoop", "NSNotification", "NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "NSApplication", "NSWindow", "NSView",
+    "NSResponder", "NSButton", "NSCell", "NSControl", "NSTextField",
+    "NSText", "NSTextView", "NSTextContainer", "NSScrollView", "NSFont",
+    "NSStackView", "NSLayoutConstraint", "NSLayoutAnchor", "NSEvent",
+    "NSUserInterfaceLayout", "NSRunningApplication", "NSGraphics", "NSButtonCell",
+] }
+
+[[test]]
+name = "macos_native"
+harness = false
 
 [target.'cfg(windows)'.dev-dependencies]
 tempfile = "3"

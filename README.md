@@ -51,7 +51,9 @@ Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个�
 
 - Windows 10/11：系统级 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，即 Program Files 下的 `PowerShell/7/pwsh.exe`。桌面授权使用原生 Win32 控件，不依赖 WebView2。
 - Linux：`/bin/bash`、systemd；图形授权使用 GTK 3 / WebKitGTK 4.1，向导提权需要 `pkexec`。
-- macOS：系统 `/bin/bash` 与 launchd，兼容 Bash 3.2；预编译包提供 Apple Silicon。
+- macOS：系统 `/bin/bash` 与 launchd，兼容 Bash 3.2；预编译包提供 Apple Silicon。桌面授权使用原生 AppKit 控件，不依赖 WebView / WebKit，也不常驻 Dock。
+
+Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页仍使用浏览器，构建时仍需要 Web 资源。Linux 授权弹窗继续使用 WebKitGTK。
 
 向导负责初始化、安装或修复、旧安装迁移及服务卸载。首次安装后，在两个管理页面完成显式配对：
 
@@ -144,7 +146,9 @@ macOS/Linux 将 `command` 改为 `trustd-stdio` 的绝对路径。默认 endpoin
 
 每种身份分别保留变量、函数、目录与环境。Windows 使用 `pwsh -NoProfile -NonInteractive`，Unix 使用 `/bin/bash --noprofile --norc`。命令交给原生 shell 解析，支持多行、管道、Unicode 和通配符。
 
-命令默认不限时，可显式提供正整数 `timeout_seconds`；超时或取消会关闭整个会话并返回部分输出。普通命令的非零退出码不会关闭会话。可选 `stdin` 是一次性 UTF-8 输入，随后 EOF；没有持续输入、PTY、后台任务或轮询 API。任务调度仍由 Agent 宿主负责。
+命令默认不限时，可显式提供正整数 `timeout_seconds`；超时只中断本次执行及其新建子进程，返回部分输出，保留会话、变量、函数、目录和环境。超时前已经发生的操作不会回滚。显式取消仍关闭整个会话。若 shell 无法响应中断并恢复协议，会返回 `session_ended_reason: "shell_unresponsive"`，不能继续复用该会话。普通命令的非零退出码不会关闭会话。
+
+执行命令时不要使用 `exit`：它会退出整个持久 shell，并使会话失效。要结束当前脚本，可在 PowerShell 或 Bash 的当前执行脚本中使用 `return`；如需测试退出码，在独立子进程中执行。可选 `stdin` 是一次性 UTF-8 输入，随后 EOF；没有持续输入、PTY、后台任务或轮询 API。任务调度仍由 Agent 宿主负责。
 
 响应包含独立的 `stdout` / `stderr`、实际 `identity`、退出码、耗时、目录和会话结束原因。仅凭 stderr 非空不能判断失败。Windows 通过 Job Object 回收进程树；Unix 回收可追踪后代与原进程组，不保证回收已彻底脱离并被重新托管的 daemon。
 

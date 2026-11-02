@@ -1,4 +1,4 @@
-//! Manual native-WebView smoke test. This does not start a daemon, create a
+//! Manual desktop smoke test (Win32 / AppKit / Linux WebView). This does not start a daemon, create a
 //! shell or grant access; it only prints the choice made in a test window.
 use localshelld::{consent::Prompt, desktop::Desktop};
 
