@@ -10,6 +10,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:mcp": "cargo build --manifest-path ../Cargo.toml --bin trustd-stdio && node --test tests/mcp/stdio.test.mjs",
     "test:e2e": "cargo build --manifest-path ../Cargo.toml -p localshelld-sync-server && playwright test"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@playwright/test": "^1.56.0",
     "@trivago/prettier-plugin-sort-imports": "^5.2.2",
     "@types/node": "^22.18.0",

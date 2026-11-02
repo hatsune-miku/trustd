@@ -111,6 +111,83 @@ async fn call(adapter: &Adapter, params: Value) -> Result<Value> {
 }
 
 #[test]
+fn field_projection_omits_missing_null_and_empty_required_without_losing_properties() {
+    let mut minimal = json!({"type":"object"});
+    remove_field(&mut minimal, "handle");
+    assert_eq!(minimal, json!({"type":"object"}));
+
+    for required in [
+        None,
+        Some(json!(null)),
+        Some(json!([])),
+        Some(json!(["handle"])),
+    ] {
+        let mut schema = json!({
+            "type":"object",
+            "properties":{"handle":{"type":"string"},"key":{"type":"string"}},
+            "additionalProperties":false
+        });
+        if let Some(required) = required {
+            schema["required"] = required;
+        }
+        remove_field(&mut schema, "handle");
+        remove_field(&mut schema, "token");
+        assert_eq!(
+            schema,
+            json!({
+                "type":"object","properties":{"key":{"type":"string"}},"additionalProperties":false
+            })
+        );
+    }
+
+    let mut schema = json!({
+        "type":"object",
+        "properties":{"handle":{"type":"string"},"key":{"type":"string"}},
+        "required":["handle","key"],"additionalProperties":false
+    });
+    remove_field(&mut schema, "handle");
+    remove_field(&mut schema, "token");
+    assert_eq!(
+        schema,
+        json!({
+            "type":"object","properties":{"key":{"type":"string"}},
+            "required":["key"],"additionalProperties":false
+        })
+    );
+}
+
+#[test]
+fn all_transport_schemas_omit_empty_required_and_require_only_declared_fields() {
+    let mut definitions = vec![crate::mcp_text::tool_definitions()];
+    for token in [None, Some(Zeroizing::new("fixture-token".into()))] {
+        definitions.push(
+            Adapter::new("127.0.0.1:1".parse().unwrap(), token)
+                .unwrap()
+                .definitions(),
+        );
+    }
+    for definitions in definitions {
+        for tool in definitions.as_array().unwrap() {
+            for name in ["inputSchema", "outputSchema"] {
+                let schema = &tool[name];
+                assert_eq!(schema["type"], "object");
+                let properties = schema["properties"].as_object().unwrap();
+                if let Some(required) = schema.get("required") {
+                    let required = required.as_array().expect("required must never be null");
+                    assert!(!required.is_empty(), "empty required must be omitted");
+                    for key in required {
+                        assert!(
+                            properties
+                                .contains_key(key.as_str().expect("required contains strings"))
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn no_bearer_fields_or_remote_endpoint_in_model_contract() {
     for token in [None, Some(Zeroizing::new("private-token".into()))] {
         let adapter = Adapter::new("127.0.0.1:32120".parse().unwrap(), token).unwrap();
