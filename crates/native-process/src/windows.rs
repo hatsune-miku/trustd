@@ -283,6 +283,84 @@ pub struct Child {
     pub id: u32,
 }
 impl Child {
+    /// Snapshot this contained shell's children without including the shell.
+    pub fn child_ids(&self) -> io::Result<Vec<u32>> {
+        let mut capacity = 32;
+        loop {
+            let mut buffer = vec![0usize; capacity + 2];
+            // SAFETY: usize storage has the required alignment and capacity;
+            // the OS fills the variable-sized process ID list in this buffer.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * size_of::<usize>()) as u32,
+                    null_mut(),
+                )
+            };
+            if ok == 0 {
+                if io::Error::last_os_error().raw_os_error() == Some(ERROR_MORE_DATA as i32)
+                    && capacity < 1_048_576
+                {
+                    capacity *= 2;
+                    continue;
+                }
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful query initialized the list header and IDs.
+            let list = unsafe { &*buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+            let ids = unsafe {
+                std::slice::from_raw_parts(
+                    list.ProcessIdList.as_ptr(),
+                    list.NumberOfProcessIdsInList as usize,
+                )
+            };
+            return Ok(ids
+                .iter()
+                .map(|id| *id as u32)
+                .filter(|id| *id != self.id)
+                .collect());
+        }
+    }
+
+    /// End only processes created by this command, retaining the persistent
+    /// shell and any children that existed before this execution started.
+    pub fn kill_command_children(&self, before: &[u32]) -> io::Result<()> {
+        for pid in self.child_ids()? {
+            if before.contains(&pid) {
+                continue;
+            }
+            // SAFETY: open a stable process handle, then verify containment to
+            // avoid terminating an unrelated process if a PID was recycled.
+            let Ok(process) = own(unsafe {
+                OpenProcess(
+                    PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                    0,
+                    pid,
+                )
+            }) else {
+                continue;
+            };
+            let mut contained = 0;
+            if unsafe {
+                IsProcessInJob(
+                    process.as_raw_handle(),
+                    self.job.as_raw_handle(),
+                    &mut contained,
+                )
+            } != 0
+                && contained != 0
+            {
+                unsafe {
+                    TerminateProcess(process.as_raw_handle(), 130);
+                    WaitForSingleObject(process.as_raw_handle(), 1000);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn try_wait(&self) -> io::Result<Option<i32>> {
         match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } {
             WAIT_TIMEOUT => Ok(None),

@@ -175,12 +175,27 @@ impl Process {
             return Err(ShellError::Ended);
         }
         let started = Instant::now();
+        #[cfg(windows)]
+        let prior_children = match &self.child {
+            Child::Windows(child) => child.child_ids().map_err(ShellError::Io)?,
+            Child::Native(_) => Vec::new(),
+        };
+        #[cfg(unix)]
+        let prior_children = if options.timeout_seconds.is_some() {
+            match self.pgid {
+                Some(pid) => descendant_pids(pid as u32).await,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
         let mut random = [0u8; 18];
         OsRng.fill_bytes(&mut random);
         let marker = STANDARD.encode(random);
         // Bash redirects stdin from a private file owned by this daemon. The
         // handle remains here so timeout/cancellation always removes the file.
         let mut input_file = None;
+        let mut command_file = None;
         let packet = match self.kind {
             ShellKind::PowerShell => format!(
                 "{marker}|{}|{}\n",
@@ -194,10 +209,29 @@ impl Process {
                     .map_err(ShellError::Io)?;
                 let path = encode_bash_command(&file.path().to_string_lossy());
                 input_file = Some(file);
-                format!("{marker}|{}|{path}\n", encode_bash_command(command))
+                let mut script = tempfile::NamedTempFile::new().map_err(ShellError::Io)?;
+                // eval parses the complete source before executing it, while
+                // the sourced wrapper supplies the interrupt/return boundary.
+                let source = format!("builtin eval -- '{}'\n", command.replace('\'', "'\\''"));
+                script
+                    .write_all(source.as_bytes())
+                    .map_err(ShellError::Io)?;
+                let script_path = encode_bash_command(&script.path().to_string_lossy());
+                command_file = Some(script);
+                format!("{marker}|{script_path}|{path}\n")
             }
         };
         let mut capture = Capture::new(&marker, self.max_output_bytes);
+        // Complete the protocol packet before a timeout can send an interrupt.
+        // A partial packet followed by a control line would corrupt framing.
+        tokio::select! {
+            biased;
+            _ = cancelled.changed() => return Err(ShellError::Ended),
+            result = async {
+                self.stdin.write_all(packet.as_bytes()).await?;
+                self.stdin.flush().await
+            } => result.map_err(ShellError::Io)?,
+        }
         let deadline = options
             .timeout_seconds
             .and_then(|seconds| started.checked_add(Duration::from_secs(seconds)));
@@ -205,16 +239,42 @@ impl Process {
             biased;
             _ = cancelled.changed() => Ok(Some("cancelled")),
             _ = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await } else { std::future::pending::<()>().await } } => Ok(Some("timeout")),
-            result = self.execute_inner(&packet, &mut capture) => result.map(|ended| if ended { Some("shell_exited") } else { None }),
+            result = self.read_response(&mut capture) => result.map(|ended| if ended { Some("shell_exited") } else { None }),
         };
-        let ended_reason = result?;
+        let mut ended_reason = result?;
+        let timed_out = ended_reason == Some("timeout");
+        if timed_out {
+            self.interrupt(&marker, &prior_children).await?;
+            // Reuse only a shell that has acknowledged this exact command's
+            // end on both streams. Never feed a new command into a busy shell.
+            ended_reason = tokio::select! {
+                biased;
+                _ = cancelled.changed() => Some("cancelled"),
+                result = tokio::time::timeout(Duration::from_secs(5), self.read_response(&mut capture)) => {
+                    match result {
+                        Ok(Ok(false)) => None,
+                        Ok(Ok(true)) => Some("shell_exited"),
+                        _ => Some("shell_unresponsive"),
+                    }
+                }
+            };
+            #[cfg(windows)]
+            if let Child::Windows(child) = &self.child {
+                // First stop the interpreter; killing a foreground process
+                // before BeginStop could let the next statement run normally.
+                child
+                    .kill_command_children(&prior_children)
+                    .map_err(ShellError::Io)?;
+            }
+        }
         if ended_reason.is_some() {
             self.terminate().await;
             // Draining after termination captures output already in OS pipes.
             let _ = tokio::time::timeout(Duration::from_secs(1), self.drain(&mut capture)).await;
         }
         drop(input_file);
-        let exit_code = if ended_reason == Some("timeout") || ended_reason == Some("cancelled") {
+        drop(command_file);
+        let exit_code = if timed_out || ended_reason == Some("cancelled") {
             None
         } else {
             capture
@@ -229,14 +289,12 @@ impl Process {
             stdout,
             stderr,
             exit_code,
-            success: ended_reason != Some("timeout")
-                && ended_reason != Some("cancelled")
-                && exit_code == Some(0),
+            success: !timed_out && ended_reason != Some("cancelled") && exit_code == Some(0),
             truncated: stdout_truncated || stderr_truncated,
             stdout_truncated,
             stderr_truncated,
             duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            timed_out: ended_reason == Some("timeout"),
+            timed_out,
             session_alive: ended_reason.is_none(),
             session_ended: ended_reason.is_some(),
             session_ended_reason: ended_reason.map(str::to_owned),
@@ -244,16 +302,39 @@ impl Process {
             identity: self.identity.clone(),
         })
     }
-    async fn execute_inner(
-        &mut self,
-        packet: &str,
-        capture: &mut Capture,
-    ) -> Result<bool, ShellError> {
-        self.stdin
-            .write_all(packet.as_bytes())
-            .await
-            .map_err(ShellError::Io)?;
-        self.stdin.flush().await.map_err(ShellError::Io)?;
+    async fn interrupt(&mut self, marker: &str, _prior_children: &[u32]) -> Result<(), ShellError> {
+        match self.kind {
+            ShellKind::PowerShell => {
+                self.stdin
+                    .write_all(format!("!{marker}\n").as_bytes())
+                    .await
+                    .map_err(ShellError::Io)?;
+                self.stdin.flush().await.map_err(ShellError::Io)?;
+            }
+            ShellKind::Bash => {
+                #[cfg(unix)]
+                if let Some(pid) = self.pgid.and_then(rustix::process::Pid::from_raw) {
+                    // Snapshot before interrupting: completion framing itself
+                    // uses short-lived helpers which must not be killed.
+                    let descendants = descendant_pids(pid.as_raw_pid() as u32).await;
+                    rustix::process::kill_process(pid, rustix::process::Signal::INT)
+                        .map_err(|error| ShellError::Io(error.into()))?;
+                    kill_pids(
+                        descendants
+                            .into_iter()
+                            .filter(|pid| !_prior_children.contains(pid))
+                            .collect(),
+                    );
+                }
+                #[cfg(not(unix))]
+                return Err(ShellError::Rejected(
+                    "Bash interruption requires a Unix host",
+                ));
+            }
+        }
+        Ok(())
+    }
+    async fn read_response(&mut self, capture: &mut Capture) -> Result<bool, ShellError> {
         let mut out = [0u8; 8192];
         let mut err = [0u8; 8192];
         loop {
@@ -410,6 +491,11 @@ impl Capture {
 
 #[cfg(unix)]
 async fn kill_descendants(root: u32) {
+    kill_pids(descendant_pids(root).await);
+}
+
+#[cfg(unix)]
+async fn descendant_pids(root: u32) -> Vec<u32> {
     // Capture ancestry before killing the parent. Also handles children that
     // created another process group; the original group is killed separately.
     let Ok(output) = Command::new("/bin/ps")
@@ -417,10 +503,10 @@ async fn kill_descendants(root: u32) {
         .output()
         .await
     else {
-        return;
+        return Vec::new();
     };
     if !output.status.success() {
-        return;
+        return Vec::new();
     }
     let pairs: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -440,7 +526,12 @@ async fn kill_descendants(root: u32) {
         }
         cursor += 1;
     }
-    for pid in descendants.into_iter().skip(1).rev() {
+    descendants.into_iter().skip(1).rev().collect()
+}
+
+#[cfg(unix)]
+fn kill_pids(pids: Vec<u32>) {
+    for pid in pids {
         if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
