@@ -130,7 +130,9 @@ async fn timeout_retains_partial_output_and_preserves_session() {
     );
     let result = shell.execute(&command, Some(1)).await.unwrap();
     assert_eq!(result.stdout, "partial-out");
-    assert_eq!(result.stderr, "partial-err");
+    // Bash 3.2 also reports the foreground child's SIGKILL on stderr. Preserve
+    // that native diagnostic as well as the command's output before timeout.
+    assert!(result.stderr.starts_with("partial-err"), "{result:?}");
     assert!(result.timed_out && !result.session_ended && result.session_alive);
     assert!(!result.success);
     assert_eq!(result.exit_code, None);
