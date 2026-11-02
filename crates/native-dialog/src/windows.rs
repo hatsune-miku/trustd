@@ -10,6 +10,7 @@ use std::{
     time::Instant,
 };
 
+use crate::{Choice, Event, Outcome, Request, types::Completion};
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
@@ -56,38 +57,6 @@ const NOTE: i32 = 108;
 const REMEMBER: i32 = 109;
 const SECRETS_LABEL: i32 = 110;
 const SECRETS: i32 = 111;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice {
-    Accept,
-    Deny,
-    Ignore,
-}
-
-#[derive(Debug)]
-pub struct Outcome {
-    pub choice: Choice,
-    pub remember: bool,
-    pub note: String,
-}
-
-type Completion = Box<dyn FnOnce(Outcome) + Send>;
-
-pub struct Request {
-    pub id: String,
-    pub agent: String,
-    pub reason: String,
-    pub scope: String,
-    pub secret_keys: Vec<String>,
-    pub deadline: Instant,
-    pub complete: Completion,
-}
-
-pub enum Event {
-    Show(Request),
-    Close(String),
-    Stop(i32),
-}
 
 struct Mailbox {
     // Never dereferenced on worker threads. PostMessage is Windows' supported

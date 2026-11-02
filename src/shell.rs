@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_timeout_destroys_session_but_has_no_server_maximum() {
+    async fn explicit_timeout_preserves_session_and_state_without_a_server_maximum() {
         for (kind, path) in backends() {
             let shell = Shell::spawn_kind(kind, &path, 1024).await.unwrap();
             assert!(
@@ -469,6 +469,9 @@ mod tests {
                     .unwrap()
                     .success
             );
+            run(&shell, source(kind,
+                "$timeout_value='retained'; $env:TIMEOUT_VALUE='environment'; function timeout_function { 'function' }; Set-Location src",
+                "timeout_value=retained; export TIMEOUT_VALUE=environment; timeout_function() { echo function; }; cd src")).await;
             let result = shell
                 .execute(
                     source(
@@ -480,9 +483,57 @@ mod tests {
                 )
                 .await;
             let result = result.unwrap();
-            assert!(result.timed_out && result.session_ended && !result.session_alive);
-            assert_eq!(result.session_ended_reason.as_deref(), Some("timeout"));
-            assert!(shell.execute("echo invalid", None).await.is_err());
+            assert!(
+                result.timed_out && !result.session_ended && result.session_alive,
+                "{kind:?}: {result:?}"
+            );
+            assert_eq!(result.session_ended_reason, None);
+            assert_eq!(result.exit_code, None);
+            let next = run(&shell, source(kind,
+                "\"$timeout_value/$env:TIMEOUT_VALUE\"; timeout_function; (Get-Location).Path",
+                "printf '%s/%s\\n' \"$timeout_value\" \"$TIMEOUT_VALUE\"; timeout_function; pwd")).await;
+            assert!(
+                next.success
+                    && next.stdout.contains("retained/environment")
+                    && next.stdout.contains("function")
+                    && next.stdout.contains("src"),
+                "{kind:?}: {next:?}"
+            );
+            shell.terminate().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_allows_already_queued_commands_to_use_the_same_shell() {
+        for (kind, path) in backends() {
+            let shell = Arc::new(Shell::spawn_kind(kind, &path, 1024).await.unwrap());
+            run(&shell, "echo ready").await;
+            let running =
+                {
+                    let shell = Arc::clone(&shell);
+                    tokio::spawn(async move {
+                        shell.execute(source(kind,
+                        "$queued_state='retained'; Start-Sleep -Seconds 60; 'must-not-run'",
+                        "queued_state=retained; sleep 60; echo must-not-run"), Some(1)).await
+                    })
+                };
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let queued = shell.execute(
+                source(kind, "$queued_state", "echo \"$queued_state\""),
+                Some(1),
+            );
+            let next = tokio::time::timeout(Duration::from_secs(8), queued)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                next.success && next.stdout.trim() == "retained",
+                "{kind:?}: {next:?}"
+            );
+            let timed_out = running.await.unwrap().unwrap();
+            assert!(timed_out.timed_out && timed_out.session_alive);
+            assert!(!timed_out.stdout.contains("must-not-run"));
+            shell.terminate().await;
         }
     }
 

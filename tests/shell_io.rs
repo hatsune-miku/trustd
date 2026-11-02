@@ -121,7 +121,7 @@ async fn powershell_errors_still_fail_after_error_history_is_full() {
 }
 
 #[tokio::test]
-async fn timeout_retains_partial_output_and_explains_session_loss() {
+async fn timeout_retains_partial_output_and_preserves_session() {
     let shell = shell().await;
     shell.execute("echo ready", Some(10)).await.unwrap();
     let command = script(
@@ -131,12 +131,74 @@ async fn timeout_retains_partial_output_and_explains_session_loss() {
     let result = shell.execute(&command, Some(1)).await.unwrap();
     assert_eq!(result.stdout, "partial-out");
     assert_eq!(result.stderr, "partial-err");
-    assert!(result.timed_out && result.session_ended && !result.session_alive);
+    assert!(result.timed_out && !result.session_ended && result.session_alive);
     assert!(!result.success);
     assert_eq!(result.exit_code, None);
-    assert_eq!(result.session_ended_reason.as_deref(), Some("timeout"));
+    assert_eq!(result.session_ended_reason, None);
     assert!(result.duration_ms >= 900);
-    assert!(shell.execute("echo never", Some(10)).await.is_err());
+    assert!(
+        shell
+            .execute("echo still-alive", Some(10))
+            .await
+            .unwrap()
+            .success
+    );
+    shell.terminate().await;
+}
+
+#[tokio::test]
+async fn native_command_timeout_never_runs_the_remaining_statements() {
+    let shell = shell().await;
+    shell.execute("echo ready", Some(10)).await.unwrap();
+    let result = shell.execute(&script(
+        "pwsh -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 60'; 'must-not-run'",
+        "sleep 60; echo must-not-run",
+    ), Some(1)).await.unwrap();
+    assert!(result.timed_out && result.session_alive, "{result:?}");
+    assert!(!result.stdout.contains("must-not-run"));
+    assert!(
+        shell
+            .execute("echo recovered", Some(10))
+            .await
+            .unwrap()
+            .success
+    );
+    shell.terminate().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn command_timeout_does_not_kill_children_from_previous_commands() {
+    let shell = shell().await;
+    let child = shell
+        .execute(
+            r#"
+$info = [Diagnostics.ProcessStartInfo]::new('pwsh')
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+$info.ArgumentList.Add('-NoProfile')
+$info.ArgumentList.Add('-NonInteractive')
+$info.ArgumentList.Add('-Command')
+$info.ArgumentList.Add('Start-Sleep -Seconds 60')
+$priorChild = [Diagnostics.Process]::Start($info)
+$priorChild.Id
+"#,
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert!(child.success);
+    let timeout = shell
+        .execute("Start-Sleep -Seconds 30", Some(1))
+        .await
+        .unwrap();
+    assert!(timeout.timed_out && timeout.session_alive);
+    let previous = shell
+        .execute("$priorChild.Refresh(); $priorChild.HasExited", Some(10))
+        .await
+        .unwrap();
+    assert_eq!(previous.stdout.trim(), "False");
+    shell.terminate().await;
 }
 
 #[cfg(windows)]
@@ -185,7 +247,12 @@ $child = [Diagnostics.Process]::Start($childInfo)
             .map(|line| line.trim().parse().unwrap())
             .collect();
         assert_eq!(pids.len(), 2, "child and grandchild PIDs must be captured");
-        shell.terminate().await;
+        if !timeout {
+            shell.terminate().await;
+        } else {
+            assert!(result.session_alive && !result.session_ended);
+            assert!(shell.execute("echo next", Some(10)).await.unwrap().success);
+        }
         let output = localshelld::process::background_command("pwsh")
             .args([
                 "-NoProfile",
@@ -200,7 +267,8 @@ $child = [Diagnostics.Process]::Start($childInfo)
             .unwrap();
         assert!(
             output.status.success(),
-            "descendants {pids:?} survived session teardown (timeout={timeout})"
+            "descendants {pids:?} survived command timeout or teardown (timeout={timeout})"
         );
+        shell.terminate().await;
     }
 }

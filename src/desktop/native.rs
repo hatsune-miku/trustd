@@ -69,7 +69,7 @@ impl Desktop {
     }
 
     pub fn run(self) -> ! {
-        // EventLoop drops every HWND and GDI resource before returning. Tokio
+        // EventLoop drops every platform window before returning. Tokio
         // has already finished server shutdown before invoking stop_callback.
         std::process::exit(self.0.run());
     }

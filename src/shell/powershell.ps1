@@ -10,8 +10,14 @@ if (Test-Path Env:LOCALSHELLD_INITIAL_PATH) {
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
+using System.Collections.Concurrent;
+using System.Globalization;
+using System.Management.Automation;
+using System.Management.Automation.Host;
+using System.Management.Automation.Runspaces;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 public sealed class LocalshelldInput : IDisposable {
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int kind);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int kind, IntPtr handle);
@@ -39,17 +45,72 @@ public sealed class LocalshelldInput : IDisposable {
         if (file != null) { file.Dispose(); file = null; }
     }
 }
+// The command pipeline has its own reusable runspace. Stopping one pipeline
+// leaves its variables, functions and location intact for the next command.
+public sealed class LocalshelldHost : PSHost {
+    readonly PSHost parent;
+    public LocalshelldHost(PSHost parent) { this.parent = parent; }
+    public override Guid InstanceId { get; } = Guid.NewGuid();
+    public override string Name => "trustd persistent shell";
+    public override Version Version => new Version(1, 0);
+    public override PSHostUserInterface UI => parent.UI;
+    public override CultureInfo CurrentCulture => parent.CurrentCulture;
+    public override CultureInfo CurrentUICulture => parent.CurrentUICulture;
+    public override void SetShouldExit(int exitCode) { Environment.Exit(exitCode); }
+    public override void EnterNestedPrompt() { throw new NotSupportedException("Interactive prompts are unavailable"); }
+    public override void ExitNestedPrompt() { throw new NotSupportedException("Interactive prompts are unavailable"); }
+    public override void NotifyBeginApplication() { }
+    public override void NotifyEndApplication() { }
+
+    public static void Run(PSHost host, string location, string wrapper) {
+        using var lines = new BlockingCollection<string>(16);
+        var reader = Console.In;
+        var thread = new Thread(() => {
+            try {
+                string line;
+                while ((line = reader.ReadLine()) != null) lines.Add(line);
+            } finally { lines.CompleteAdding(); }
+        });
+        thread.IsBackground = true;
+        thread.Start();
+        using var runspace = RunspaceFactory.CreateRunspace(new LocalshelldHost(host));
+        runspace.Open();
+        runspace.SessionStateProxy.Path.SetLocation(location);
+        foreach (var line in lines.GetConsumingEnumerable()) {
+            // A late interruption must never affect the following command.
+            if (line.StartsWith("!", StringComparison.Ordinal)) continue;
+            var parts = line.Split(new[] { '|' }, 3);
+            if (parts.Length != 3) continue;
+            var marker = parts[0];
+            runspace.SessionStateProxy.SetVariable("__localshelld_s", Encoding.UTF8.GetString(Convert.FromBase64String(parts[1])));
+            runspace.SessionStateProxy.SetVariable("__localshelld_stdin", Convert.FromBase64String(parts[2]));
+            runspace.SessionStateProxy.SetVariable("__localshelld_ec", 130);
+            using var pipeline = PowerShell.Create();
+            pipeline.Runspace = runspace;
+            pipeline.AddScript(wrapper, false);
+            var invocation = pipeline.BeginInvoke();
+            IAsyncResult stopping = null;
+            while (!invocation.IsCompleted) {
+                if (lines.TryTake(out var control, 20) && control == "!" + marker && stopping == null)
+                    stopping = pipeline.BeginStop(null, null);
+            }
+            try { pipeline.EndInvoke(invocation); }
+            catch (PipelineStoppedException) { }
+            if (stopping != null) pipeline.EndStop(stopping);
+            var code = stopping == null ? Convert.ToInt32(runspace.SessionStateProxy.GetVariable("__localshelld_ec")) : 130;
+            var cwd = Convert.ToBase64String(Encoding.UTF8.GetBytes(runspace.SessionStateProxy.Path.CurrentLocation.Path));
+            var frame = "\x1e" + marker + "|" + code + "|" + cwd + "\x1f";
+            Console.Out.Write(frame); Console.Out.Flush();
+            Console.Error.Write(frame); Console.Error.Flush();
+        }
+    }
+}
 '@
-$__localshelld_control = [Console]::In
-while (($__localshelld_line = $__localshelld_control.ReadLine()) -ne $null) {
-    $__localshelld_parts = $__localshelld_line.Split('|', 3)
-    if ($__localshelld_parts.Length -ne 3) { continue }
-    $__localshelld_marker = $__localshelld_parts[0]
+$__localshelld_wrapper = @'
     $__localshelld_ec = 0
     $__localshelld_input = $null
     try {
-        $__localshelld_s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($__localshelld_parts[1]))
-        $__localshelld_input = [LocalshelldInput]::new([Convert]::FromBase64String($__localshelld_parts[2]))
+        $__localshelld_input = [LocalshelldInput]::new($__localshelld_stdin)
         $global:LASTEXITCODE = 0
         $__localshelld_had_error = $false
         $__localshelld_errors = $global:Error.Count
@@ -78,10 +139,5 @@ while (($__localshelld_line = $__localshelld_control.ReadLine()) -ne $null) {
     } finally {
         if ($null -ne $__localshelld_input) { $__localshelld_input.Dispose() }
     }
-    $__localshelld_cwd = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path))
-    $__localshelld_frame = [string][char]30 + $__localshelld_marker + '|' + $__localshelld_ec + '|' + $__localshelld_cwd + [char]31
-    [Console]::Out.Write($__localshelld_frame)
-    [Console]::Out.Flush()
-    [Console]::Error.Write($__localshelld_frame)
-    [Console]::Error.Flush()
-}
+'@
+[LocalshelldHost]::Run($Host, (Get-Location).Path, $__localshelld_wrapper)

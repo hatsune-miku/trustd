@@ -75,6 +75,8 @@ rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+wry = "0.54"
+tao = "0.34"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
@@ -82,12 +84,9 @@ openssl = { version = "0.10", features = ["vendored"] }
 localshelld-native-dialog = { path = "crates/native-dialog" }
 localshelld-native-process = { path = "crates/native-process" }
 
-[target.'cfg(not(windows))'.dependencies]
-wry = "0.54"
-tao = "0.34"
-
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
+localshelld-native-dialog = { path = "crates/native-dialog" }
 
 [dev-dependencies]
 http-body-util = "0.1"

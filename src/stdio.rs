@@ -86,7 +86,7 @@ impl Adapter {
                 }
                 "run" => {
                     entry["description"] = json!(
-                        "Execute in this adapter's authorized session. Explicitly select the execution identity. Variables and working directory persist separately for each identity. No default execution timeout. Cancellation or timeout closes the entire session and its process trees. MCP cancellation works without a handle or transport header. Do not retry commands after an ambiguous transport failure."
+                        "Execute in this adapter's authorized session. Explicitly select the execution identity. Variables and working directory persist separately for each identity. Do not use exit: it exits the persistent shell and invalidates the entire session. No default execution timeout. Timeout interrupts only this command and its new child processes, returns partial output and preserves the session. Explicit cancellation still closes the entire session and its process trees. MCP cancellation works without a handle or transport header. Do not retry commands after an ambiguous transport failure."
                     )
                 }
                 "destroy" => {
