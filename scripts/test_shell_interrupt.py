@@ -12,6 +12,7 @@ import unittest
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
+BASH = os.environ.get("TRUSTD_TEST_BASH", "/bin/bash")
 
 
 class BashSession:
@@ -19,7 +20,7 @@ class BashSession:
         self.temp = tempfile.TemporaryDirectory(prefix="trustd-shell-")
         self.directory = Path(self.temp.name)
         self.child = subprocess.Popen(
-            ["/bin/bash", "--noprofile", "--norc", "-c", (ROOT / "src/shell/bash.sh").read_text()],
+            [BASH, "--noprofile", "--norc", "-c", (ROOT / "src/shell/bash.sh").read_text()],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, cwd=self.directory,
         )
@@ -64,7 +65,7 @@ class BashSession:
         descendants = [self.child.pid]
         for parent in descendants:
             descendants.extend(pid for pid, ppid in pairs if ppid == parent and pid not in descendants)
-        os.kill(self.child.pid, signal.SIGINT)
+        os.kill(self.child.pid, signal.SIGUSR1)
         for pid in reversed(descendants[1:]):
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -93,7 +94,7 @@ class BashInterruptTests(unittest.TestCase):
     def test_timeout_preserves_pid_state_and_skips_remaining_source(self):
         initial_pid = self.shell.child.pid
         for wait in [
-            "while :; do :; done", "sleep 30", "sleep 30 | cat",
+            "while :; do :; done", "sleep 30", "sleep 30 | cat", "(sleep 30)",
             "busy() { while :; do :; done; }; busy",
             "inner() { while :; do :; done; }; outer() { inner; echo WRONG-inner; }; outer",
             "inner() { sleep 30; echo WRONG-inner; }; outer() { inner; echo WRONG-outer; }; outer",
@@ -103,7 +104,8 @@ class BashInterruptTests(unittest.TestCase):
             time.sleep(.15)
             self.shell.interrupt()
             result = self.shell.finish(marker)
-            self.assertEqual(result["stdout"][0], b"partial")
+            self.assertEqual(result["stdout"][0], b"partial", wait)
+            self.assertEqual(result["stdout"][1], 130, wait)
             self.assertNotIn(b"WRONG", result["stdout"][0])
             self.assertIn(b"error", result["stderr"][0])
             next_result = self.shell.finish(self.shell.start("printf '%s/%s\\n' \"$saved\" \"$SAVED_ENV\"; saved_function"))

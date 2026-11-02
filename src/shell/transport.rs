@@ -317,7 +317,9 @@ impl Process {
                     // Snapshot before interrupting: completion framing itself
                     // uses short-lived helpers which must not be killed.
                     let descendants = descendant_pids(pid.as_raw_pid() as u32).await;
-                    rustix::process::kill_process(pid, rustix::process::Signal::INT)
+                    // Bash 3.2 may discard SIGINT if its waited-for child dies
+                    // from SIGKILL; the private USR1 trap reliably unwinds eval.
+                    rustix::process::kill_process(pid, rustix::process::Signal::USR1)
                         .map_err(|error| ShellError::Io(error.into()))?;
                     kill_pids(
                         descendants
