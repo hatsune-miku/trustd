@@ -68,8 +68,10 @@ impl Adapter {
         });
         for entry in entries {
             for schema in ["inputSchema", "outputSchema"] {
-                remove_field(&mut entry[schema], "handle");
-                remove_field(&mut entry[schema], "token");
+                if let Some(schema) = entry.get_mut(schema) {
+                    remove_field(schema, "handle");
+                    remove_field(schema, "token");
+                }
             }
             match entry["name"].as_str().unwrap() {
                 "enter_interactive" => {
@@ -414,11 +416,24 @@ impl Adapter {
 }
 
 fn remove_field(schema: &mut Value, key: &str) {
-    if let Some(properties) = schema["properties"].as_object_mut() {
+    let Some(schema) = schema.as_object_mut() else {
+        return;
+    };
+    // Mutable Value indexing inserts null for missing keys. Projection must not
+    // create schema keywords that were deliberately omitted by the definition.
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         properties.remove(key);
     }
-    if let Some(required) = schema["required"].as_array_mut() {
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
         required.retain(|value| value != key);
+    }
+    // A projection can remove the last required property. Keep one canonical
+    // representation for optional-only schemas, including legacy null values.
+    if schema
+        .get("required")
+        .is_some_and(|value| value.is_null() || value.as_array().is_some_and(Vec::is_empty))
+    {
+        schema.remove("required");
     }
 }
 

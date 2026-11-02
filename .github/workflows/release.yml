@@ -48,6 +48,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - run: cargo test --workspace --all-targets
+      - name: Validate MCP tool schemas with the official TypeScript SDK
+        working-directory: web
+        run: pnpm test:mcp
       - run: cargo build --release
       - name: Verify embedded version
         if: startsWith(github.ref, 'refs/tags/')

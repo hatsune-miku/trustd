@@ -231,6 +231,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 pnpm --dir web format:check
 pnpm --dir web test
+pnpm --dir web test:mcp
 pnpm --dir web test:e2e
 ```
 
