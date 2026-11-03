@@ -98,6 +98,7 @@ class Agent:
         )
         self.counter = 0
         try:
+            self.initialize()
             for _ in range(100):
                 agents = request(policy_base, "/v1/admin/agents", session=session)["agents"]
                 agent = next((a for a in agents if any(p["pid"] == self.process.pid for p in a["processes"])), None)
@@ -116,15 +117,30 @@ class Agent:
             self.close()
             raise
 
-    def call(self, name, arguments=None):
+    def initialize(self):
+        response = self.rpc("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "trustd-ci", "version": "1"},
+        })
+        assert "error" not in response, response
+        assert response["result"]["protocolVersion"] == "2025-06-18", response
+        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        self.process.stdin.flush()
+
+    def rpc(self, method, params):
         self.counter += 1
         self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.counter,
-                                            "method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}) + "\n")
+                                            "method": method, "params": params}) + "\n")
         self.process.stdin.flush()
         assert select.select([self.process.stdout], [], [], 75)[0], "stdio request timed out"
         line = self.process.stdout.readline()
         assert line, "stdio terminated without a response"
-        return json.loads(line)
+        response = json.loads(line)
+        assert response.get("id") == self.counter, response
+        return response
+
+    def call(self, name, arguments=None):
+        return self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
 
     def enter(self):
         response = self.call("enter_interactive", {"agent_name": "untrusted display name",
