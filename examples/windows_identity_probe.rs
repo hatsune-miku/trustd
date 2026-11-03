@@ -1,4 +1,5 @@
-//! Manual two-account smoke test. `hold <directory>` runs as the ordinary user;
+//! Manual two-account smoke test. `hold <directory>` runs as the login user,
+//! automatically reducing an elevated interactive launch before publishing it;
 //! `verify <directory>` runs as SYSTEM. No services, accounts or registry values
 //! are created/modified. The JSON environment stays in the temporary directory.
 #[cfg(not(windows))]
@@ -17,6 +18,15 @@ fn main() -> anyhow::Result<()> {
     let context_file = directory.join("user-context.json");
     match mode.as_str() {
         "hold" => {
+            if let Some(status) = localshelld_native_process::relaunch_as_user_if_elevated()? {
+                anyhow::ensure!(status == 0, "restricted identity probe failed ({status})");
+                return Ok(());
+            }
+            localshelld_native_process::restrict_path(
+                &directory,
+                true,
+                localshelld_native_process::FileAccess::Private,
+            )?;
             let context = current_user_context()?;
             std::fs::write(&context_file, serde_json::to_vec(&context)?)?;
             println!("ready");

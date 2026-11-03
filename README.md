@@ -45,7 +45,11 @@ Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个�
 | macOS | 双击 `INSTALL.command` |
 | Linux | 在解压目录运行 `./INSTALL.sh` |
 
-包内 `START-HERE.txt` 提供简短说明。四个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。以普通登录用户运行，向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit 授权。
+包内 `START-HERE.txt` 提供简短说明。四个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit 授权。Windows 也支持登录 Administrator 后直接运行，或使用同一账号“以管理员身份运行”；已经提权时不再重复请求 UAC。macOS 和 Linux 仍应从普通登录用户启动。
+
+Windows 用户服务始终以同一账号的普通权限运行。内置 Administrator 或关闭 UAC 的系统可能忽略计划任务的最低权限设置，此时 `trustd-user` 会先移除管理员权限、降至 Medium 完整性级别，再启动实际服务；高权限父进程只负责生命周期管理，不提供执行接口。显式 `as-administrator` 请求仍须经配对授权，并校验账号、会话和登录身份。
+
+执行身份中的 `elevated` 保留 Windows 原始令牌标志；受限令牌可能继承该标志。`restricted_user: true` 表示已核验管理员组为 deny-only、特权已移除且完整性为 Medium，不具备管理员执行权限。
 
 前置条件：
 

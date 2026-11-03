@@ -30,7 +30,7 @@ pub fn is_elevated() -> Result<bool> {
     }
     #[cfg(windows)]
     {
-        Ok(localshelld_native_process::current_identity()?.elevated)
+        Ok(localshelld_native_process::current_identity()?.has_elevated_rights())
     }
 }
 
@@ -43,12 +43,22 @@ pub fn require_user() -> Result<()> {
 }
 
 pub fn user(config: Option<PathBuf>, headless: bool) -> Result<()> {
-    require_user()?;
     #[cfg(windows)]
     if !headless {
         localshelld_native_dialog::detach_owned_console()
             .context("failed to detach the user daemon's standalone console")?;
     }
+    #[cfg(windows)]
+    if let Some(status) = localshelld_native_process::relaunch_as_user_if_elevated()
+        .context("could not start the non-elevated user daemon")?
+    {
+        ensure!(
+            status == 0,
+            "non-elevated user daemon exited with code {status}"
+        );
+        return Ok(());
+    }
+    require_user()?;
     logging();
     let path = config.map_or_else(user_config_path, Ok)?;
     let runtime = tokio::runtime::Runtime::new()?;
