@@ -288,15 +288,9 @@ async fn password_update_is_atomic_accepts_empty_and_invalidates_management_sess
         call(&app, "/v1/admin/settings", None, None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let (_, issued) = call(
-        &app,
-        "/v1/admin/tokens/issue",
-        Some(json!({})),
-        Some(&session),
-    )
-    .await;
+    let execution = state.auth.lock().await.issue_token(None).unwrap().0;
     assert_eq!(
-        call(&app, "/v1/admin/settings", None, issued["token"].as_str())
+        call(&app, "/v1/admin/settings", None, Some(&execution))
             .await
             .0,
         StatusCode::UNAUTHORIZED
@@ -338,14 +332,7 @@ async fn password_update_is_atomic_accepts_empty_and_invalidates_management_sess
             })
             .is_err()
     );
-    assert!(
-        state
-            .auth
-            .lock()
-            .await
-            .verify_token(issued["token"].as_str().unwrap())
-            .is_ok()
-    );
+    assert!(state.auth.lock().await.verify_token(&execution).is_ok());
 }
 
 #[tokio::test]
@@ -427,19 +414,26 @@ async fn totp_enrollment_requires_confirmation_then_can_be_disabled() {
 }
 
 #[tokio::test]
-async fn remembered_reset_is_authenticated_and_persisted() {
+async fn agent_policy_is_authenticated_versioned_and_persisted() {
     let directory = tempfile::tempdir().unwrap();
     let state = stored_state(directory.path());
-    state
+    let identity = crate::agents::tests::current_identity();
+    crate::agents::tests::save_policy(&state, &identity, localshelld_telegram::agents::Policy::Ask)
+        .await;
+    let id = state
         .settings
         .lock()
         .await
         .saved
-        .remembered
-        .insert("agent".into(), true);
+        .agent_policies
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let change = json!({"id":id,"policy":"trust","revision":1,"command_id":"management-test"});
     let app = router(state.clone());
     assert_eq!(
-        call(&app, "/v1/admin/remembered/reset", Some(json!({})), None)
+        call(&app, "/v1/admin/agents/policy", Some(change.clone()), None)
             .await
             .0,
         StatusCode::UNAUTHORIZED
@@ -447,16 +441,28 @@ async fn remembered_reset_is_authenticated_and_persisted() {
     let session = login(&app, "test").await;
     let (status, result) = call(
         &app,
-        "/v1/admin/remembered/reset",
-        Some(json!({})),
+        "/v1/admin/agents/policy",
+        Some(change),
         Some(&session),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(result["cleared"], 1);
+    assert_eq!(result["saved"], true);
     let saved: crate::settings::SavedSettings =
         crate::storage::load_json(&directory.path().join("config.authorization.json")).unwrap();
-    assert!(saved.remembered.is_empty());
+    assert_eq!(
+        saved.agent_policies[&id].policy,
+        localshelld_telegram::agents::Policy::Trust
+    );
+    let (status, listed) = call(&app, "/v1/admin/agents", None, Some(&session)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["path"] == identity.path)
+    );
 }
 
 #[tokio::test]

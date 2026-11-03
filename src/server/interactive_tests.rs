@@ -5,6 +5,18 @@ use serde_json::json;
 use super::*;
 use crate::consent::DesktopEvent;
 
+async fn enter_identified(state: &AppState, reason: &str, keys: &[String]) -> serde_json::Value {
+    state
+        .enter_interactive_for_agent(
+            "agent",
+            reason,
+            keys,
+            Some(crate::agents::tests::current_identity()),
+        )
+        .await
+        .unwrap()
+}
+
 fn desktop_state(choice: Choice, remember: bool) -> (AppState, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
@@ -35,10 +47,7 @@ fn desktop_state(choice: Choice, remember: bool) -> (AppState, Arc<AtomicUsize>)
 #[tokio::test]
 async fn accepted_and_remembered_results_are_neutral_and_executable() {
     let (state, calls) = desktop_state(Choice::Accept, true);
-    let first = state
-        .enter_interactive("agent", "exact <reason>\nsecond line")
-        .await
-        .unwrap();
+    let first = enter_identified(&state, "exact <reason>\nsecond line", &[]).await;
     assert_eq!(first["status"], "authorized");
     assert_eq!(first["btw"], "user note");
     assert!(first.get("token").is_none());
@@ -52,16 +61,13 @@ async fn accepted_and_remembered_results_are_neutral_and_executable() {
             .output
             .contains("consent-ok")
     );
-    let second = state
-        .enter_interactive("agent", "exact <reason>\nsecond line")
-        .await
-        .unwrap();
+    let second = enter_identified(&state, "exact <reason>\nsecond line", &[]).await;
     assert_eq!(second["status"], "authorized");
     assert_eq!(second["btw"], "");
     assert_eq!(second["message"], first["message"]);
     assert!(second.get("automatic").is_none());
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    state.settings.lock().await.saved.remembered.clear();
+    state.settings.lock().await.saved.agent_policies.clear();
     state
         .enter_interactive("agent", "exact <reason>\nsecond line")
         .await
@@ -71,7 +77,7 @@ async fn accepted_and_remembered_results_are_neutral_and_executable() {
 }
 
 #[tokio::test]
-async fn remembered_denial_is_explicit_and_never_creates_a_token() {
+async fn unidentified_denial_is_neutral_and_never_creates_a_session() {
     let (state, calls) = desktop_state(Choice::Deny, true);
     let first = state
         .enter_interactive("agent", "exact <reason>\nsecond line")
@@ -81,11 +87,11 @@ async fn remembered_denial_is_explicit_and_never_creates_a_token() {
         .enter_interactive("agent", "exact <reason>\nsecond line")
         .await
         .unwrap();
-    assert_eq!(first["automatic"], false);
+    assert!(first.get("automatic").is_none());
     assert_eq!(first["btw"], "user note");
-    assert_eq!(second["automatic"], true);
+    assert!(second.get("automatic").is_none());
     assert_eq!(second["status"], "denied");
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert!(state.auth.lock().await.list().is_empty());
     assert!(state.sessions.lock().await.by_handle.is_empty());
 }
@@ -103,7 +109,7 @@ async fn ignoring_waits_exactly_sixty_seconds_and_does_not_remember() {
         result,
         json!({"status":"timed_out","timeout_ms":60_000,"btw":"user note"})
     );
-    assert!(state.settings.lock().await.saved.remembered.is_empty());
+    assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     assert!(state.auth.lock().await.list().is_empty());
 }
 
@@ -126,7 +132,7 @@ async fn browser_cannot_submit_desktop_approval_and_mcp_checks_required_fields()
 }
 
 #[tokio::test]
-async fn remembered_shell_approval_does_not_silently_authorize_new_credentials() {
+async fn path_trust_is_unconditional_for_future_requested_credentials() {
     let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = prompts.clone();
     let (mut state, _) = desktop_state(Choice::Accept, true);
@@ -142,13 +148,6 @@ async fn remembered_shell_approval_does_not_silently_authorize_new_credentials()
         Ok(())
     }));
     state
-        .settings
-        .lock()
-        .await
-        .saved
-        .remembered
-        .insert("agent".into(), true);
-    state
         .put_secret("JENKINS_CI_TOKEN", "fixture-jenkins")
         .await
         .unwrap();
@@ -156,33 +155,19 @@ async fn remembered_shell_approval_does_not_silently_authorize_new_credentials()
         .put_secret("OPENAI_API_KEY", "fixture-openai")
         .await
         .unwrap();
-    let first = state
-        .enter_interactive_with_secrets("agent", "build", &["JENKINS_CI_TOKEN".into()])
-        .await
-        .unwrap();
+    let first = enter_identified(&state, "build", &["JENKINS_CI_TOKEN".into()]).await;
     assert_eq!(first["secret_keys"], json!(["JENKINS_CI_TOKEN"]));
     assert!(!first.to_string().contains("fixture-jenkins"));
     assert_eq!(prompts.lock().unwrap().len(), 1);
-    state
-        .enter_interactive_with_secrets("agent", "build again", &["JENKINS_CI_TOKEN".into()])
-        .await
-        .unwrap();
+    enter_identified(&state, "build again", &["JENKINS_CI_TOKEN".into()]).await;
     assert_eq!(prompts.lock().unwrap().len(), 1);
-    state
-        .enter_interactive_with_secrets(
-            "agent",
-            "also use OpenAI",
-            &["OPENAI_API_KEY".into(), "JENKINS_CI_TOKEN".into()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        *prompts.lock().unwrap(),
-        vec![
-            vec!["JENKINS_CI_TOKEN"],
-            vec!["JENKINS_CI_TOKEN", "OPENAI_API_KEY"]
-        ]
-    );
+    enter_identified(
+        &state,
+        "also use OpenAI",
+        &["OPENAI_API_KEY".into(), "JENKINS_CI_TOKEN".into()],
+    )
+    .await;
+    assert_eq!(*prompts.lock().unwrap(), vec![vec!["JENKINS_CI_TOKEN"]]);
     let count = state.auth.lock().await.list().len();
     assert!(
         state
@@ -191,7 +176,7 @@ async fn remembered_shell_approval_does_not_silently_authorize_new_credentials()
             .is_err()
     );
     assert_eq!(state.auth.lock().await.list().len(), count);
-    assert_eq!(prompts.lock().unwrap().len(), 2);
+    assert_eq!(prompts.lock().unwrap().len(), 1);
     state.shutdown().await;
 }
 
@@ -279,10 +264,7 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
     user.put_secret("TEST_SHARED_SECRET", "rotated-after-enter")
         .await
         .unwrap();
-    let attached = user
-        .enter_with_secrets(&token, &["TEST_SHARED_SECRET".into()])
-        .await
-        .unwrap();
+    let attached = user.attach_remote(&entered.handle).await.unwrap();
     for (state, handle) in [(&root, &entered.handle), (&user, &attached.handle)] {
         assert_eq!(
             state
@@ -368,10 +350,11 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
     );
     // A user-side snapshot must not remain readable if its authority is unreachable.
     let next_token = root.auth.lock().await.issue_token(None).unwrap().0;
-    let next = user
+    let next_remote = root
         .enter_with_secrets(&next_token, &["TEST_SHARED_SECRET".into()])
         .await
         .unwrap();
+    let next = user.attach_remote(&next_remote.handle).await.unwrap();
     let unavailable_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let unavailable_address = unavailable_listener.local_addr().unwrap();
     drop(unavailable_listener);

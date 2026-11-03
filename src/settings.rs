@@ -15,8 +15,8 @@ pub struct Pairing {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedSettings {
-    pub remembered: BTreeMap<String, bool>,
-    pub remembered_secrets: BTreeMap<String, Vec<String>>,
+    // Legacy name-based choices are intentionally not deserialized into path trust.
+    pub agent_policies: BTreeMap<String, crate::agents::SavedAgent>,
     pub secrets: BTreeMap<String, crate::config::SealedSecret>,
     pub sync: Option<crate::sync::SavedSync>,
     pub telegram: Option<crate::config::SealedSecret>,

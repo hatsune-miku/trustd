@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{ConnectInfo, Extension, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -96,9 +96,11 @@ impl TransportSessions {
 
 pub async fn handle(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Response {
+    let peer = peer.map(|p| p.0.0);
     let transport = headers
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok());
@@ -140,7 +142,7 @@ pub async fn handle(
         let worker_session = transport.unwrap().to_owned();
         let worker_id = id.clone();
         let worker = tokio::spawn(async move {
-            let result = dispatch(&worker_state, &request.method, request.params).await;
+            let result = dispatch(&worker_state, &request.method, request.params, peer).await;
             // Finish the transport bookkeeping even if the HTTP caller left.
             worker_state
                 .mcp_sessions
@@ -160,7 +162,7 @@ pub async fn handle(
         };
         result
     } else {
-        dispatch(&state, &request.method, request.params).await
+        dispatch(&state, &request.method, request.params, peer).await
     };
     let mut response = rpc_response(id, result);
     if let Some(session) = new_session {
@@ -183,7 +185,12 @@ fn rpc_response(id: Value, result: Result<Value, ApiError>) -> Response {
     Json(response).into_response()
 }
 
-async fn dispatch(state: &AppState, method: &str, params: Value) -> Result<Value, ApiError> {
+async fn dispatch(
+    state: &AppState,
+    method: &str,
+    params: Value,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Value, ApiError> {
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": "2025-06-18",
@@ -193,12 +200,21 @@ async fn dispatch(state: &AppState, method: &str, params: Value) -> Result<Value
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-        "tools/call" => call_tool(state, params).await,
+        "tools/call" => call_tool_from(state, params, peer).await,
         _ => Err(ApiError::bad_request(unknown_method(method))),
     }
 }
 
+#[cfg(test)]
 async fn call_tool(state: &AppState, params: Value) -> Result<Value, ApiError> {
+    call_tool_from(state, params, None).await
+}
+
+async fn call_tool_from(
+    state: &AppState,
+    params: Value,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Value, ApiError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -209,7 +225,7 @@ async fn call_tool(state: &AppState, params: Value) -> Result<Value, ApiError> {
         .unwrap_or_else(|| json!({}));
     let operation =
         Operation::from_name(name).ok_or_else(|| ApiError::bad_request(unknown_tool(name)))?;
-    tool_json(api::execute(state, operation, arguments).await?)
+    tool_json(api::execute_from(state, operation, arguments, peer).await?)
 }
 
 fn tool_json(value: Value) -> Result<Value, ApiError> {
@@ -236,17 +252,17 @@ mod tests {
             "secrets_list",
             "secrets_get",
             "enter_interactive",
-            "enter_preauthorized",
             "run",
             "destroy",
-            "revoke",
         ] {
             assert!(text.contains(tool));
         }
         assert!(server_instructions().contains("user-authorized shell access"));
         assert!(server_instructions().contains(crate::shell::ShellKind::native().name()));
         assert!(text.contains("Respect the user's personal privacy."));
-        assert!(text.contains("reused"));
+        for removed in ["preauthor", "pre-author", "reused", "automatic", "remember"] {
+            assert!(!text.contains(removed), "{removed}");
+        }
         let plaintext = definitions
             .as_array()
             .unwrap()
@@ -284,7 +300,24 @@ mod tests {
     async fn secret_listing_and_enter_never_return_values_implicitly() {
         let mut auth = crate::auth::AuthManager::new("unused".into(), None);
         let token = auth.issue_token(None).unwrap().0;
-        let state = AppState::new(crate::config::Config::default(), auth);
+        let state = AppState::user(
+            crate::config::Config {
+                bind: "127.0.0.1:32120".parse().unwrap(),
+                ..crate::config::Config::default()
+            },
+            auth,
+        )
+        .unwrap()
+        .with_consent(crate::consent::ConsentBroker::new(|event| {
+            if let crate::consent::DesktopEvent::Show(_, reply) = event {
+                let _ = reply.send(crate::consent::Decision {
+                    choice: crate::consent::Choice::Accept,
+                    remember: false,
+                    btw: String::new(),
+                });
+            }
+            Ok(())
+        }));
         state
             .put_secret("JENKINS_CI_TOKEN", "fixture-secret-123")
             .await
@@ -307,7 +340,7 @@ mod tests {
                 .is_err()
             );
         }
-        let entered = call_tool(&state, json!({"name":"enter_preauthorized","arguments":{"token":token,"confirm_text":"OK","secret_keys":["JENKINS_CI_TOKEN"]}})).await.unwrap();
+        let entered = call_tool(&state, json!({"name":"enter_interactive","arguments":{"agent_name":"test","request_reason":"test","confirm_text":"OK","secret_keys":["JENKINS_CI_TOKEN"]}})).await.unwrap();
         assert_eq!(
             entered["structuredContent"]["secret_keys"],
             json!(["JENKINS_CI_TOKEN"])

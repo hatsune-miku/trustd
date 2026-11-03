@@ -1,0 +1,55 @@
+.agents-view {
+  .agents-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .agents-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .agent-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 210px;
+    align-items: start;
+    gap: 24px;
+    padding: 22px 0;
+    border-top: 1px solid var(--line);
+  }
+  .agent-identity,
+  .agent-policy {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+  .agent-name {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .agent-path {
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+  .agent-processes,
+  .agent-policy-note {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .agents-error {
+    color: #a32121;
+  }
+  @media (max-width: 700px) {
+    .agent-row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
+    .agent-policy {
+      max-width: 280px;
+    }
+  }
+}

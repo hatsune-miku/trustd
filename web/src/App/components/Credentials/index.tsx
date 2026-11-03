@@ -54,7 +54,7 @@ export function Credentials({ session, onPasswordChanged }: { session: string; o
   return (
     <div className="credentials-view">
       <h2 className="section-title">验证方式</h2>
-      <p className="description">任一已启用的方式都可用于管理授权和签发访问令牌。</p>
+      <p className="description">任一已启用的方式都可用于登录管理页面。</p>
       <Feedback {...action} />
       <section className="credential-section">
         <h3 className="subsection-title">Master Password</h3>

@@ -19,6 +19,7 @@ pub(crate) type Completion = Box<dyn FnOnce(Outcome) + Send>;
 pub struct Request {
     pub id: String,
     pub agent: String,
+    pub agent_path: Option<String>,
     pub reason: String,
     pub scope: String,
     pub secret_keys: Vec<String>,

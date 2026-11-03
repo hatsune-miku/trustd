@@ -103,6 +103,41 @@ fn run_arguments(handle: &str, command: &str) -> Value {
 }
 
 #[tokio::test]
+async fn retired_authorization_routes_are_absent_and_client_identity_is_not_input() {
+    let (state, _) = user_state();
+    let app = router(state);
+    for path in [
+        "/v1/admin/tokens/issue",
+        "/v1/admin/tokens/list",
+        "/v1/admin/tokens/revoke",
+        "/v1/tokens/revoke",
+        "/v1/sessions/enter",
+        "/v1/sessions/enter/preauthorized",
+        "/v1/admin/remembered/reset",
+    ] {
+        assert_eq!(
+            request(&app, "POST", path, Some(json!({}))).await.0,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    for (key, value) in [
+        ("pid", json!(std::process::id())),
+        ("agent_path", json!("/trusted/codex")),
+        ("policy", json!("trust")),
+        ("agent", json!({"path":"/trusted/codex"})),
+    ] {
+        let mut args = consent_arguments();
+        args[key] = value;
+        assert_eq!(
+            http(&app, Operation::EnterInteractive, args).await.0,
+            StatusCode::BAD_REQUEST,
+            "{key}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn llms_is_public_plain_text_with_live_schemas_on_both_daemons() {
     for state in [
         user_state().0,
@@ -139,6 +174,19 @@ async fn llms_is_public_plain_text_with_live_schemas_on_both_daemons() {
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(text.starts_with("# trustd API\n"));
         assert!(!text.contains('\r'));
+        for removed in [
+            "preauthor",
+            "pre-author",
+            "remember",
+            "\"automatic\"",
+            "reused",
+            "token-env",
+        ] {
+            assert!(
+                !text.contains(removed),
+                "AI documentation disclosed {removed}"
+            );
+        }
         assert!(text.contains(&format!("Base URL: http://{}\n", state.config.bind)));
         let mode = serde_json::to_value(state.mode).unwrap();
         assert!(text.contains(&format!("Daemon: {}\n", mode.as_str().unwrap())));
@@ -239,8 +287,8 @@ async fn capabilities_publish_all_mcp_schemas_and_registered_http_operations() {
 }
 
 #[tokio::test]
-async fn preauthorization_secrets_execution_and_lifecycle_are_interoperable() {
-    let (state, token) = user_state();
+async fn interactive_secrets_execution_and_lifecycle_are_interoperable() {
+    let (state, _) = consent_state(Choice::Accept, false);
     state
         .put_secret("TEST_API_SECRET", "fixture-secret-value")
         .await
@@ -254,26 +302,25 @@ async fn preauthorization_secrets_execution_and_lifecycle_are_interoperable() {
     );
     assert_eq!(keys, json!({"keys":["TEST_API_SECRET"]}));
 
-    let arguments = json!({"token":token,"confirm_text":"OK","secret_keys":["TEST_API_SECRET"]});
-    let (status, entered) = http(&app, Operation::EnterPreauthorized, arguments.clone()).await;
+    let mut arguments = consent_arguments();
+    arguments["secret_keys"] = json!(["TEST_API_SECRET"]);
+    let (status, entered) = http(&app, Operation::EnterInteractive, arguments.clone()).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(entered["reused"], false);
+    assert!(entered.get("reused").is_none());
     assert!(!entered.to_string().contains("fixture-secret-value"));
-    let (_, reused) = http(&app, Operation::EnterPreauthorized, arguments.clone()).await;
-    assert_eq!(
-        reused,
-        mcp(&app, "enter_preauthorized", arguments).await["result"]["structuredContent"]
-    );
-    assert_eq!(reused["reused"], true);
+    let next =
+        mcp(&app, "enter_interactive", arguments).await["result"]["structuredContent"].clone();
+    assert_eq!(next["status"], "authorized");
+    assert_ne!(next["handle"], entered["handle"]);
     let handle = entered["handle"].as_str().unwrap();
-    let (_, legacy) = request(
+    let (legacy_status, _) = request(
         &app,
         "POST",
         "/v1/sessions/enter",
-        Some(json!({"token":token})),
+        Some(json!({"token":"removed"})),
     )
     .await;
-    assert_eq!(legacy["handle"], handle);
+    assert_eq!(legacy_status, StatusCode::NOT_FOUND);
 
     let command = if cfg!(windows) {
         "[Console]::Out.Write([Console]::In.ReadToEnd()); [Console]::Error.Write('fixture stderr')"
@@ -315,18 +362,13 @@ async fn preauthorization_secrets_execution_and_lifecycle_are_interoperable() {
             .0,
         StatusCode::UNAUTHORIZED
     );
-    let (_, next) = http(
-        &app,
-        Operation::EnterPreauthorized,
-        json!({"token":token,"confirm_text":"OK"}),
-    )
-    .await;
+    let (_, next) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     assert_ne!(next["handle"], handle);
     assert_eq!(
-        http(&app, Operation::Revoke, json!({"token":token}))
+        http(&app, Operation::Destroy, json!({"handle":next["handle"]}))
             .await
             .1,
-        json!({"revoked":true})
+        json!({"destroyed":true})
     );
     assert!(
         mcp(
@@ -355,14 +397,13 @@ async fn plaintext_reads_share_scoped_authorization_and_snapshots_across_transpo
             .await
             .unwrap();
         let app = router(state.clone());
-        let (_, entered) = http(
-            &app,
-            Operation::EnterPreauthorized,
-            json!({
-                "token":token,"confirm_text":"OK","secret_keys":["TEST_READ_SECRET"]
-            }),
+        let entered = serde_json::to_value(
+            state
+                .enter_with_secrets(&token, &["TEST_READ_SECRET".into()])
+                .await
+                .unwrap(),
         )
-        .await;
+        .unwrap();
         assert!(!entered.to_string().contains(value));
         let handle = entered["handle"].as_str().unwrap();
         let arguments = json!({"handle":handle,"key":"TEST_READ_SECRET"});
@@ -514,31 +555,31 @@ async fn http_interactive_approval_uses_the_same_owner_decision_and_secret_selec
         remembered["result"]["structuredContent"]["status"],
         "authorized"
     );
-    assert_eq!(remembered["result"]["structuredContent"]["btw"], "");
+    assert_eq!(
+        remembered["result"]["structuredContent"]["btw"],
+        "fixture note"
+    );
     assert!(
         remembered["result"]["structuredContent"]
             .get("automatic")
             .is_none()
     );
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
     state.shutdown().await;
 }
 
 #[tokio::test]
-async fn http_denial_and_remembered_denial_are_not_transport_errors() {
+async fn http_denial_is_neutral_and_self_reported_names_do_not_create_policy() {
     let (state, calls) = consent_state(Choice::Deny, true);
     let app = router(state.clone());
     let (status, result) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        result,
-        json!({"status":"denied","automatic":false,"btw":"fixture note"})
-    );
+    assert_eq!(result, json!({"status":"denied","btw":"fixture note"}));
     let (_, remembered) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     let rpc = mcp(&app, "enter_interactive", consent_arguments()).await;
     assert_eq!(remembered, rpc["result"]["structuredContent"]);
-    assert_eq!(remembered["automatic"], true);
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(remembered.get("automatic").is_none());
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
     state.shutdown().await;
 }
 
@@ -554,7 +595,7 @@ async fn http_interactive_ignore_preserves_the_fixed_deadline_and_note() {
         result,
         json!({"status":"timed_out","timeout_ms":60000,"btw":"fixture note"})
     );
-    assert!(state.settings.lock().await.saved.remembered.is_empty());
+    assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     state.shutdown().await;
 }
 
@@ -598,10 +639,9 @@ async fn both_transports_reject_invalid_arguments_before_authorization_or_execut
             "enter_interactive",
             json!({"agent_name":"fixture","request_reason":"reason","confirm_text":"OK","secret_keys":["lowercase"]}),
         ),
-        ("enter_preauthorized", json!({"token":"fixture-private"})),
         (
-            "enter_preauthorized",
-            json!({"token":123,"confirm_text":"OK"}),
+            "enter_interactive",
+            json!({"agent_name":"fixture","request_reason":"reason","confirm_text":"OK","agent_path":"forged"}),
         ),
         (
             "run",
@@ -611,7 +651,6 @@ async fn both_transports_reject_invalid_arguments_before_authorization_or_execut
             "destroy",
             json!({"handle":"fixture-private","fixture-private":"unexpected"}),
         ),
-        ("revoke", json!({"token":123})),
     ];
     for (name, arguments) in cases {
         let (status, error) =
@@ -651,7 +690,7 @@ async fn new_http_routes_keep_the_loopback_browser_boundary() {
         "/v1/capabilities",
         Operation::SecretsGet.path(),
         Operation::EnterInteractive.path(),
-        Operation::EnterPreauthorized.path(),
+        "/v1/admin/agents",
     ] {
         for (header, value) in [
             ("origin", "https://evil.example"),
@@ -696,14 +735,9 @@ async fn new_http_routes_keep_the_loopback_browser_boundary() {
 
 #[tokio::test]
 async fn http_destroy_cancels_an_inflight_run_and_invalidates_its_handle() {
-    let (state, token) = user_state();
+    let (state, _) = consent_state(Choice::Accept, false);
     let app = router(state.clone());
-    let (_, entered) = http(
-        &app,
-        Operation::EnterPreauthorized,
-        json!({"token":token,"confirm_text":"OK"}),
-    )
-    .await;
+    let (_, entered) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     let handle = entered["handle"].as_str().unwrap();
     // Start the persistent interpreter before timing cancellation of a command.
     let (_, ready) = http(&app, Operation::Run, run_arguments(handle, "echo ready")).await;

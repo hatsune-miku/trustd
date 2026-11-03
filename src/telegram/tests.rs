@@ -84,6 +84,7 @@ async fn channels(desktop_wins: bool) {
     let prompt = Prompt {
         id: "arbitration".into(),
         agent_name: "test".into(),
+        agent_path: None,
         request_reason: "test only".into(),
         scope: "user".into(),
         secret_keys: vec![],
@@ -220,6 +221,7 @@ async fn offline_telegram_does_not_prevent_desktop_consent() {
         .request_consent(Prompt {
             id: "offline-desktop".into(),
             agent_name: "test".into(),
+            agent_path: None,
             request_reason: "test only".into(),
             scope: "user".into(),
             secret_keys: vec![],

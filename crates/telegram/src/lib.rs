@@ -1,6 +1,7 @@
 //! Telegram is a presentation channel, never an execution endpoint. Decisions
 //! are candidates until the requesting device's single arbiter acknowledges one.
 #![forbid(unsafe_code)]
+pub mod agents;
 #[cfg(feature = "bot")]
 mod api;
 #[cfg(feature = "bot")]
@@ -49,6 +50,8 @@ impl Drop for Action {
 pub struct Prompt {
     pub id: String,
     pub agent_name: String,
+    #[serde(default)]
+    pub agent_path: Option<String>,
     pub request_reason: String,
     pub scope: String,
     #[serde(default)]
@@ -106,6 +109,10 @@ pub fn validate_prompt(prompt: &Prompt) -> Result<()> {
         || prompt.agent_name.trim().is_empty()
         || prompt.agent_name.chars().count() > 128
         || prompt.agent_name.chars().any(char::is_control)
+        || prompt
+            .agent_path
+            .as_ref()
+            .is_some_and(|p| p.len() > 32768 || p.contains('\0'))
         || prompt.scope.len() > 1024
         || prompt.request_reason.trim().is_empty()
         || prompt.request_reason.len() > 16384

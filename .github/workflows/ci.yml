@@ -51,6 +51,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
+      - name: Bootstrap verification and temporary-file cleanup tests
+        run: python -m unittest discover -s scripts -p 'test_bootstrap.py' -v
       - name: Validate MCP tool schemas with the official TypeScript SDK
         working-directory: web
         run: pnpm test:mcp

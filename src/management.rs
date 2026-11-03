@@ -152,7 +152,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/admin/pairing/new", post(pairing_new))
         .route("/v1/admin/pairing/connect", post(pairing_connect))
         .route("/v1/admin/pairing/remove", post(pairing_remove))
-        .route("/v1/admin/remembered/reset", post(remembered_reset))
+        .route("/v1/admin/agents", get(agents))
+        .route("/v1/admin/agents/policy", post(agent_policy))
 }
 
 async fn secrets(
@@ -269,7 +270,6 @@ async fn settings(
     Ok(Json(json!({
         "daemon":state.mode, "totp_enabled":settings.config.totp_secret.is_some(),
         "passkeys":settings.saved.passkeys.iter().map(|key| json!({"id":key.id,"name":key.name,"created_at":key.created_at})).collect::<Vec<_>>(),
-        "remembered":settings.saved.remembered,
         "paired_peer":settings.saved.pairing.as_ref().map(|pair| pair.peer.to_string()),
         "desktop_available":state.consent.is_some(),
         "passkey_origin":format!("http://localhost:{}",state.config.bind.port())
@@ -639,18 +639,24 @@ async fn pairing_remove(
     Ok(Json(json!({"paired":false})))
 }
 
-async fn remembered_reset(
+async fn agents(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     owner(&state, &headers).await?;
-    let mut settings = state.settings.lock().await;
-    let count = settings.saved.remembered.len();
-    let mut next = settings.saved.clone();
-    next.remembered.clear();
-    next.remembered_secrets.clear();
-    settings.save(next).await?;
-    Ok(Json(json!({"cleared":count})))
+    Ok(Json(
+        json!({"agents":state.agent_list().await?, "process_names":crate::agents::PROCESS_NAMES}),
+    ))
+}
+
+async fn agent_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(change): Json<localshelld_telegram::agents::Change>,
+) -> Result<Json<Value>, ApiError> {
+    owner(&state, &headers).await?;
+    state.set_agent_policy(change).await?;
+    Ok(Json(json!({"saved":true})))
 }
 
 #[cfg(test)]

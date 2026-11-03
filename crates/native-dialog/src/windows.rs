@@ -22,7 +22,7 @@ use windows_sys::{
         UI::{
             Controls::{BST_CHECKED, EM_SETLIMITTEXT},
             HiDpi::*,
-            Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN, VK_SPACE},
+            Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_ESCAPE, VK_RETURN, VK_SPACE},
             WindowsAndMessaging::*,
         },
     },
@@ -57,6 +57,8 @@ const NOTE: i32 = 108;
 const REMEMBER: i32 = 109;
 const SECRETS_LABEL: i32 = 110;
 const SECRETS: i32 = 111;
+const AGENT_PATH: i32 = 112;
+const PATH_HEIGHT: i32 = 52;
 
 struct Mailbox {
     // Never dereferenced on worker threads. PostMessage is Windows' supported
@@ -266,6 +268,7 @@ struct Window {
 
 struct WindowState {
     agent: String,
+    agent_path: Option<String>,
     reason: String,
     scope: String,
     secret_keys: Vec<String>,
@@ -281,6 +284,7 @@ impl Window {
     fn new(request: Request) -> io::Result<Self> {
         let state = Box::new(WindowState {
             agent: request.agent,
+            agent_path: request.agent_path,
             reason: request.reason,
             scope: request.scope,
             secret_keys: request.secret_keys,
@@ -546,6 +550,15 @@ fn initialize(hwnd: HWND, state: &WindowState) -> io::Result<()> {
         SS_NOPREFIX_STYLE,
         0,
     )?;
+    let edit_style = WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32;
+    child(
+        hwnd,
+        w!("EDIT"),
+        state.agent_path.as_deref().unwrap_or("无法核验程序路径"),
+        AGENT_PATH,
+        edit_style | ES_READONLY as u32,
+        WS_EX_CLIENTEDGE,
+    )?;
     child(
         hwnd,
         w!("STATIC"),
@@ -555,7 +568,6 @@ fn initialize(hwnd: HWND, state: &WindowState) -> io::Result<()> {
         0,
     )?;
     child(hwnd, w!("STATIC"), "请求缘由：", REASON_LABEL, 0, 0)?;
-    let edit_style = WS_TABSTOP | WS_VSCROLL | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32;
     if !state.secret_keys.is_empty() {
         child(hwnd, w!("STATIC"), "请求注入的凭据：", SECRETS_LABEL, 0, 0)?;
         child(
@@ -584,11 +596,10 @@ fn initialize(hwnd: HWND, state: &WindowState) -> io::Result<()> {
         edit_style | ES_WANTRETURN as u32,
         WS_EX_CLIENTEDGE,
     )?;
-    let agent = state.agent.replace('&', "&&");
     child(
         hwnd,
         w!("BUTTON"),
-        &format!("记住对 {agent} 的选择；新增凭据需再次授权"),
+        "记住我的选择，接受后长期信任此程序路径",
         REMEMBER,
         WS_TABSTOP | BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32,
         0,
@@ -620,6 +631,10 @@ fn initialize(hwnd: HWND, state: &WindowState) -> io::Result<()> {
     // SAFETY: all controls exist. Messages use integer values, not borrowed
     // pointers. The UI timer only updates text; the broker owns authorization.
     unsafe {
+        EnableWindow(
+            GetDlgItem(hwnd, REMEMBER),
+            i32::from(state.agent_path.is_some()),
+        );
         SetWindowTextW(hwnd, w!("本机命令授权 — trustd"));
         SendMessageW(GetDlgItem(hwnd, NOTE), EM_SETLIMITTEXT, NOTE_LIMIT, 0);
         SendMessageW(hwnd, DM_SETDEFID, IDCANCEL as usize, 0);
@@ -718,6 +733,8 @@ fn minimum_height(hwnd: HWND, width: i32, dpi: u32) -> i32 {
     // Header, labels/gaps, an 80 px reason, 64 px note, and 32 px buttons.
     44 + agent
         + 4
+        + PATH_HEIGHT
+        + 4
         + scope
         + 8
         + secrets_height(hwnd)
@@ -763,7 +780,9 @@ fn layout(hwnd: HWND, state: &WindowState) {
         move_control(HEADER, MARGIN, 12, content - 100, 24);
         move_control(COUNTDOWN, width - MARGIN - 92, 14, 92, 22);
         move_control(AGENT, MARGIN, 44, content, agent_height);
-        let scope_y = 44 + agent_height + 4;
+        let path_y = 44 + agent_height + 4;
+        move_control(AGENT_PATH, MARGIN, path_y, content, PATH_HEIGHT);
+        let scope_y = path_y + PATH_HEIGHT + 4;
         move_control(SCOPE, MARGIN, scope_y, content, scope_height);
         let secrets_y = scope_y + scope_height + 8;
         let secrets_height = secrets_height(hwnd);
@@ -829,6 +848,7 @@ fn set_fonts(hwnd: HWND, state: &WindowState) {
             HEADER,
             COUNTDOWN,
             AGENT,
+            AGENT_PATH,
             SCOPE,
             SECRETS_LABEL,
             SECRETS,
@@ -893,7 +913,8 @@ fn finish(hwnd: HWND, state: &WindowState, choice: Choice) {
     };
     let outcome = Outcome {
         choice,
-        remember: choice != Choice::Ignore
+        remember: choice == Choice::Accept
+            && state.agent_path.is_some()
             && unsafe {
                 SendMessageW(GetDlgItem(hwnd, REMEMBER), BM_GETCHECK, 0, 0) == BST_CHECKED as isize
             },
@@ -929,6 +950,7 @@ mod tests {
         let window = Window::new(Request {
             id: "test".into(),
             agent,
+            agent_path: Some("C:\\Agents\\test.exe".into()),
             reason: "原样 <script> & 中文\n第二行".repeat(500),
             scope: "无（只测试界面，不授予权限）".into(),
             secret_keys,
@@ -997,6 +1019,7 @@ mod tests {
                         let mut previous = RECT::default();
                         for id in [
                             AGENT,
+                            AGENT_PATH,
                             SCOPE,
                             REASON_LABEL,
                             REASON,
@@ -1033,6 +1056,7 @@ mod tests {
         unsafe {
             for (id, expected) in [
                 (REASON, "Edit"),
+                (AGENT_PATH, "Edit"),
                 (NOTE, "Edit"),
                 (REMEMBER, "Button"),
                 (IDOK, "Button"),
@@ -1050,6 +1074,10 @@ mod tests {
                 multiline(&window._state.reason)
             );
             assert_eq!(text(GetDlgItem(window.hwnd, AGENT)), "测试 & Agent 😀");
+            assert_eq!(
+                text(GetDlgItem(window.hwnd, AGENT_PATH)),
+                "C:\\Agents\\test.exe"
+            );
             assert_eq!(
                 SendMessageW(window.hwnd, DM_GETDEFID, 0, 0) & 0xffff,
                 IDCANCEL as isize
@@ -1072,6 +1100,29 @@ mod tests {
                 SendMessageW(GetDlgItem(window.hwnd, NOTE), WM_GETFONT, 0, 0),
                 0
             );
+        }
+    }
+
+    #[test]
+    fn long_agent_path_remains_complete_in_a_bounded_readonly_control() {
+        let (window, _) = fixture(Instant::now() + Duration::from_secs(60));
+        let path = format!("C:\\{}\\codex.exe", "long-directory-".repeat(1000));
+        unsafe {
+            let control = GetDlgItem(window.hwnd, AGENT_PATH);
+            SetWindowTextW(control, wide(&path).as_ptr());
+            assert_eq!(text(control), path);
+            let style = GetWindowLongPtrW(control, GWL_STYLE) as u32;
+            assert_ne!(style & ES_READONLY as u32, 0);
+            assert_ne!(style & WS_VSCROLL, 0);
+            for dpi in [96, 144, 192] {
+                window._state.dpi.set(dpi);
+                set_fonts(window.hwnd, &window._state);
+                layout(window.hwnd, &window._state);
+                let mut rect = RECT::default();
+                GetWindowRect(control, &mut rect);
+                assert_eq!(rect.bottom - rect.top, scale(PATH_HEIGHT, dpi));
+                assert_eq!(text(control), path);
+            }
         }
     }
 
@@ -1273,7 +1324,7 @@ exit $child.ExitCode
             }
             let outcome = outcome.recv_timeout(Duration::from_secs(1)).unwrap();
             assert_eq!(outcome.choice, choice);
-            assert!(outcome.remember);
+            assert_eq!(outcome.remember, choice == Choice::Accept);
             assert_eq!(outcome.note, "中文备注 😀\r\nsecond line");
             assert!(!window.alive());
             assert!(window._state.complete.borrow().is_none());

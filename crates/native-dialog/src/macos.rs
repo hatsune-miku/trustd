@@ -215,7 +215,7 @@ impl Delegate {
             };
             complete(Outcome {
                 choice,
-                remember: choice != Choice::Ignore
+                remember: choice == Choice::Accept
                     && state.remember.state() == NSControlStateValueOn,
                 note: state
                     .note
@@ -305,6 +305,13 @@ impl Window {
             let countdown = label(mtm, "");
             add_full_width(&stack, &countdown);
             add_full_width(&stack, &label(mtm, &format!("来自 {}", request.agent)));
+            let (path_view, _) = text_area(
+                mtm,
+                request.agent_path.as_deref().unwrap_or("无法核验程序路径"),
+                false,
+                52.0,
+            );
+            add_full_width(&stack, &path_view);
             add_full_width(&stack, &label(mtm, &format!("身份：{}", request.scope)));
             add_full_width(&stack, &label(mtm, "执行缘由"));
             let (reason, _) = text_area(mtm, &request.reason, false, 100.0);
@@ -321,12 +328,13 @@ impl Window {
             let (note_scroll, note) = text_area(mtm, "", true, 100.0);
             add_full_width(&stack, &note_scroll);
             let remember = NSButton::checkboxWithTitle_target_action(
-                ns_string!("记住本次选择"),
+                ns_string!("记住我的选择，接受后长期信任此程序路径"),
                 None,
                 None,
                 mtm,
             );
             stack.addArrangedSubview(&remember);
+            remember.setEnabled(request.agent_path.is_some());
             let delegate = Delegate::new(
                 mtm,
                 State {
@@ -460,6 +468,7 @@ pub(super) fn verify_native_controls() {
         let request = Request {
             id: "native-test".into(),
             agent: "原生测试 🧁".into(),
+            agent_path: Some("/Applications/Agent.app/Contents/MacOS/Agent".into()),
             reason: "第一行\n完整缘由".repeat(300),
             scope: "当前用户与 root".into(),
             secret_keys: (0..64).map(|index| format!("CREDENTIAL_{index}")).collect(),
@@ -482,7 +491,7 @@ pub(super) fn verify_native_controls() {
         let replies = replies.lock().unwrap();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].choice, choice);
-        assert_eq!(replies[0].remember, choice != Choice::Ignore);
+        assert_eq!(replies[0].remember, choice == Choice::Accept);
         assert_eq!(replies[0].note, "备注 A D I\n第二行 🧁");
     }
     let replies = Arc::new(Mutex::new(Vec::new()));
@@ -492,6 +501,7 @@ pub(super) fn verify_native_controls() {
         Request {
             id: "expired".into(),
             agent: "late".into(),
+            agent_path: None,
             reason: "late".into(),
             scope: "root".into(),
             secret_keys: vec![],

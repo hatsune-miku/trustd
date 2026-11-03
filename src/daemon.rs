@@ -136,12 +136,16 @@ where
         state = state.with_consent(consent);
     }
     state.start_sync_worker().await;
-    axum::serve(listener, router(state.clone()))
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            state.shutdown().await;
-        })
-        .await?;
+    state.start_agent_worker().await;
+    axum::serve(
+        listener,
+        router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        state.shutdown().await;
+    })
+    .await?;
     Ok(())
 }
 

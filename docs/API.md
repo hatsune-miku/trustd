@@ -10,17 +10,15 @@ stdio 与下文的 HTTP/直接 MCP 业务语义相同，但输入／输出 schem
 | --- | --- |
 | `enter_interactive` | 无 token 参数，授权响应不返回 handle；由接入进程保存 |
 | `run` / `secrets_get` / `destroy` | 不接受 handle，自动使用本接入进程的会话 |
-| `enter_preauthorized` | 仅在启动时配置 `--token-env <变量名>` 后出现，工具参数不含 token |
-| `revoke` | 同样只在配置 token 后出现；撤销该 token，不接受 token 参数 |
 | `secrets_list` | 与直接连接一致，只返回名称 |
 
-始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle/token 字段填入 stdio 工具。默认五项工具，配置 token 后为七项。显式明文读取仍要求存活会话及已授权 key。
+始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle 字段填入 stdio 工具。工具共五项。显式明文读取仍要求存活会话及已授权 key。
 
-一个接入进程仅持有一个会话，已有会话时重复 enter 被拒绝；先 destroy 再更换授权。独立进程不共享全局 handle。宿主如果多个聊天共用一个进程，也会共享该会话，不能把进程级隔离说成聊天级隔离。预授权 token 必须单独分配，已知 `reused:true` 会被拒绝接管，不销毁原会话。
+一个接入进程仅持有一个会话，已有会话时重复 enter 被拒绝；先 destroy 再更换授权。独立进程不共享全局 handle。宿主如果多个聊天共用一个进程，也会共享该会话，不能把进程级隔离说成聊天级隔离。
 
 stdio 取消通知按本进程的 requestId 定位，不需要 MCP HTTP 会话头。取消 run 销毁整个会话；取消尚在等待的授权会等待原授权请求返回并清理迟到的成功结果。stdin EOF/正常终止同样尝试清理；强杀、断电或 daemon 不可达不保证清理成功，需在管理页核对或撤销。授权失效和传输错误不触发自动授权或命令重试。
 
-以下章节描述 daemon 原有 HTTP 与 Streamable HTTP MCP 接口，这些接口仍需显式 token/handle。
+以下章节描述 daemon HTTP 与 Streamable HTTP MCP 接口，这些接口仍需显式 handle。
 
 推荐用户 daemon：`http://127.0.0.1:32120`；系统 daemon 默认 `http://127.0.0.1:32119`。执行凭据放在 JSON body 中，不放 URL。两端升级时应使用相同版本。
 
@@ -35,26 +33,14 @@ stdio 取消通知按本进程的 requestId 定位，不需要 MCP HTTP 会话�
 | `secrets_list` | `GET /v1/secrets/keys` |
 | `secrets_get` | `POST /v1/secrets/get` |
 | `enter_interactive` | `POST /v1/sessions/enter/interactive` |
-| `enter_preauthorized` | `POST /v1/sessions/enter/preauthorized` |
 | `run` | `POST /v1/commands/run` |
 | `destroy` | `POST /v1/sessions/destroy` |
-| `revoke` | `POST /v1/tokens/revoke` |
 
-HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对应的 `structuredContent`，不需要 JSON-RPC 外层。两种入口共用参数校验和业务处理；token、handle、记忆选择和凭据授权可以跨入口使用。未知字段、错误类型和不支持的平台参数会被拒绝，不自动转换。HTTP 参数错误返回 400；JSON 格式、Content-Type 等传输错误由 HTTP 层返回 400/415/422。凭据无效返回 401，执行身份越权返回 403，授权通道不可用返回 503，业务错误响应格式为 `{"error":"..."}`。
+HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对应的 `structuredContent`，不需要 JSON-RPC 外层。两种入口共用参数校验和业务处理；handle 和凭据授权可以跨入口使用。未知字段、错误类型和不支持的平台参数会被拒绝，不自动转换。HTTP 参数错误返回 400；JSON 格式、Content-Type 等传输错误由 HTTP 层返回 400/415/422。凭据无效返回 401，执行身份越权返回 403，授权通道不可用返回 503，业务错误响应格式为 `{"error":"..."}`。
 
 ## 进入与执行
 
 `GET /health` 无需凭据，返回 `status`、`service`、`daemon`、`version`、`commit`。本地构建版本为 `<Cargo版本>-dev`。HTTP/MCP 不提供更新或下载执行接口。
-
-### 预授权
-
-`POST /v1/sessions/enter/preauthorized`：`{"token":"<LOCALSHELLD_TOKEN>","confirm_text":"OK","secret_keys":["JENKINS_CI_TOKEN"]}`。`secret_keys` 可省略，`confirm_text` 必须为 `OK`，与 MCP 一致。
-
-原有 `POST /v1/sessions/enter` 保留兼容，仍接受 `{"token":"<LOCALSHELLD_TOKEN>","secret_keys":["JENKINS_CI_TOKEN"]}`，不要求也不接受 `confirm_text`。
-
-返回 `handle`、`reused`、`secret_keys`、`shell`、`platform`、`daemon`、`privilege_levels`、`identities`、`expires_at`、`expires_at_iso`、`message`。Linux/macOS 另有 `sudo_available`。同一 token 有存活会话时复用同一 handle，`reused:true` 不表示命中记忆授权。`expires_at` 是 Unix epoch **秒**，`expires_at_iso` 是 UTC ISO 8601；永久令牌两者均为 null。
-
-`identities` 按执行身份名返回实际操作系统账户信息。Windows 包含 user、SID、is_system、elevated、integrity、session_id；Unix 包含 user、uid、elevated。仅报告当前可用且授权允许的身份，不以平台名推断 SYSTEM。不同身份的变量、目录和环境独立持久化，不复制已运行 shell 的状态。
 
 ### 交互授权
 
@@ -69,15 +55,15 @@ HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对
 }
 ```
 
-请求进入同一套桌面／Telegram 授权流程，不存在通过 HTTP 提交接受或拒绝的接口。Telegram 仍要求已连接云服务。名字、原因、凭据选择、记忆和权限范围与 MCP 完全相同；`confirm_text` 只是隐私确认，不代表用户已批准执行。
+请求进入同一套授权流程。名字、原因、凭据选择和权限范围与 MCP 完全相同；`confirm_text` 只是隐私确认，不代表用户已批准执行。
 
 客户端调用超时应大于 60 秒。接受、拒绝和超时都返回 HTTP 200，必须检查 `status`：
 
-- `authorized`：普通 enter 字段加 `status`、`btw`，包含后续执行需要的 `handle`，不返回原始 token。
-- `denied`：`status`、`automatic`、`btw`，不包含 handle。`automatic:true` 表示用户先前记忆的拒绝。
+- `authorized`：包含 `status`、`btw`、`handle`、`secret_keys`、`shell`、`platform`、`daemon`、`privilege_levels`、`identities`、`expires_at`、`expires_at_iso` 和 `message`。Linux/macOS 另有 `sudo_available`。
+- `denied`：`status`、`btw`，不包含 handle。
 - `timed_out`：`status`、`timeout_ms:60000`、`btw`，不包含 handle。忽略或关闭弹窗仍等待原来的截止时间。
 
-`btw` 是用户附言；`authorized` 不代表本次一定发生了新的点击。交互授权目前没有单独的提前取消接口，与 MCP 一样使用固定期限。不要在客户端超时后自动重发，以免重复请求授权。
+`btw` 是用户附言。`expires_at` 为 Unix 秒，`expires_at_iso` 为 UTC ISO 8601。`identities` 按执行身份名返回实际操作系统账户信息，仅报告可用且授权允许的身份。交互授权目前没有单独的提前取消接口。不要在客户端超时后自动重发，以免重复请求授权。
 
 ### 执行
 
@@ -135,10 +121,10 @@ stdout、stderr 分别捕获，各最多保存 `max_output_bytes` 字节；非 U
 
 - `timeout_seconds` 省略或 null 时无默认执行超时；显式值为正整数，不设旧的 300 秒上限。
 - **普通命令非零退出码不销毁会话**。直接执行 `exit`、替换 shell 的 `exec`、或 Bash `set -e` 引起 shell 退出时，会结束整个 handle。
-- **执行超时销毁整个 handle**，终止所有关联身份的 shell/进程树。返回已捕获的 stdout/stderr、`timed_out:true`、`session_alive:false`、`session_ended:true`、`session_ended_reason:"timeout"`、`exit_code:null`；不伪造退出码，也不承诺保留被中断的 shell 状态。
-- `session_ended_reason` 为 `shell_exited`、`timeout`、`cancelled` 或 null。`cancelled` 包括显式取消、销毁、撤销与关闭导致的中断；队列中尚未开始的命令可能返回会话已结束错误。
+- **执行超时中断本次命令及其新建子进程**，返回部分输出，shell 响应中断后保留会话和状态。无法恢复协议时结束会话并返回 `session_ended_reason:"shell_unresponsive"`。
+- `session_ended_reason` 为 `shell_exited`、`shell_unresponsive`、`cancelled` 或 null。`cancelled` 包括显式取消、销毁、撤销与关闭导致的中断；队列中尚未开始的命令可能返回会话已结束错误。
 - **HTTP 断连或客户端自身超时不自动停止命令**。worker 继续消费输出，避免下次调用串包；客户端不得因响应丢失而盲目重试有副作用的命令。
-- `POST /v1/sessions/destroy`，body `{"handle":"<HANDLE>"}`，显式销毁会话。`POST /v1/tokens/revoke`，body `{"token":"<TOKEN>"}`，撤销并清理该令牌所有会话。服务仍持有记录的过期 token 可以撤销自身。
+- `POST /v1/sessions/destroy`，body `{"handle":"<HANDLE>"}`，显式销毁会话。
 - HTTP 客户端需要取消执行中的命令时，从另一请求调用 `sessions/destroy`。效果与 MCP run 的取消通知一致：整个 handle 及其关联进程树终止，不只是某一条命令。HTTP destroy 返回 `{"destroyed":true}`；仍保持连接的 run 返回已捕获结果和 `session_ended_reason:"cancelled"`，而 MCP 取消通知采用协议规定的 204 响应。
 - Windows shell 在恢复执行前就加入禁止 breakaway 的 kill-on-close Job Object，销毁时清理其整棵进程树。Unix 清理可追踪后代和原始进程组；主动 double-fork 后完全脱离、被重新托管的 daemon 不在保证范围内。
 - 单 daemon 令牌到期阻止后续调用；跨 daemon 会话的授权到期监视还会取消关联命令。系统端内部 `/v1/sessions/validate` 与 `/v1/sessions/watch` 使用 handle 验证，watch 最多等 15 秒；客户端无需直接使用。
@@ -183,11 +169,10 @@ try {
 
 MCP 简短说明明确：不鼓励使用，除非用户明确要求明文；通常优先使用环境变量注入。
 
-两个 MCP enter 工具及 HTTP enter 均接收可选 `secret_keys: string[]`。key 同时是环境变量名，符合 `[A-Z_][A-Z0-9_]{0,127}`；后端同样校验大写。最多保存及请求 64 个 key，重复请求名会去重排序。value 为 1–16,384 UTF-8 字节，不能含 NUL。`LOCALSHELLD_*`、`BASH_ENV`、`ENV`、`SHELLOPTS`、`BASHOPTS`、`CDPATH` 为 shell 运行时保留名称。
+MCP 和 HTTP 的 `enter_interactive` 均接收可选 `secret_keys: string[]`。key 同时是环境变量名，符合 `[A-Z_][A-Z0-9_]{0,127}`；后端同样校验大写。最多保存及请求 64 个 key，重复请求名会去重排序。value 为 1–16,384 UTF-8 字节，不能含 NUL。`LOCALSHELLD_*`、`BASH_ENV`、`ENV`、`SHELLOPTS`、`BASHOPTS`、`CDPATH` 为 shell 运行时保留名称。
 
-- 交互弹窗显示本次请求的完整 key 列表，不显示 value。记忆允许仅覆盖已确认的 key；旧的 shell 允许记忆或新增 key 仍需再次确认。记忆拒绝继续拒绝该 agent 的请求。
-- 预授权使用原有执行 token，不另签发 secret token。同一有效 token 可以选择任意已注册 key；执行身份权限不变。
-- 新会话省略或传空列表时不注入凭据。存活会话重新 enter 且省略或传空列表时保留原选择；显式传不同的非空列表会报错，须先 destroy 再进入。
+- 交互弹窗显示本次请求的完整 key 列表，不显示 value。
+- 新会话省略或传空列表时不注入凭据。修改所选 key 时先 destroy，再重新进入。
 - 注入发生在子进程创建时，不拼接 shell 赋值语句，不修改 daemon 的全局环境。当前用户、管理员和 SYSTEM/root 的 shell 使用同一份会话快照，子进程正常继承。各身份执行后的环境变更仍彼此独立。
 - 后台更换或删除凭据不改变已有快照。销毁后重新 enter 才读取新值，且需再次提供所需 key；未知 key 使新建失败，不创建部分会话。
 - 配对后统一使用用户 daemon 的凭据库，两端管理页通过已有加密桥访问同一库。未配对时使用本 daemon 的库；配对不会复制或迁移原独立库。系统端无法连接已配对的凭据库时不会回退到另一份值。
@@ -228,22 +213,21 @@ credential 格式为：
 {"type":"totp","value":"123456"}
 ```
 
-- `POST /v1/admin/tokens/issue`：`{"credential":...,"ttl_seconds":86400}`。省略有效期默认为 24 小时。永久令牌使用 `{"credential":...,"permanent":true}`。
-- `POST /v1/admin/tokens/list`：`{"credential":...}`。只返回 id、签发/过期时间和撤销状态，不返回令牌。
-- `POST /v1/admin/tokens/revoke`：`{"credential":...,"id":"..."}`。
+- `POST /v1/admin/sessions/list`：`{"credential":...}` 或管理 Bearer session。返回会话授权的 id、签发/过期时间和撤销状态，不返回执行凭据。
+- `POST /v1/admin/sessions/revoke`：`{"credential":...,"id":"..."}`，或省略 credential 使用管理 Bearer session。
 
 Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证会清除失败计数。
 
-管理接口只管理当前 daemon 的令牌，不转发 Master/TOTP。用户态 UI 签发的令牌永远只允许当前用户执行。跨 daemon 令牌可经用户 daemon 的 `/v1/tokens/revoke` 转交签发端撤销。
+会话列表只管理当前 daemon 签发的会话授权，不转发 Master/TOTP。经系统 daemon 授权的会话在系统管理页撤销。
 
 ### 管理登录与凭据设置
 
-`POST /v1/admin/login` 接收 `{"credential":...}`，返回 `{ "session":"...", "expires_at":... }`。管理 session 有效 10 分钟，仅供用户后台使用，不等同于执行 token/handle。下列已登录接口使用 `Authorization: Bearer <session>`。旧签发/列表/撤销接口仍接受 body 中的 credential，也可省略 credential 改用管理 session。
+`POST /v1/admin/login` 接收 `{"credential":...}`，返回 `{ "session":"...", "expires_at":... }`。管理 session 有效 10 分钟，仅供用户后台使用，不等同于执行 handle。下列已登录接口使用 `Authorization: Bearer <session>`。
 
 | 接口 | Body / 说明 |
 |---|---|
 | `POST /v1/admin/logout` | 清除本次管理 session |
-| `GET /v1/admin/settings` | TOTP 状态、通行密钥元数据、配对地址、记忆、桌面可用性 |
+| `GET /v1/admin/settings` | TOTP 状态、通行密钥元数据、配对地址、桌面可用性 |
 | `POST /v1/admin/password` | `{"password":"..."}`，允许空字符串；成功后所有管理 session/challenge 失效 |
 | `POST /v1/admin/totp/start` | 返回 `enrollment_id`、`secret`、`uri`，5 分钟内确认 |
 | `POST /v1/admin/totp/finish` | `{"enrollment_id":"...","code":"123456"}` |
@@ -251,9 +235,12 @@ Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证�
 | `POST /v1/admin/passkeys/register/start` | `{"name":"..."}`，返回 challenge ID 和 WebAuthn options |
 | `POST /v1/admin/passkeys/register/finish` | `{"challenge_id":"...","credential":<注册结果>}` |
 | `POST /v1/admin/passkeys/remove` | `{"id":"..."}` |
-| `POST /v1/admin/remembered/reset` | 清空当前授权端保存的所有 agent 选择，返回清除数量 |
+| `GET /v1/admin/agents` | `agents` 列表：id、name、完整 path、processes、policy、revision |
+| `POST /v1/admin/agents/policy` | `{id, policy, revision, command_id}`；policy 为 once、trust、ask 或 deny |
 
-通行密钥登录使用 `/v1/admin/passkeys/authenticate/start` 和 `/finish`，无需已有 session；finish 接收 challenge ID 和 WebAuthn credential，验证成功后返回相同管理 session，再调用普通令牌签发接口。challenge 在服务端保留 5 分钟且只能消费一次；注册 challenge 绑定发起它的管理 session。RP ID 固定为 `localhost`，origin 严格绑定当前 daemon 的 `http://localhost:<port>`，要求认证器 user verification。最多 32 个通行密钥，私钥始终留在认证器中。
+通行密钥登录使用 `/v1/admin/passkeys/authenticate/start` 和 `/finish`，无需已有 session；finish 接收 challenge ID 和 WebAuthn credential，验证成功后返回相同管理 session。challenge 在服务端保留 5 分钟且只能消费一次；注册 challenge 绑定发起它的管理 session。RP ID 固定为 `localhost`，origin 严格绑定当前 daemon 的 `http://localhost:<port>`，要求认证器 user verification。最多 32 个通行密钥，私钥始终留在认证器中。
+
+Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。相同完整路径共享策略，不同路径分别管理。一次授权在允许前持久化消费；长期信任不限制以后请求的凭据 key。`command_id` 是幂等键，`revision` 防止旧页面覆盖新状态；可选 `expires_at_ms` 拒绝过期命令。配对后两端访问同一份用户 daemon 策略，修改策略不撤销已建立的会话。
 
 ### 用户进程配对
 
@@ -267,19 +254,17 @@ Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证�
 
 `POST /mcp` 使用 JSON-RPC 2.0、MCP Streamable HTTP JSON 响应，协议版本 `2025-06-18`。支持 initialize、ping、tools/list、tools/call，以及 notifications/initialized、run 的 notifications/cancelled。
 
-工具列表只公布七个短名称：
+工具列表只公布五个短名称：
 
 | 工具 | 用途 |
 |---|---|
 | `secrets_list` | 无需授权列出凭据 key，不返回 value |
 | `secrets_get` | 读取会话已授权 key 的明文快照；不鼓励使用，除非用户明确要求 |
 | `enter_interactive` | 桌面／Telegram 交互式请求授权，无 token 参数 |
-| `enter_preauthorized` | 使用用户事先签发的 token 进入 |
 | `run` | 显式选择身份，执行单次命令并传入可选 stdin |
 | `destroy` | 销毁会话及所有关联进程树 |
-| `revoke` | 撤销 token |
 
-旧 `localshelld_enter_interactive`、`localshelld_enter_with_preauthorized_credential`、`localshelld_run`、`localshelld_destroy_session`、`localshelld_revoke_token` 暂保留调用入口兼容，不重复列入 tools/list。Windows 参数仍必须升级为 privilege_level。更早的 `localshelld_enter` 不恢复。每个工具提供 inputSchema、outputSchema；结果同时有 content 文本和 structuredContent。
+旧 `localshelld_enter_interactive`、`localshelld_run`、`localshelld_destroy_session` 保留调用入口兼容，不重复列入 tools/list。Windows 参数仍必须升级为 privilege_level。每个工具提供 inputSchema、outputSchema；结果同时有 content 文本和 structuredContent。
 
 ### 客户端取消
 
@@ -291,21 +276,21 @@ initialize 响应通过 HTTP `Mcp-Session-Id` 返回强随机传输会话标识�
 
 服务器只取消同一传输会话中仍在执行的 run，销毁其整个 handle 并清理进程树；取消通知与被取消的 HTTP 请求返回 204，不再给被取消请求发送工具结果。未知或已完成的 requestId、其他客户端的同号请求、没有归属信息的通知均不影响执行。交互授权仍使用固定 60 秒期限，不由此通知取消。闲置传输会话可回收；传输会话失效不会自动撤销执行 handle。当前无后台任务 API。
 
-### 交互授权与预授权
+### 授权请求
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"enter_interactive","arguments":{"agent_name":"Example Agent","request_reason":"执行用户要求的本机检查。","confirm_text":"OK"}}}
 ```
 
-`enter_preauthorized` 参数为 `{"token":"<TOKEN>","confirm_text":"OK"}`。两个入口的 confirm_text 仅确认尊重用户个人隐私。需要注入凭据时添加 `"secret_keys":["JENKINS_CI_TOKEN"]`，后续 PowerShell 使用 `$env:JENKINS_CI_TOKEN`，Bash 使用 `$JENKINS_CI_TOKEN`，无需获取明文。
+confirm_text 仅确认尊重用户个人隐私。需要注入凭据时添加 `"secret_keys":["JENKINS_CI_TOKEN"]`，后续 PowerShell 使用 `$env:JENKINS_CI_TOKEN`，Bash 使用 `$JENKINS_CI_TOKEN`，无需获取明文。
 
 agent_name 是 1–128 字符的自报名，不得有控制字符；request_reason 非空、最多 16,384 UTF-8 字节、不得有 NUL，按原文显示。交互结果：
 
-- 接受：普通 enter 字段，加 `status:"authorized"`、`btw`；不返回原始 token，不声称一定发生本次点击。
-- 拒绝：`{"status":"denied","automatic":false,"btw":"..."}`；记忆拒绝为 automatic:true。
+- 接受：上述会话字段，加 `status:"authorized"`、`btw`。
+- 拒绝：`{"status":"denied","btw":"..."}`。
 - 超时：`{"status":"timed_out","timeout_ms":60000,"btw":"..."}`。忽略、关闭弹窗仍等至原 60 秒截止时间。
 - btw 是用户在弹窗填写的附言，类型为 string，不是无来源的服务端噪音。
 
-客户端应给交互授权留出超过 60 秒的调用时间。无桌面/配对或通信失败时明确报错。最多同时等待 8 个请求；授权频率冷却与客户端凭据绑定尚未改变。名称只是自报显示信息，同名请求共享记忆，不是身份认证。
+客户端应给授权留出超过 60 秒的调用时间。授权通道不可用或通信失败时明确报错。最多同时等待 8 个请求。名称只是自报显示信息，不能用于认证。
 
-配对用户入口转由系统端统一决策；未配对用户入口仅允许当前用户权限。内部交互授权默认 24 小时，可在签发端管理页面撤销。清除记忆不撤销已存在授权。token 和 handle 是 bearer 凭据，可能保存在客户端调用历史中，不应再次回显、写日志或放入 URL。
+配对用户入口由系统端建立授权会话；未配对用户入口仅允许当前用户权限。会话授权默认 24 小时，可在签发端管理页面撤销。handle 是 bearer 凭据，可能保存在客户端调用历史中，不应再次回显、写日志或放入 URL。

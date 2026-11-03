@@ -24,13 +24,14 @@ struct Fixture {
 }
 
 async fn enter(State(state): State<Arc<Fixture>>, Json(args): Json<Value>) -> Json<Value> {
-    assert_eq!(args["token"], "fixture-owner-token");
+    assert!(args.get("token").is_none());
+    assert_eq!(args["agent_name"], "fixture");
     state.entered.notify_one();
     if state.delayed.load(Ordering::SeqCst) {
         state.release.notified().await;
     }
     Json(
-        json!({"handle":"fixture-private-handle","reused":false,"shell":"fixture","platform":std::env::consts::OS,"daemon":"user","identities":{},"privilege_levels":[],"expires_at":null,"expires_at_iso":null}),
+        json!({"handle":"fixture-private-handle","status":"authorized","btw":"","reused":false,"automatic":true,"policy":"trust","shell":"fixture","platform":std::env::consts::OS,"daemon":"user","identities":{},"privilege_levels":[],"expires_at":null,"expires_at_iso":null}),
     )
 }
 
@@ -50,7 +51,7 @@ async fn destroy(State(state): State<Arc<Fixture>>, Json(args): Json<Value>) -> 
 async fn fixture() -> (String, Arc<Fixture>, tokio::task::JoinHandle<()>) {
     let state = Arc::new(Fixture::default());
     let router = Router::new()
-        .route("/v1/sessions/enter/preauthorized", post(enter))
+        .route("/v1/sessions/enter/interactive", post(enter))
         .route("/v1/commands/run", post(run))
         .route("/v1/sessions/destroy", post(destroy))
         .with_state(state.clone());
@@ -65,8 +66,7 @@ async fn fixture() -> (String, Arc<Fixture>, tokio::task::JoinHandle<()>) {
 fn adapter(endpoint: &str) -> tokio::process::Child {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_trustd-stdio"));
     command
-        .args(["--endpoint", endpoint, "--token-env", "TRUSTD_TEST_TOKEN"])
-        .env("TRUSTD_TEST_TOKEN", "fixture-owner-token")
+        .args(["--endpoint", endpoint])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -115,12 +115,12 @@ async fn binary_hides_credentials_survives_partial_input_and_cleans_up_on_eof() 
     );
     send(&mut write, 2, "tools/list", json!({})).await;
     let listed = receive(&mut read).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 5);
     send(
         &mut write,
         3,
         "tools/call",
-        json!({"name":"enter_preauthorized","arguments":{"confirm_text":"OK"}}),
+        json!({"name":"enter_interactive","arguments":{"agent_name":"fixture","request_reason":"test","confirm_text":"OK"}}),
     )
     .await;
     assert_eq!(receive(&mut read).await["result"]["isError"], false);
@@ -174,7 +174,7 @@ async fn eof_during_authorization_destroys_the_late_session_before_exit() {
         &mut write,
         2,
         "tools/call",
-        json!({"name":"enter_preauthorized","arguments":{"confirm_text":"OK"}}),
+        json!({"name":"enter_interactive","arguments":{"agent_name":"fixture","request_reason":"test","confirm_text":"OK"}}),
     )
     .await;
     state.entered.notified().await;

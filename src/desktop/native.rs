@@ -34,6 +34,7 @@ impl Desktop {
                     Event::Show(Request {
                         id: prompt.id,
                         agent: prompt.agent_name,
+                        agent_path: prompt.agent_path,
                         reason: prompt.request_reason,
                         scope: prompt.scope,
                         secret_keys: prompt.secret_keys,

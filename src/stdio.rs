@@ -25,7 +25,6 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(75);
 pub struct Adapter {
     endpoint: String,
     client: reqwest::Client,
-    token: Option<Zeroizing<String>>,
     handle: Mutex<Option<Zeroizing<String>>>,
     // Only lifecycle transitions are serialized. A long run never prevents close/cancel.
     lifecycle: Mutex<()>,
@@ -33,14 +32,10 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    pub fn new(endpoint: SocketAddr, token: Option<Zeroizing<String>>) -> Result<Self> {
+    pub fn new(endpoint: SocketAddr) -> Result<Self> {
         ensure!(
             endpoint.ip().is_loopback() && endpoint.port() != 0,
             "stdio requires a literal loopback daemon address"
-        );
-        ensure!(
-            token.as_ref().is_none_or(|value| !value.is_empty()),
-            "configured token is empty"
         );
         Ok(Self {
             endpoint: format!("http://{endpoint}"),
@@ -49,7 +44,6 @@ impl Adapter {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .build()?,
-            token,
             handle: Mutex::new(None),
             lifecycle: Mutex::new(()),
             closed: AtomicBool::new(false),
@@ -59,13 +53,6 @@ impl Adapter {
     fn definitions(&self) -> Value {
         let mut definitions = crate::mcp_text::tool_definitions();
         let entries = definitions.as_array_mut().unwrap();
-        entries.retain(|entry| {
-            self.token.is_some()
-                || !matches!(
-                    entry["name"].as_str(),
-                    Some("enter_preauthorized" | "revoke")
-                )
-        });
         for entry in entries {
             for schema in ["inputSchema", "outputSchema"] {
                 if let Some(schema) = entry.get_mut(schema) {
@@ -76,12 +63,7 @@ impl Adapter {
             match entry["name"].as_str().unwrap() {
                 "enter_interactive" => {
                     entry["description"] = json!(
-                        "Ask the owner for access through desktop/Telegram. This process holds the resulting session internally. No token or handle is supplied or returned. Names are self-reported. Read status and the owner's btw note. Close the existing session before requesting a new one. Approval has a 60 second deadline; allow more than 60 seconds at the client."
-                    )
-                }
-                "enter_preauthorized" => {
-                    entry["description"] = json!(
-                        "Enter using the token configured by the owner in the adapter's environment. Never ask the model to copy a token. One token must not be shared by multiple adapter processes. Close the current session first."
+                        "Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. This process holds the resulting session internally. Read status and the owner's btw note. Close the existing session before requesting a new one. The request has a 60 second deadline; allow more than 60 seconds at the client."
                     )
                 }
                 "run" => {
@@ -92,11 +74,6 @@ impl Adapter {
                 "destroy" => {
                     entry["description"] = json!(
                         "Close this adapter's current session and terminate its process trees. Idempotent when no session is open."
-                    )
-                }
-                "revoke" => {
-                    entry["description"] = json!(
-                        "Revoke the owner-configured token, terminating all sessions it owns. No token argument."
                     )
                 }
                 "secrets_get" => {
@@ -209,7 +186,7 @@ impl Adapter {
         );
         match name {
             "secrets_list" => self.request("/v1/secrets/keys", None, false).await,
-            "enter_interactive" | "enter_preauthorized" => {
+            "enter_interactive" => {
                 let _transition = self.lifecycle.lock().await;
                 ensure!(
                     !self.closed.load(Ordering::SeqCst) && !*cancelled.borrow(),
@@ -219,30 +196,28 @@ impl Adapter {
                     self.handle.lock().await.is_none(),
                     "a session is already open; destroy it before requesting another authorization"
                 );
-                let path = if name == "enter_interactive" {
-                    "/v1/sessions/enter/interactive"
-                } else {
-                    args["token"] = json!(
-                        self.token
-                            .as_deref()
-                            .context("no owner-configured token")?
-                            .as_str()
-                    );
-                    "/v1/sessions/enter/preauthorized"
-                };
                 // Do not drop an in-flight authorization on cancellation/EOF: a late approval
                 // can create a session. Receive it, then explicitly destroy it.
-                let mut result = self.request(path, Some(args), false).await?;
+                let mut result = self
+                    .request("/v1/sessions/enter/interactive", Some(args), false)
+                    .await?;
+                // Only the documented result crosses the model-facing boundary, even
+                // when connected to an older daemon during a rolling upgrade.
+                if let Some(object) = result.as_object_mut() {
+                    let allowed = definition["outputSchema"]["properties"]
+                        .as_object()
+                        .unwrap();
+                    object.retain(|key, _| key == "handle" || allowed.contains_key(key));
+                    if object.contains_key("message") {
+                        object.insert("message".into(), json!("Authorization request completed."));
+                    }
+                }
                 let handle = result
                     .as_object_mut()
                     .context("invalid authorization response")?
                     .remove("handle");
                 if let Some(Value::String(handle)) = handle {
                     let handle = Zeroizing::new(handle);
-                    ensure!(
-                        result["reused"] != true,
-                        "configured token already has a live session; use a separate token per adapter"
-                    );
                     *self.handle.lock().await = Some(handle.clone());
                     if self.closed.load(Ordering::SeqCst) || *cancelled.borrow() {
                         self.destroy_handle(&handle).await?;
@@ -258,12 +233,6 @@ impl Adapter {
                 Ok(result)
             }
             "destroy" => self.close().await,
-            "revoke" => {
-                let _transition = self.lifecycle.lock().await;
-                let result = self.request("/v1/tokens/revoke", Some(json!({"token":self.token.as_deref().context("no owner-configured token")?.as_str()})), false).await?;
-                self.handle.lock().await.take();
-                Ok(result)
-            }
             "run" | "secrets_get" => {
                 let handle = {
                     let _transition = self.lifecycle.lock().await;

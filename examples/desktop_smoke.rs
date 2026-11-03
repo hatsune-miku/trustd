@@ -12,6 +12,12 @@ fn main() {
             .request(Prompt {
                 id: "native-smoke-test".into(),
                 agent_name: "localshelld 界面测试".into(),
+                agent_path: Some(
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 request_reason:
                     "仅用于界面测试，不授予任何命令权限。\n检查原生窗口、完整缘由和附加说明回传。"
                         .into(),

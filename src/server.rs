@@ -36,6 +36,7 @@ pub struct AppState {
     pub(crate) management: Arc<Mutex<crate::management::Management>>,
     pub(crate) mcp_sessions: Arc<mcp::TransportSessions>,
     pub(crate) sync: Arc<Mutex<crate::sync::Runtime>>,
+    pub(crate) agents: Arc<Mutex<crate::agents::Registry>>,
     interactive_permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -93,6 +94,7 @@ struct SessionStore {
 #[derive(Debug, Serialize)]
 pub struct EnterResult {
     pub handle: String,
+    #[serde(skip)]
     pub reused: bool,
     pub secret_keys: Vec<String>,
     pub shell: ShellKind,
@@ -217,6 +219,7 @@ impl AppState {
             management: Arc::new(Mutex::new(crate::management::Management::default())),
             mcp_sessions: Arc::new(mcp::TransportSessions::default()),
             sync: Arc::new(Mutex::new(crate::sync::Runtime::default())),
+            agents: Arc::new(Mutex::new(crate::agents::Registry::default())),
             interactive_permits: Arc::new(tokio::sync::Semaphore::new(crate::consent::MAX_PENDING)),
             mode: DaemonMode::Privileged,
             peer: None,
@@ -257,6 +260,17 @@ impl AppState {
         request_reason: &str,
         secret_keys: &[String],
     ) -> Result<serde_json::Value, ApiError> {
+        self.enter_interactive_for_agent(agent_name, request_reason, secret_keys, None)
+            .await
+    }
+
+    pub(crate) async fn enter_interactive_for_agent(
+        &self,
+        agent_name: &str,
+        request_reason: &str,
+        secret_keys: &[String],
+        agent: Option<crate::agents::Identity>,
+    ) -> Result<serde_json::Value, ApiError> {
         use serde_json::json;
         validate_request(agent_name, request_reason)?;
         let secret_keys = crate::secrets::normalize_keys(secret_keys)?;
@@ -274,6 +288,7 @@ impl AppState {
                     agent_name: agent_name.into(),
                     request_reason: request_reason.into(),
                     secret_keys,
+                    agent,
                 },
                 Some(CONSENT_TIMEOUT + Duration::from_secs(1)),
                 65_536,
@@ -289,25 +304,9 @@ impl AppState {
                     .map_err(|_| ApiError::internal("session serialization failed"))?;
                 result["status"] = json!("authorized");
                 result["btw"] = btw;
+                result.as_object_mut().unwrap().remove("reused");
             }
             return Ok(result);
-        }
-        let (remembered, approved_keys) = {
-            let settings = self.settings.lock().await;
-            (
-                settings.saved.remembered.get(agent_name).copied(),
-                settings
-                    .saved
-                    .remembered_secrets
-                    .get(agent_name)
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-        };
-        if remembered == Some(false) {
-            return Ok(
-                json!({"status":"denied", "automatic":true, "message":"Automatically denied by the user's remembered choice.", "btw":""}),
-            );
         }
         if !secret_keys.is_empty() {
             let available = self.secret_keys().await?;
@@ -317,11 +316,12 @@ impl AppState {
                 }
             }
         }
-        let mut btw = String::new();
-        if remembered.is_none() || secret_keys.iter().any(|key| !approved_keys.contains(key)) {
+        let btw;
+        {
             let prompt = Prompt {
                 id: uuid::Uuid::new_v4().to_string(),
                 agent_name: agent_name.into(),
+                agent_path: agent.as_ref().map(|a| a.path.clone()),
                 request_reason: request_reason.into(),
                 secret_keys: secret_keys.clone(),
                 scope: if self.mode == DaemonMode::Privileged {
@@ -343,7 +343,7 @@ impl AppState {
                     bridge::call(
                         &pairing,
                         DaemonMode::User,
-                        bridge::Request::Consent { prompt },
+                        bridge::Request::Consent { prompt, agent },
                         Some(CONSENT_TIMEOUT + Duration::from_secs(1)),
                         65_536,
                     ),
@@ -358,28 +358,17 @@ impl AppState {
                     },
                 }
             } else {
-                self.request_consent(prompt).await?
+                self.authorize_agent(prompt, agent).await?
             };
             btw = decision.btw;
             if decision.choice == Choice::Ignore {
                 tokio::time::sleep_until(deadline).await;
                 return Ok(json!({"status":"timed_out", "timeout_ms":60_000, "btw":btw}));
             }
-            if decision.remember {
-                let mut settings = self.settings.lock().await;
-                let mut next = settings.saved.clone();
-                next.remembered
-                    .insert(agent_name.to_owned(), decision.choice == Choice::Accept);
-                next.remembered_secrets
-                    .insert(agent_name.to_owned(), secret_keys.clone());
-                settings.save(next).await?;
-            }
             if decision.choice == Choice::Deny {
-                return Ok(json!({"status":"denied", "automatic":false, "btw":btw}));
+                return Ok(json!({"status":"denied", "btw":btw}));
             }
         }
-        // Both fresh and remembered approvals have the same truthful result.
-        // No assertion is made that a person clicked for this particular call.
         let token = self
             .auth
             .lock()
@@ -395,6 +384,7 @@ impl AppState {
         };
         let mut result = serde_json::to_value(entered)
             .map_err(|_| ApiError::internal("session serialization failed"))?;
+        result.as_object_mut().unwrap().remove("reused");
         result["status"] = json!("authorized");
         result["message"] = json!("Session authorized. Use the handle for subsequent calls.");
         result["btw"] = json!(btw);
@@ -424,11 +414,6 @@ impl AppState {
         secret_keys: &[String],
     ) -> Result<EnterResult, ApiError> {
         let secret_keys = crate::secrets::normalize_keys(secret_keys)?;
-        // Known local tokens (including expired/revoked ones) never fall back to
-        // a different authority. A user token cannot acquire privileged access.
-        if self.mode == DaemonMode::User && self.auth.lock().await.token_identity(token).is_err() {
-            return self.enter_remote(token, &secret_keys).await;
-        }
         self.auth.lock().await.verify_token(token)?;
         let identities = self.execution_identities().await;
         let mut environment = None;
@@ -519,16 +504,6 @@ impl AppState {
         }
     }
 
-    async fn enter_remote(
-        &self,
-        token: &str,
-        secret_keys: &[String],
-    ) -> Result<EnterResult, ApiError> {
-        let peer = self.peer.as_ref().expect("user daemon has a peer");
-        let entered = peer.enter(token, secret_keys).await?;
-        self.register_remote(entered).await
-    }
-
     pub(crate) async fn attach_remote(&self, handle: &str) -> Result<EnterResult, ApiError> {
         let peer = self.peer.as_ref().ok_or_else(|| {
             ApiError::forbidden("only the user daemon can attach a privileged session")
@@ -537,7 +512,6 @@ impl AppState {
         self.register_remote(crate::peer::Entered {
             handle: handle.into(),
             expires_at: inspected.expires_at,
-            daemon: "privileged".into(),
             identities: inspected.identities,
             secret_keys: inspected.secret_keys,
         })
@@ -855,7 +829,7 @@ impl AppState {
             }
         } else if privilege_level.is_privileged() && self.mode == DaemonMode::User {
             return Err(ApiError::forbidden(
-                "this user token authorizes current-user execution only; enter with a privileged-daemon authorization for elevated execution",
+                "this session authorizes current-user execution only; enter with a privileged-daemon authorization for elevated execution",
             ));
         }
         #[cfg(windows)]
@@ -1018,11 +992,6 @@ impl AppState {
     }
 
     pub async fn revoke_token(&self, token: &str) -> Result<(), ApiError> {
-        if let Some(peer) = &self.peer
-            && self.auth.lock().await.token_identity(token).is_err()
-        {
-            return peer.revoke(token).await;
-        }
         let token_id = {
             let mut auth = self.auth.lock().await;
             let authorization = auth.token_identity(token)?;
@@ -1054,6 +1023,7 @@ impl AppState {
 
     pub async fn shutdown(&self) {
         self.stop_sync_worker().await;
+        self.stop_agent_worker().await;
         let sessions = {
             let mut sessions = self.sessions.lock().await;
             sessions.shutting_down = true;
@@ -1146,31 +1116,8 @@ pub(crate) fn strong_handle() -> String {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EnterBody {
-    token: String,
-    #[serde(default)]
-    secret_keys: Vec<String>,
-}
-
-#[derive(Deserialize)]
 struct HandleBody {
     handle: String,
-}
-
-#[derive(Deserialize)]
-struct IssueBody {
-    credential: Option<Credential>,
-    ttl_seconds: Option<u64>,
-    #[serde(default)]
-    permanent: bool,
-}
-
-#[derive(Serialize)]
-struct IssueResponse {
-    token: String,
-    record: TokenRecord,
-    warning: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -1195,12 +1142,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/bridge",
             post(bridge::handle).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
-        .route("/v1/sessions/enter", post(enter))
         .route("/v1/sessions/validate", post(validate))
         .route("/v1/sessions/watch", post(watch))
-        .route("/v1/admin/tokens/issue", post(issue))
-        .route("/v1/admin/tokens/list", post(list_tokens))
-        .route("/v1/admin/tokens/revoke", post(admin_revoke))
+        .route("/v1/admin/sessions/list", post(list_tokens))
+        .route("/v1/admin/sessions/revoke", post(admin_revoke))
         .route("/mcp", post(mcp::handle))
         .fallback(crate::assets::serve)
         .layer(axum::middleware::from_fn_with_state(
@@ -1268,17 +1213,6 @@ async fn health(
     )
 }
 
-async fn enter(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    Json(body): Json<EnterBody>,
-) -> Result<Json<EnterResult>, ApiError> {
-    Ok(Json(
-        state
-            .enter_with_secrets(&body.token, &body.secret_keys)
-            .await?,
-    ))
-}
-
 async fn validate(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(body): Json<HandleBody>,
@@ -1303,42 +1237,6 @@ async fn watch(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.validate_session(&body.handle, true).await?;
     Ok(Json(serde_json::json!({"valid": true})))
-}
-
-async fn issue(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<IssueBody>,
-) -> Result<Json<IssueResponse>, ApiError> {
-    crate::management::authorize(&state, &headers, body.credential.as_ref()).await?;
-    let ttl = if body.permanent {
-        None
-    } else {
-        Some(body.ttl_seconds.unwrap_or(DEFAULT_TOKEN_TTL_SECONDS))
-    };
-    if ttl == Some(0) {
-        return Err(ApiError::bad_request(
-            "ttl_seconds must be greater than zero",
-        ));
-    }
-    let (token, record) = state.auth.lock().await.issue_token(ttl)?;
-    Ok(Json(IssueResponse {
-        token,
-        record,
-        warning: if state.mode == DaemonMode::User {
-            if cfg!(windows) {
-                "User-authorized current-user execution only. Valid until expiry, revocation or user daemon restart."
-            } else {
-                "User-authorized current-user execution (sudo=false). Valid until expiry, revocation or user daemon restart."
-            }
-        } else {
-            if cfg!(windows) {
-                "User-authorized current-user, as-administrator and SYSTEM execution where available. Valid until expiry, revocation or privileged daemon restart."
-            } else {
-                "User-authorized administrator/root execution. Valid until expiry, revocation or privileged daemon restart."
-            }
-        },
-    }))
 }
 
 async fn list_tokens(
@@ -1397,13 +1295,17 @@ mod tests {
         (status, body)
     }
 
-    fn test_app() -> Router {
+    fn test_state() -> AppState {
         let config = Config {
             password_hash: hash_password(b"test master password").unwrap(),
             ..Config::default()
         };
         let auth = AuthManager::new(config.password_hash.clone(), None);
-        router(AppState::new(config, auth))
+        AppState::new(config, auth)
+    }
+
+    fn test_app() -> Router {
+        router(test_state())
     }
 
     #[tokio::test]
@@ -1487,24 +1389,14 @@ mod tests {
 
     #[tokio::test]
     async fn full_http_lifecycle_reuses_session_and_revokes_access() {
-        let app = test_app();
-        let credential = json!({ "type": "password", "value": "test master password" });
-        let (status, issued) = request(
-            &app,
-            "/v1/admin/tokens/issue",
-            json!({ "credential": credential, "ttl_seconds": 120 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let token = issued["token"].as_str().unwrap();
-        assert_eq!(token.len(), 22);
-        assert!(token.bytes().all(|byte| byte.is_ascii_alphanumeric()));
-
-        let (_, first) = request(&app, "/v1/sessions/enter", json!({ "token": token })).await;
-        let (_, second) = request(&app, "/v1/sessions/enter", json!({ "token": token })).await;
+        let state = test_state();
+        let app = router(state.clone());
+        let token = state.auth.lock().await.issue_token(Some(120)).unwrap().0;
+        let first = serde_json::to_value(state.enter(&token).await.unwrap()).unwrap();
+        let second = serde_json::to_value(state.enter(&token).await.unwrap()).unwrap();
         assert_eq!(first["handle"], second["handle"]);
-        assert_eq!(first["reused"], false);
-        assert_eq!(second["reused"], true);
+        assert!(first.get("reused").is_none());
+        assert!(second.get("reused").is_none());
         assert_eq!(
             first["shell"],
             serde_json::to_value(ShellKind::native()).unwrap()
@@ -1524,13 +1416,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(result["output"].as_str().unwrap().contains("42"));
 
-        let (status, _) = request(&app, "/v1/tokens/revoke", json!({ "token": token })).await;
-        assert_eq!(status, StatusCode::OK);
+        state.revoke_token(&token).await.unwrap();
         command["command"] = json!("echo should-not-run");
         let (status, _) = request(&app, "/v1/commands/run", command).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = request(&app, "/v1/sessions/enter", json!({ "token": token })).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(state.enter(&token).await.is_err());
     }
 
     #[tokio::test]
@@ -1597,11 +1487,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_invalid_timeout_and_credentials() {
+    async fn rejects_invalid_management_credentials() {
         let app = test_app();
         let (status, _) = request(
             &app,
-            "/v1/admin/tokens/issue",
+            "/v1/admin/sessions/list",
             json!({
                 "credential": { "type": "password", "value": "wrong password" },
                 "ttl_seconds": 0
@@ -1612,22 +1502,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_lists_and_revokes_tokens_by_id() {
-        let app = test_app();
+    async fn admin_lists_and_revokes_session_authorizations_by_id() {
+        let state = test_state();
+        let app = router(state.clone());
         let credential = json!({ "type": "password", "value": "test master password" });
-        let (status, issued) = request(
-            &app,
-            "/v1/admin/tokens/issue",
-            json!({ "credential": credential.clone(), "ttl_seconds": 120 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let token = issued["token"].as_str().unwrap();
-        let id = issued["record"]["id"].as_str().unwrap();
+        let (token, record) = state.auth.lock().await.issue_token(Some(120)).unwrap();
+        let id = record.id.as_str();
 
         let (status, records) = request(
             &app,
-            "/v1/admin/tokens/list",
+            "/v1/admin/sessions/list",
             json!({ "credential": credential.clone() }),
         )
         .await;
@@ -1637,13 +1521,12 @@ mod tests {
 
         let (status, _) = request(
             &app,
-            "/v1/admin/tokens/revoke",
+            "/v1/admin/sessions/revoke",
             json!({ "credential": credential, "id": id }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = request(&app, "/v1/sessions/enter", json!({ "token": token })).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(state.enter(&token).await.is_err());
     }
 
     #[tokio::test]

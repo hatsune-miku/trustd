@@ -8,7 +8,7 @@ async function login(page: Page) {
   await page.getByLabel('验证方式').selectOption('password')
   await page.getByLabel('Master Password', { exact: true }).fill('browser test')
   await page.getByRole('button', { name: '验证身份', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '签发访问令牌' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible()
 }
 
 test('login defaults to passkey and keeps password and TOTP available', async ({ page }) => {
@@ -39,22 +39,70 @@ test('passkey default keeps the localhost link when opened through an IP address
   )
 })
 
-test('sign in, issue, copy authorization text and revoke', async ({ page, context }) => {
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+test('path-scoped policies show full paths and replace token issuance', async ({ page }) => {
+  const agents = [
+    {
+      id: 'first',
+      name: 'codex.exe',
+      path: 'C:\\Users\\Owner\\Applications\\Codex with spaces\\codex.exe',
+      processes: [
+        { pid: 123, started_at: 1 },
+        { pid: 456, started_at: 1 },
+      ],
+      policy: 'ask',
+      revision: 0,
+    },
+    {
+      id: 'second',
+      name: 'codex.exe',
+      path: 'D:\\Other install\\' + 'Long directory '.repeat(15) + '\\codex.exe',
+      processes: [],
+      policy: 'deny',
+      revision: 0,
+    },
+    {
+      id: 'unresolved',
+      name: 'claude.exe',
+      path: null,
+      processes: [{ pid: 789, started_at: 1 }],
+      policy: 'ask',
+      revision: 0,
+    },
+  ]
+  await page.route('**/v1/admin/agents', (route) => route.fulfill({ json: { agents } }))
+  await page.route('**/v1/admin/agents/policy', async (route) => {
+    const body = route.request().postDataJSON()
+    const agent = agents.find((item) => item.id === body.id)!
+    expect(body.revision).toBe(agent.revision)
+    expect(body.command_id).toMatch(/^[\da-f-]{36}$/)
+    expect(body.path).toBeUndefined()
+    agent.policy = body.policy
+    agent.revision += 1
+    await route.fulfill({ json: { saved: true } })
+  })
   await login(page)
-  await page.getByRole('button', { name: '确认授权并签发' }).click()
-  await expect(page.getByLabel('本次访问令牌')).toHaveValue(/^[a-zA-Z0-9]{22}$/)
-  const token = await page.getByLabel('本次访问令牌').inputValue()
-  await page.getByRole('button', { name: '复制授权文本' }).click()
-  const copied = await page.evaluate(() => navigator.clipboard.readText())
-  expect(copied).toContain(token)
-  expect(copied).toContain('I, an experienced developer')
-  page.once('dialog', (dialog) => dialog.accept())
-  await page.getByRole('row').filter({ hasText: '有效' }).last().getByRole('button', { name: '撤销' }).click()
-  await expect(page.getByText('令牌已撤销。', { exact: true })).toBeVisible()
+  await expect(page.getByText(agents[0].path!, { exact: true })).toBeVisible()
+  await expect(page.getByText(agents[1].path!, { exact: true })).toBeVisible()
+  await expect(page.getByText('运行中 · PID 123、456')).toBeVisible()
+  const first = page.getByRole('combobox', { name: `codex.exe ${agents[0].path} 的授权状态`, exact: true })
+  const second = page.getByRole('combobox', { name: `codex.exe ${agents[1].path} 的授权状态`, exact: true })
+  for (const policy of ['once', 'trust', 'ask', 'deny']) {
+    await first.selectOption(policy)
+    await expect(first).toHaveValue(policy)
+    await expect(first).toBeEnabled()
+    await expect(second).toHaveValue('deny')
+  }
+  await expect(page.getByRole('combobox', { name: 'claude.exe unresolved 的授权状态' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '确认授权并签发' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '复制授权文本' })).toHaveCount(0)
+  await page.screenshot({ path: 'test-results/desktop-agents.png', fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await expect(page.getByText(agents[1].path!, { exact: true })).toBeVisible()
+  await page.screenshot({ path: 'test-results/mobile-agents.png', fullPage: true })
 })
 
-test('passkey registration, authentication and token issuance use real WebAuthn', async ({ page, context }) => {
+test('passkey registration and management authentication use real WebAuthn', async ({ page, context }) => {
   const cdp = await context.newCDPSession(page)
   await cdp.send('WebAuthn.enable')
   const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
@@ -75,9 +123,7 @@ test('passkey registration, authentication and token issuance use real WebAuthn'
   await page.getByRole('button', { name: '退出管理' }).click()
   await expect(page.getByLabel('验证方式')).toHaveValue('passkey')
   await page.getByRole('button', { name: '使用通行密钥验证' }).click()
-  await expect(page.getByRole('heading', { name: '签发访问令牌' })).toBeVisible()
-  await page.getByRole('button', { name: '确认授权并签发' }).click()
-  await expect(page.getByLabel('本次访问令牌')).toHaveValue(/^[a-zA-Z0-9]{22}$/)
+  await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible()
   await page.getByRole('button', { name: '验证方式', exact: true }).click()
   page.once('dialog', (dialog) => dialog.accept())
   await page.getByRole('button', { name: '移除', exact: true }).click()
@@ -93,8 +139,9 @@ test('mobile layout does not overflow and settings remain available', async ({ p
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/mobile-credentials.png', fullPage: true })
   await page.getByRole('button', { name: '桌面授权', exact: true }).click()
-  await page.getByRole('button', { name: '清除所有记忆' }).click()
-  await expect(page.getByText('已清除所有代理的自动选择。')).toBeVisible()
+  await expect(page.getByRole('button', { name: '清除所有记忆' })).toHaveCount(0)
+  await page.getByRole('button', { name: '已授权会话', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '已授权会话' })).toBeVisible()
 })
 
 test('consent content is literal text and returns choice plus note only through native IPC', async ({ page }) => {
@@ -103,6 +150,7 @@ test('consent content is literal text and returns choice plus note only through 
     window.__LOCALSHELLD_PROMPT__ = {
       id: 'test',
       agent_name: 'Test agent',
+      agent_path: '/Applications/Agent with spaces/Test agent',
       request_reason: 'literal <script>alert(1)</script>\nsecond line',
       scope: '仅回归测试，不执行命令',
       secret_keys: ['JENKINS_CI_TOKEN', 'OPENAI_API_KEY'],
@@ -177,7 +225,7 @@ test('credentials require uppercase keys and support write-only creation, replac
 
 test('desktop overview renders cleanly', async ({ page }) => {
   await login(page)
-  await page.screenshot({ path: 'test-results/desktop-tokens.png', fullPage: true })
+  await page.screenshot({ path: 'test-results/desktop-overview.png', fullPage: true })
   await page.getByRole('button', { name: '桌面授权', exact: true }).click()
   await page.screenshot({ path: 'test-results/desktop-settings.png', fullPage: true })
 })

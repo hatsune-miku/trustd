@@ -1,6 +1,8 @@
 //! Read-only wizard smoke tests and disposable elevated user-daemon fixtures.
 #![cfg(windows)]
 
+mod support;
+
 use std::{
     io::{BufRead, BufReader},
     process::{Child, Stdio},
@@ -160,24 +162,7 @@ fn elevated_daemon_supervises_only_a_medium_same_user_child() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let issued: Value = http
-        .post(format!("{base}/v1/admin/tokens/issue"))
-        .json(&json!({"credential":{"type":"password", "value":"disposable elevation fixture"}}))
-        .send()
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .unwrap();
-    let entered: Value = http
-        .post(format!("{base}/v1/sessions/enter"))
-        .json(&json!({"token":issued["token"]}))
-        .send()
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .unwrap();
+    let entered = support::authorize(&base, "disposable elevation fixture");
     assert_eq!(entered["privilege_levels"], json!(["current-user"]));
     let handle = entered["handle"].as_str().unwrap();
     let result: Value = http.post(format!("{base}/v1/commands/run"))
