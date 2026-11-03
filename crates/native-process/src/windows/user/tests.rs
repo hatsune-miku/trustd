@@ -102,9 +102,11 @@ fn restricted_token_removes_admin_rights_and_runs_a_medium_child() {
         "only traversal privilege may remain"
     );
 
-    // An elevated service-session token has no interactive desktop for the
-    // reduced child. Production rejects this identity before relaunching.
-    if original.elevated && !original.is_interactive_user() {
+    // Production only switches tokens for an elevated interactive login.
+    // Standard CI accounts can filter a token without possessing the process
+    // assignment privileges needed to launch with it; they keep their existing
+    // process in production. Service sessions are rejected before relaunching.
+    if !original.has_elevated_rights() || !original.is_interactive_user() {
         return;
     }
 
@@ -120,7 +122,7 @@ fn restricted_token_removes_admin_rights_and_runs_a_medium_child() {
         &BTreeMap::new(),
         Some(limited),
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("restricted child for {original:?}: {error}"));
     drop(child.stdin);
     let mut output = String::new();
     let mut errors = String::new();
@@ -138,6 +140,13 @@ fn restricted_token_removes_admin_rights_and_runs_a_medium_child() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("restricted child did not exit");
+}
+
+#[test]
+fn unprivileged_daemon_keeps_the_existing_process() {
+    if current_identity().unwrap().is_unprivileged() {
+        assert_eq!(relaunch_as_user_if_elevated().unwrap(), None);
+    }
 }
 
 #[test]
