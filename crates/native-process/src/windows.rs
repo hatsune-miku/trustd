@@ -18,14 +18,43 @@ use windows_sys::Win32::{
     System::{JobObjects::*, Threading::*},
 };
 
+mod user;
+pub use user::relaunch_as_user_if_elevated;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
     pub user: String,
     pub sid: String,
     pub is_system: bool,
+    /// Raw Windows TokenIsElevated flag, which restricted tokens can inherit.
     pub elevated: bool,
+    /// Verified medium token with administrative groups deny-only and every
+    /// privilege removed except traversal. Never inferred from a request.
+    #[serde(default)]
+    pub restricted_user: bool,
     pub integrity: String,
     pub session_id: u32,
+}
+
+impl Identity {
+    pub fn is_unprivileged(&self) -> bool {
+        !self.is_system && !self.has_elevated_rights()
+    }
+
+    pub fn has_elevated_rights(&self) -> bool {
+        self.elevated && !(self.restricted_user && self.integrity == "Medium")
+    }
+
+    pub fn is_interactive_user(&self) -> bool {
+        self.session_id != 0
+            && self.sid.starts_with("S-1-")
+            && self
+                .sid
+                .bytes()
+                .all(|c| c.is_ascii_digit() || c == b'S' || c == b'-')
+            && !matches!(self.sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
+            && !self.is_system
+    }
 }
 
 /// Sent only over the mutually authenticated pairing bridge, never accepted
@@ -177,11 +206,15 @@ fn identity(handle: HANDLE) -> io::Result<Identity> {
         _ => "Protected",
     }
     .to_owned();
+    let restricted_user = rid == 0x2000
+        && !matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
+        && user::has_only_user_rights(handle)?;
     Ok(Identity {
         user: account,
         is_system: sid == "S-1-5-18",
         sid,
         elevated,
+        restricted_user,
         integrity,
         session_id,
     })
@@ -205,7 +238,7 @@ fn creation_time(process: HANDLE) -> io::Result<u64> {
 }
 pub fn current_user_context() -> io::Result<UserContext> {
     let identity = current_identity()?;
-    if identity.elevated || identity.is_system {
+    if !identity.is_unprivileged() {
         return Err(error("the paired user daemon must be non-elevated"));
     }
     Ok(UserContext {
@@ -229,8 +262,9 @@ fn administrator_token(context: &UserContext) -> io::Result<OwnedHandle> {
     if actual.sid != context.identity.sid
         || actual.session_id != context.identity.session_id
         || actual.integrity != context.identity.integrity
-        || actual.elevated
-        || actual.is_system
+        || !actual.is_unprivileged()
+        || actual.elevated != context.identity.elevated
+        || actual.restricted_user != context.identity.restricted_user
     {
         return Err(error(&format!(
             "paired user process identity does not match (sid={}, session={}, integrity={}, elevated={}, system={})",
@@ -241,11 +275,9 @@ fn administrator_token(context: &UserContext) -> io::Result<OwnedHandle> {
             actual.is_system
         )));
     }
-    let data = token_data(original.as_raw_handle(), TokenLinkedToken)
-        .map_err(|_| error("the paired current user has no linked administrator token; no identity fallback is permitted"))?;
-    let linked = own(unsafe { (*data.as_ptr().cast::<TOKEN_LINKED_TOKEN>()).LinkedToken })?;
+    let linked = user::administrator_source(original.as_raw_handle(), &actual)?;
     let elevated = identity(linked.as_raw_handle())?;
-    if elevated.sid != actual.sid || !elevated.elevated || elevated.is_system {
+    if elevated.sid != actual.sid || !elevated.has_elevated_rights() || elevated.is_system {
         return Err(error(
             "linked token is not the same user's administrator identity",
         ));
@@ -443,6 +475,16 @@ pub fn spawn_with_environment(
     overrides: &BTreeMap<String, String>,
 ) -> io::Result<Spawned> {
     let admin_token = administrator.map(administrator_token).transpose()?;
+    spawn_with_token(executable, arguments, administrator, overrides, admin_token)
+}
+
+fn spawn_with_token(
+    executable: &str,
+    arguments: &[&str],
+    administrator: Option<&UserContext>,
+    overrides: &BTreeMap<String, String>,
+    admin_token: Option<OwnedHandle>,
+) -> io::Result<Spawned> {
     let (input_read, input_write) = pipe()?;
     let (output_read, output_write) = pipe()?;
     let (error_read, error_write) = pipe()?;
@@ -603,6 +645,21 @@ pub fn spawn_with_environment(
         identity: actual_identity,
         id: information.dwProcessId,
     };
+    if let Some(expected) = &admin_token {
+        let expected = identity(expected.as_raw_handle())?;
+        let actual = &child.identity;
+        if actual.sid != expected.sid
+            || actual.session_id != expected.session_id
+            || actual.integrity != expected.integrity
+            || actual.elevated != expected.elevated
+            || actual.restricted_user != expected.restricted_user
+            || actual.is_system != expected.is_system
+        {
+            return Err(error(
+                "suspended child token does not match the selected identity",
+            ));
+        }
+    }
     if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
         return Err(io::Error::last_os_error());
     }

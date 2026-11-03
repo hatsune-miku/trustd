@@ -282,33 +282,11 @@ fn sid() -> Result<String> {
 
 #[cfg(windows)]
 pub fn require_interactive_owner() -> Result<()> {
-    let output = super::windows_command("WindowsPowerShell/v1.0/powershell.exe")?
-        .args(["-NoProfile", "-NonInteractive", "-Command",
-            "$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); @{sid=$identity.User.Value; session=[Diagnostics.Process]::GetCurrentProcess().SessionId} | ConvertTo-Json -Compress"])
-        .output()?;
     ensure!(
-        output.status.success(),
-        "unable to inspect the Windows user-management identity"
-    );
-    let identity: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(
-        interactive_owner(
-            identity["sid"].as_str().unwrap_or_default(),
-            identity["session"].as_u64().unwrap_or_default()
-        ),
+        localshelld_native_process::current_identity()?.is_interactive_user(),
         "user daemon management requires the intended logged-in account (standard or Administrator), not LocalSystem/Session 0; use --system-only on headless hosts"
     );
     Ok(())
-}
-
-#[cfg(any(windows, test))]
-fn interactive_owner(sid: &str, session: u64) -> bool {
-    session != 0
-        && sid.starts_with("S-1-")
-        && !matches!(sid, "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
-        && sid
-            .bytes()
-            .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
 }
 
 #[cfg(any(windows, test))]
@@ -415,15 +393,6 @@ fn uninstall_native() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn system_accounts_and_session_zero_are_not_user_installation_targets() {
-        assert!(interactive_owner("S-1-5-21-1234-1001", 1));
-        for sid in ["S-1-5-18", "S-1-5-19", "S-1-5-20", "invalid"] {
-            assert!(!interactive_owner(sid, 1));
-        }
-        assert!(!interactive_owner("S-1-5-21-1234-1001", 0));
-    }
 
     #[test]
     fn autostart_uses_user_identity_and_escaped_paths() {
