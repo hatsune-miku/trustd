@@ -1,4 +1,4 @@
-//! User-scoped MCP configuration. Never runs inside the elevated installer.
+//! Login-scoped MCP configuration. Never runs inside the privileged apply helper.
 use anyhow::{Context, Result, ensure};
 use jsonc_parser::cst::{CstInputValue, CstObject, CstRootNode};
 use serde::Serialize;

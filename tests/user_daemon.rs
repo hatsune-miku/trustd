@@ -98,19 +98,38 @@ async fn verify_user_daemon(headless: bool) {
         .unwrap();
     let initialized = init.wait_with_output().unwrap();
     if !initialized.status.success() {
-        // Elevated CI runners must refuse user mode, never silently treat it as
-        // an unprivileged server. Unix CI separately tests both real identities.
+        // CLI initialization still refuses elevation. Interactive Windows
+        // daemons can now supervise a reduced child; service sessions and Unix
+        // root must continue to refuse user mode.
         let error = String::from_utf8_lossy(&initialized.stderr);
         assert!(error.contains("non-elevated"), "user init failed: {error}");
-        let serve = cli(true)
-            .args(["--config"])
-            .arg(&path)
-            .args(headless.then_some("--headless"))
-            .output()
+        #[cfg(windows)]
+        let can_reduce = localshelld_native_process::current_identity()
+            .unwrap()
+            .is_interactive_user();
+        #[cfg(not(windows))]
+        let can_reduce = false;
+        if can_reduce {
+            Config {
+                password_hash: localshelld::auth::hash_password(
+                    b"localshelld integration test password",
+                )
+                .unwrap(),
+                ..Config::default()
+            }
+            .save(&path)
             .unwrap();
-        assert!(!serve.status.success());
-        assert!(String::from_utf8_lossy(&serve.stderr).contains("non-elevated"));
-        return;
+        } else {
+            let serve = cli(true)
+                .args(["--config"])
+                .arg(&path)
+                .args(headless.then_some("--headless"))
+                .output()
+                .unwrap();
+            assert!(!serve.status.success());
+            assert!(String::from_utf8_lossy(&serve.stderr).contains("non-elevated"));
+            return;
+        }
     }
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();

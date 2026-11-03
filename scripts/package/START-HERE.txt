@@ -4,7 +4,9 @@ Windows：双击 INSTALL.cmd。
 macOS：双击 INSTALL.command。
 Linux：在终端运行 ./INSTALL.sh。
 
-先解压完整目录，以普通登录用户启动。安装向导会在浏览器中打开。
+先解压完整目录，安装向导会在浏览器中打开。
+Windows 支持 Administrator 登录或同一账号“以管理员身份运行”。
+macOS 和 Linux 请以普通登录用户启动。
 在“安装选项”中选择要接入的 AI agent；安装后重启对应客户端。
 
 trustd-user、trustd-system / trustd-root、trustd-stdio 是配套程序，无需逐个运行。

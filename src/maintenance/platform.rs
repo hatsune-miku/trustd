@@ -66,8 +66,15 @@ pub(super) fn elevate(helper: &Path, plan: &Path, digest: &str) -> Result<()> {
     ];
     #[cfg(windows)]
     {
-        let status = localshelld_native_process::elevate_and_wait(helper, &arguments)?;
-        ensure!(status == 0, "installation helper exited with code {status}");
+        if super::super::is_elevated()? {
+            let status = localshelld::process::background_command(helper)
+                .args(&arguments)
+                .status()?;
+            ensure!(status.success(), "installation helper failed ({status})");
+        } else {
+            let status = localshelld_native_process::elevate_and_wait(helper, &arguments)?;
+            ensure!(status == 0, "installation helper exited with code {status}");
+        }
     }
     #[cfg(target_os = "macos")]
     {

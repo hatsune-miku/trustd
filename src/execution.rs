@@ -77,10 +77,13 @@ pub fn current_identity() -> std::io::Result<Value> {
 
 pub fn matches_identity(level: PrivilegeLevel, identity: &Value) -> bool {
     let elevated = identity["elevated"].as_bool().unwrap_or(false);
+    let restricted_user = cfg!(windows)
+        && identity["restricted_user"].as_bool() == Some(true)
+        && identity["integrity"].as_str() == Some("Medium");
     let system = identity["is_system"].as_bool().unwrap_or(false);
     match level {
-        PrivilegeLevel::CurrentUser => !elevated && !system,
-        PrivilegeLevel::Administrator => cfg!(windows) && elevated && !system,
+        PrivilegeLevel::CurrentUser => (!elevated || restricted_user) && !system,
+        PrivilegeLevel::Administrator => cfg!(windows) && elevated && !restricted_user && !system,
         PrivilegeLevel::System => cfg!(windows) && system,
         PrivilegeLevel::Root => cfg!(unix) && identity["uid"] == 0,
     }
@@ -91,5 +94,28 @@ pub fn execution_argument(level: PrivilegeLevel) -> Value {
         json!({"privilege_level":level.name()})
     } else {
         json!({"sudo":level.is_privileged()})
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_user_identity_is_not_an_administrator_or_system_identity() {
+        let mut identity =
+            json!({"elevated":true,"restricted_user":true,"integrity":"Medium","is_system":false});
+        assert!(matches_identity(PrivilegeLevel::CurrentUser, &identity));
+        assert!(!matches_identity(PrivilegeLevel::Administrator, &identity));
+        assert!(!matches_identity(PrivilegeLevel::System, &identity));
+        identity["restricted_user"] = json!(false);
+        assert!(!matches_identity(PrivilegeLevel::CurrentUser, &identity));
+        assert!(matches_identity(PrivilegeLevel::Administrator, &identity));
+        identity["restricted_user"] = json!(true);
+        identity["integrity"] = json!("High");
+        assert!(!matches_identity(PrivilegeLevel::CurrentUser, &identity));
+        identity["integrity"] = json!("Medium");
+        identity["is_system"] = json!(true);
+        assert!(!matches_identity(PrivilegeLevel::CurrentUser, &identity));
     }
 }

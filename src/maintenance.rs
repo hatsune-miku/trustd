@@ -1,4 +1,4 @@
-//! Ephemeral, unprivileged setup UI. The privileged helper accepts a digest-bound
+//! Ephemeral, login-scoped setup UI. The privileged helper accepts a digest-bound
 //! plan with a closed set of operations, not commands or installation paths.
 mod agents;
 mod apply;
@@ -90,6 +90,9 @@ struct Inner {
 type App = Arc<Inner>;
 
 pub async fn run(no_open: bool) -> Result<()> {
+    #[cfg(windows)]
+    super::user_service::require_interactive_owner()?;
+    #[cfg(not(windows))]
     super::require_user().context(
         "start maintenance as the logged-in user; the wizard requests elevation when needed",
     )?;
