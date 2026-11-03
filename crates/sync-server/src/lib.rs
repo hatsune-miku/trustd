@@ -301,6 +301,7 @@ pub fn router(app: App) -> Router {
         .route("/sync/v1/telegram/request", post(telegram::create))
         .route("/sync/v1/telegram/poll", post(telegram::poll))
         .route("/sync/v1/telegram/finish", post(telegram::finish))
+        .route("/sync/v1/telegram/agents", post(telegram::agents))
         .route("/sync/v1/events", get(events))
         .fallback(assets)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

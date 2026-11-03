@@ -7,6 +7,7 @@ import './index.scss'
 type Prompt = {
   id: string
   agent_name: string
+  agent_path?: string | null
   request_reason: string
   scope: string
   secret_keys?: string[]
@@ -32,7 +33,9 @@ export function Consent() {
   function choose(choice: 'accept' | 'deny' | 'ignore') {
     if (!prompt || !window.ipc || sent || Date.now() >= prompt.expires_at_ms) return
     setSent(true)
-    window.ipc.postMessage(JSON.stringify({ choice, remember: choice !== 'ignore' && remember, btw }))
+    window.ipc.postMessage(
+      JSON.stringify({ choice, remember: choice === 'accept' && !!prompt.agent_path && remember, btw })
+    )
   }
   const remaining = prompt ? Math.max(0, Math.ceil((prompt.expires_at_ms - now) / 1000)) : 0
   return (
@@ -47,6 +50,7 @@ export function Consent() {
               <span className="consent-time">{remaining} 秒</span>
             </header>
             <p className="consent-agent">{prompt.agent_name}</p>
+            <p className="consent-path">{prompt.agent_path ?? '无法核验程序路径'}</p>
             <p className="description">授权范围：{prompt.scope}</p>
             {!!prompt.secret_keys?.length && (
               <Field htmlFor="consent-secrets" label="请求注入的凭据">
@@ -75,9 +79,10 @@ export function Consent() {
             <CheckBox
               className="consent-remember"
               checked={remember}
+              disabled={!prompt.agent_path}
               onChange={(event) => setRemember(event.currentTarget.checked)}
             >
-              记住对 {prompt.agent_name} 的选择；新增凭据需再次授权
+              记住我的选择，接受后长期信任此程序路径
             </CheckBox>
             <div className="consent-actions">
               <Button variant="ghost" disabled={sent || !remaining} onClick={() => choose('ignore')}>

@@ -1,5 +1,7 @@
 # Project localshelld
 
+> 本文保留项目最初需求。当前授权流程以 README 和 docs/ARCHITECTURE.md 为准：daemon 主动发现 Agent 完整路径，用户管理四态策略，公开授权入口仅有 enter_interactive；旧授权码签发和模型传入凭据的流程已移除。
+
 ## 功能简介
 
 将本机的 “以管理员权限 / root 权限运行任意 powershell 会话” 的能力，同时通过 HTTP API 和 MCP 协议服务出去，会话的开启通过短随机令牌鉴权，用户本人可通过 Master Password 来签发令牌，令牌能且只能由用户亲自签发。令牌及其有效期、撤销状态等授权元数据只在 localshelld 进程内存中维护。需要额外支持用户通过 Authenticator App 来使用动态 Master Password，至少需要兼容 Proton Authenticator。

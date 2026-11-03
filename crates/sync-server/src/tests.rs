@@ -214,6 +214,11 @@ async fn vault_requires_authentication_and_origin_is_enforced() {
         ("GET", "/sync/v1/sessions", None),
         (
             "POST",
+            "/sync/v1/telegram/agents",
+            Some(json!({"device":"fixture", "agents":[], "acknowledgements":[]})),
+        ),
+        (
+            "POST",
             "/sync/v1/device/approve",
             Some(json!({"user_code":"wrong"})),
         ),

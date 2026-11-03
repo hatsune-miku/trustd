@@ -7,6 +7,8 @@ use std::{
 };
 use tokio::sync::{Mutex, watch};
 
+mod agents;
+
 #[derive(Clone)]
 pub struct Service {
     inner: Arc<Inner>,
@@ -17,6 +19,7 @@ struct Inner {
 }
 #[derive(Default)]
 struct State {
+    agents: agents::Catalog,
     config: Option<Config>,
     generation: u64,
     offset: i64,
@@ -86,6 +89,7 @@ impl Service {
         state.generation += 1;
         state.offset = 0;
         state.bindings.clear();
+        state.agents = agents::Catalog::default();
         state.error = None;
         drop(state);
         for id in ids {
@@ -226,8 +230,11 @@ impl Service {
             prompt.secret_keys.join(", ")
         };
         let content = format!(
-            "trustd 授权\n设备：{device}\n代理：{}\n权限：{}\n凭据名称：{keys}\n\n{}\n\n60 秒内有效。回复本消息可添加备注。",
-            prompt.agent_name, prompt.scope, prompt.request_reason
+            "trustd 授权\n设备：{device}\n代理：{}\n路径：{}\n权限：{}\n凭据名称：{keys}\n\n{}\n\n60 秒内有效。回复本消息可添加备注。",
+            prompt.agent_name,
+            prompt.agent_path.as_deref().unwrap_or("无法核验程序路径"),
+            prompt.scope,
+            prompt.request_reason
         );
         let chunks = chunks(&content, 3400);
         for (index, chunk) in chunks.iter().enumerate() {
@@ -365,6 +372,9 @@ impl Service {
         result
     }
     async fn update(&self, generation: u64, update: Value) {
+        if self.agent_update(generation, &update).await {
+            return;
+        }
         if update.get("callback_query").is_some() {
             let query = &update["callback_query"];
             let data = query["data"].as_str().unwrap_or("");
@@ -402,7 +412,7 @@ impl Service {
                         (config, "授权请求已超时")
                     } else if p.candidate.borrow().is_some() {
                         (config, "已提交，等待设备确认")
-                    } else if action == "remember" {
+                    } else if action == "remember" && p.prompt.agent_path.is_some() {
                         p.remember = !p.remember;
                         (config, "已更新记住选择")
                     } else {
@@ -415,7 +425,7 @@ impl Service {
                         if let Some(choice) = choice {
                             p.candidate.send_replace(Some(Decision {
                                 choice,
-                                remember: p.remember && choice != Choice::Ignore,
+                                remember: p.remember && choice == Choice::Accept,
                                 btw: p.note.clone(),
                             }));
                         }

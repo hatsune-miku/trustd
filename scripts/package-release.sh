@@ -41,4 +41,5 @@ for platform in windows-x86_64 linux-x86_64 macos-aarch64; do
     tar -czf "assets/$package.tar.gz" -C packages "$package"
   fi
 done
+cp install.ps1 install.sh assets/
 (cd assets && sha256sum trustd-* > SHA256SUMS)

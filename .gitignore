@@ -30,6 +30,8 @@ rust-project.json
 !.env.*.example
 
 # Test, coverage, profiling, and benchmark output
+__pycache__/
+*.py[cod]
 /coverage/
 /criterion/
 *.profraw

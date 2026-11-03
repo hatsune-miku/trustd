@@ -125,33 +125,6 @@ export function DesktopSettings({ session }: { session: string }) {
         )}
       </section>
       <TelegramSettings session={session} />
-      <section className="desktop-section">
-        <h3 className="subsection-title">记住的选择</h3>
-        <p className="description">按代理提交的名称匹配。名称是自报信息，不是身份认证；重置不会撤销已经建立的会话。</p>
-        {settings && Object.keys(settings.remembered).length ? (
-          <ul className="remembered-list">
-            {Object.entries(settings.remembered).map(([name, allowed]) => (
-              <li className="remembered-row" key={name}>
-                <span className="remembered-name">{name}</span>
-                <span>{allowed ? '接受' : '拒绝'}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="empty-state">没有记住的选择。</p>
-        )}
-        <Button
-          disabled={action.busy}
-          onClick={() =>
-            void action.run(async () => {
-              await api('/v1/admin/remembered/reset', {}, session)
-              await refresh()
-            }, '已清除所有代理的自动选择。')
-          }
-        >
-          清除所有记忆
-        </Button>
-      </section>
     </div>
   )
 }

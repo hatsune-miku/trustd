@@ -75,7 +75,6 @@ async fn fake() -> (SocketAddr, Arc<Fake>, tokio::task::JoinHandle<()>) {
     let state = Arc::new(Fake::default());
     let router = Router::new()
         .route("/v1/sessions/enter/interactive", post(enter))
-        .route("/v1/sessions/enter/preauthorized", post(enter))
         .route("/v1/sessions/destroy", post(destroy))
         .route("/v1/commands/run", post(run))
         .route(
@@ -159,7 +158,7 @@ fn field_projection_omits_missing_null_and_empty_required_without_losing_propert
 #[tokio::test]
 async fn command_timeout_keeps_the_adapters_authorized_handle() {
     let (address, state, task) = fake().await;
-    let adapter = Adapter::new(address, None).unwrap();
+    let adapter = Adapter::new(address).unwrap();
     call(&adapter, approval()).await.unwrap();
     let result = call(&adapter, command("timeout")).await.unwrap();
     assert_eq!(result["timed_out"], true);
@@ -174,13 +173,11 @@ async fn command_timeout_keeps_the_adapters_authorized_handle() {
 #[test]
 fn all_transport_schemas_omit_empty_required_and_require_only_declared_fields() {
     let mut definitions = vec![crate::mcp_text::tool_definitions()];
-    for token in [None, Some(Zeroizing::new("fixture-token".into()))] {
-        definitions.push(
-            Adapter::new("127.0.0.1:1".parse().unwrap(), token)
-                .unwrap()
-                .definitions(),
-        );
-    }
+    definitions.push(
+        Adapter::new("127.0.0.1:1".parse().unwrap())
+            .unwrap()
+            .definitions(),
+    );
     for definitions in definitions {
         for tool in definitions.as_array().unwrap() {
             for name in ["inputSchema", "outputSchema"] {
@@ -204,8 +201,8 @@ fn all_transport_schemas_omit_empty_required_and_require_only_declared_fields() 
 
 #[test]
 fn no_bearer_fields_or_remote_endpoint_in_model_contract() {
-    for token in [None, Some(Zeroizing::new("private-token".into()))] {
-        let adapter = Adapter::new("127.0.0.1:32120".parse().unwrap(), token).unwrap();
+    {
+        let adapter = Adapter::new("127.0.0.1:32120".parse().unwrap()).unwrap();
         for entry in adapter.definitions().as_array().unwrap() {
             for schema in ["inputSchema", "outputSchema"] {
                 let text = entry[schema].to_string();
@@ -215,15 +212,15 @@ fn no_bearer_fields_or_remote_endpoint_in_model_contract() {
             }
         }
     }
-    assert!(Adapter::new("192.0.2.1:32120".parse().unwrap(), None).is_err());
-    assert!(Adapter::new("127.0.0.1:0".parse().unwrap(), None).is_err());
+    assert!(Adapter::new("192.0.2.1:32120".parse().unwrap()).is_err());
+    assert!(Adapter::new("127.0.0.1:0".parse().unwrap()).is_err());
 }
 
 #[tokio::test]
 async fn holds_handle_in_process_and_keeps_independent_instances_isolated() {
     let (address, state, server) = fake().await;
-    let first = Adapter::new(address, None).unwrap();
-    let second = Adapter::new(address, None).unwrap();
+    let first = Adapter::new(address).unwrap();
+    let second = Adapter::new(address).unwrap();
     assert!(call(&first, command("echo")).await.is_err());
     let result = call(&first, approval()).await.unwrap();
     assert!(!result.to_string().contains("private-handle"));
@@ -249,7 +246,7 @@ async fn holds_handle_in_process_and_keeps_independent_instances_isolated() {
 #[tokio::test]
 async fn explicit_close_forgets_expired_handle_but_retains_unknown_cleanup() {
     let (address, state, server) = fake().await;
-    let adapter = Adapter::new(address, None).unwrap();
+    let adapter = Adapter::new(address).unwrap();
     call(&adapter, approval()).await.unwrap();
     state.destroy_failed.store(true, Ordering::SeqCst);
     assert!(adapter.close().await.is_err());
@@ -272,8 +269,8 @@ async fn explicit_close_forgets_expired_handle_but_retains_unknown_cleanup() {
 #[tokio::test]
 async fn cancellation_closes_only_the_originating_adapters_session() {
     let (address, state, server) = fake().await;
-    let first = Arc::new(Adapter::new(address, None).unwrap());
-    let second = Adapter::new(address, None).unwrap();
+    let first = Arc::new(Adapter::new(address).unwrap());
+    let second = Adapter::new(address).unwrap();
     call(&first, approval()).await.unwrap();
     call(&second, approval()).await.unwrap();
     let (cancel, receiver) = watch::channel(false);
@@ -301,7 +298,7 @@ async fn cancellation_closes_only_the_originating_adapters_session() {
 async fn cancelled_authorization_cleans_up_late_approval() {
     let (address, state, server) = fake().await;
     state.delayed.store(true, Ordering::SeqCst);
-    let adapter = Arc::new(Adapter::new(address, None).unwrap());
+    let adapter = Arc::new(Adapter::new(address).unwrap());
     let (cancel, receiver) = watch::channel(false);
     let worker = adapter.clone();
     let pending = tokio::spawn(async move { worker.call(approval(), receiver).await });
@@ -317,27 +314,30 @@ async fn cancelled_authorization_cleans_up_late_approval() {
 }
 
 #[tokio::test]
-async fn rejects_reused_preauthorized_session_without_destroying_other_owner() {
+async fn removed_entry_is_rejected_and_authorization_source_is_not_relayed() {
     let (address, state, server) = fake().await;
     state.reused.store(true, Ordering::SeqCst);
-    let adapter = Adapter::new(address, Some(Zeroizing::new("configured-token".into()))).unwrap();
+    let adapter = Adapter::new(address).unwrap();
     let result = call(
         &adapter,
         json!({"name":"enter_preauthorized","arguments":{"confirm_text":"OK"}}),
     )
     .await;
     assert!(result.is_err());
-    assert!(!result.unwrap_err().to_string().contains("configured-token"));
     assert!(adapter.handle.lock().await.is_none());
-    assert_eq!(state.sessions.lock().await.len(), 1);
-    assert_eq!(state.requests.lock().await[0]["token"], "configured-token");
+    assert!(state.sessions.lock().await.is_empty());
+    let result = call(&adapter, approval()).await.unwrap();
+    assert!(result.get("reused").is_none());
+    assert!(result.get("automatic").is_none());
+    assert!(state.requests.lock().await[0].get("token").is_none());
+    adapter.close().await.unwrap();
     server.abort();
 }
 
 #[tokio::test]
 async fn stdio_is_newline_json_and_eof_destroys_the_session() {
     let (address, state, server) = fake().await;
-    let adapter = Adapter::new(address, None).unwrap();
+    let adapter = Adapter::new(address).unwrap();
     let (client, io) = tokio::io::duplex(65536);
     let (input, output) = tokio::io::split(io);
     let worker = tokio::spawn(adapter.serve(input, output));
