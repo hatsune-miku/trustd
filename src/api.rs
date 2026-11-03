@@ -1,7 +1,7 @@
 //! Transport-neutral operations shared by the HTTP API and MCP tools.
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{ConnectInfo, Extension, State},
     routing::{get, post},
 };
 use serde_json::{Value, json};
@@ -19,10 +19,8 @@ pub(crate) enum Operation {
     SecretsList,
     SecretsGet,
     EnterInteractive,
-    EnterPreauthorized,
     Run,
     Destroy,
-    Revoke,
 }
 
 impl Operation {
@@ -31,12 +29,8 @@ impl Operation {
             "secrets_list" => Self::SecretsList,
             "secrets_get" => Self::SecretsGet,
             "enter_interactive" | "localshelld_enter_interactive" => Self::EnterInteractive,
-            "enter_preauthorized" | "localshelld_enter_with_preauthorized_credential" => {
-                Self::EnterPreauthorized
-            }
             "run" | "localshelld_run" => Self::Run,
             "destroy" | "localshelld_destroy_session" => Self::Destroy,
-            "revoke" | "localshelld_revoke_token" => Self::Revoke,
             _ => return None,
         })
     }
@@ -45,10 +39,8 @@ impl Operation {
             Self::SecretsList => "/v1/secrets/keys",
             Self::SecretsGet => "/v1/secrets/get",
             Self::EnterInteractive => "/v1/sessions/enter/interactive",
-            Self::EnterPreauthorized => "/v1/sessions/enter/preauthorized",
             Self::Run => "/v1/commands/run",
             Self::Destroy => "/v1/sessions/destroy",
-            Self::Revoke => "/v1/tokens/revoke",
         }
     }
     fn fields(self) -> &'static [&'static str] {
@@ -61,7 +53,6 @@ impl Operation {
                 "confirm_text",
                 "secret_keys",
             ],
-            Self::EnterPreauthorized => &["token", "confirm_text", "secret_keys"],
             // The platform-specific validator rejects the other platform's
             // identity argument with an explicit error, even if both are sent.
             Self::Run => &[
@@ -73,7 +64,6 @@ impl Operation {
                 "timeout_seconds",
             ],
             Self::Destroy => &["handle"],
-            Self::Revoke => &["token"],
         }
     }
 }
@@ -86,16 +76,18 @@ pub(crate) fn routes() -> Router<AppState> {
     for operation in [
         Operation::SecretsGet,
         Operation::EnterInteractive,
-        Operation::EnterPreauthorized,
         Operation::Run,
         Operation::Destroy,
-        Operation::Revoke,
     ] {
         routes = routes.route(
             operation.path(),
             post(
-                move |State(state): State<AppState>, Json(arguments): Json<Value>| async move {
-                    execute(&state, operation, arguments).await.map(Json)
+                move |State(state): State<AppState>,
+                      peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
+                      Json(arguments): Json<Value>| async move {
+                    execute_from(&state, operation, arguments, peer.map(|p| p.0.0))
+                        .await
+                        .map(Json)
                 },
             ),
         );
@@ -129,15 +121,16 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn secrets_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    execute(&state, Operation::SecretsList, json!({}))
+    execute_from(&state, Operation::SecretsList, json!({}), None)
         .await
         .map(Json)
 }
 
-pub(crate) async fn execute(
+pub(crate) async fn execute_from(
     state: &AppState,
     operation: Operation,
     arguments: Value,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Value, ApiError> {
     let object = arguments
         .as_object()
@@ -161,22 +154,13 @@ pub(crate) async fn execute(
         Operation::EnterInteractive => {
             confirmation(&arguments)?;
             state
-                .enter_interactive_with_secrets(
+                .enter_interactive_for_agent(
                     string_arg(&arguments, "agent_name")?,
                     string_arg(&arguments, "request_reason")?,
                     &secret_keys_arg(&arguments)?,
+                    state.caller_identity(peer).await,
                 )
                 .await
-        }
-        Operation::EnterPreauthorized => {
-            confirmation(&arguments)?;
-            let result = state
-                .enter_with_secrets(
-                    string_arg(&arguments, "token")?,
-                    &secret_keys_arg(&arguments)?,
-                )
-                .await?;
-            serde_json::to_value(result).map_err(|_| ApiError::internal(SERIALIZATION_FAILED))
         }
         Operation::Run => {
             let handle = string_arg(&arguments, "handle")?;
@@ -209,10 +193,6 @@ pub(crate) async fn execute(
                 .destroy_session(string_arg(&arguments, "handle")?)
                 .await?;
             Ok(json!({"destroyed":true}))
-        }
-        Operation::Revoke => {
-            state.revoke_token(string_arg(&arguments, "token")?).await?;
-            Ok(json!({"revoked":true}))
         }
     }
 }

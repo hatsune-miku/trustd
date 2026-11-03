@@ -6,8 +6,8 @@ use axum::{
 };
 
 #[derive(Clone, Default)]
-struct Fixture {
-    calls: Arc<Mutex<Vec<(String, Value)>>>,
+pub(super) struct Fixture {
+    pub(super) calls: Arc<Mutex<Vec<(String, Value)>>>,
     fail: Arc<Mutex<bool>>,
 }
 async fn handler(
@@ -41,13 +41,14 @@ fn prompt(id: &str) -> Prompt {
     Prompt {
         id: id.into(),
         agent_name: "agent".into(),
+        agent_path: Some("/Applications/agent".into()),
         request_reason: "literal <b>reason</b>".into(),
         scope: "user".into(),
         secret_keys: vec!["TEST_KEY".into()],
         expires_at_ms: now() + 60_000,
     }
 }
-async fn setup() -> (Service, Fixture, tokio::task::JoinHandle<()>) {
+pub(super) async fn setup() -> (Service, Fixture, tokio::task::JoinHandle<()>) {
     let fixture = Fixture::default();
     let router = Router::new()
         .route(

@@ -16,77 +16,66 @@ const properties = {
   secrets_list: [],
   secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'confirm_text'],
-  enter_preauthorized: ['secret_keys', 'confirm_text'],
   run: ['command', 'stdin', 'timeout_seconds', identity],
   destroy: [],
-  revoke: [],
 }
 const required = {
   secrets_list: [],
   secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'confirm_text'],
-  enter_preauthorized: ['confirm_text'],
   run: ['command', identity],
   destroy: [],
-  revoke: [],
 }
 
-for (const preauthorized of [false, true]) {
-  test(`official SDK lists complete stdio schemas (${preauthorized ? 'owner token' : 'interactive'})`, async () => {
-    // Listing tools needs no daemon, real token, authorization or shell execution.
-    const transport = new StdioClientTransport({
-      command,
-      args: ['--endpoint', '127.0.0.1:1', ...(preauthorized ? ['--token-env', 'TRUSTD_SCHEMA_TEST_TOKEN'] : [])],
-      env: { ...getDefaultEnvironment(), TRUSTD_SCHEMA_TEST_TOKEN: 'fixture-not-a-real-token' },
-      stderr: 'pipe',
-    })
-    const client = new Client({ name: 'trustd-schema-regression', version: '1' })
-    transport.stderr?.resume()
-    try {
-      await client.connect(transport)
-      const { tools } = await client.listTools()
-      assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
-      assert.deepEqual(
-        tools.map((tool) => tool.name),
-        [
-          'secrets_list',
-          'secrets_get',
-          'enter_interactive',
-          ...(preauthorized ? ['enter_preauthorized'] : []),
-          'run',
-          'destroy',
-          ...(preauthorized ? ['revoke'] : []),
-        ]
-      )
-      for (const tool of tools) {
-        assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), properties[tool.name].toSorted())
-        assert.deepEqual((tool.inputSchema.required ?? []).toSorted(), required[tool.name].toSorted())
-        assert.equal(tool.inputSchema.additionalProperties, false)
-        for (const schema of [tool.inputSchema, tool.outputSchema]) {
-          if (Object.hasOwn(schema, 'required')) {
-            assert.ok(Array.isArray(schema.required), `${tool.name}: required must be an array, not null`)
-            assert.ok(schema.required.length > 0, `${tool.name}: empty required must be omitted`)
-            for (const key of schema.required) {
-              assert.equal(typeof key, 'string')
-              assert.ok(Object.hasOwn(schema.properties, key), `${tool.name}: required refers to an absent property`)
-            }
-          }
-          assert.equal(Object.hasOwn(schema.properties, 'handle'), false)
-          assert.equal(Object.hasOwn(schema.properties, 'token'), false)
-        }
-      }
-      // No open session: exercise an empty-argument tool and SDK output validation
-      // without contacting a daemon or making an authorization decision.
-      const destroyed = await client.callTool({ name: 'destroy', arguments: {} })
-      assert.equal(destroyed.isError, false)
-      assert.deepEqual(destroyed.structuredContent, { destroyed: true })
-      // Guard the original failure against accidentally weakening the test/parser.
-      const broken = structuredClone(tools)
-      broken[0].inputSchema.required = null
-      assert.throws(() => ListToolsResultSchema.parse({ tools: broken }))
-    } finally {
-      await client.close()
-      await transport.close()
-    }
+test('official SDK lists a single authorization entry with no policy disclosures', async () => {
+  // Listing tools needs no daemon, real token, authorization or shell execution.
+  const transport = new StdioClientTransport({
+    command,
+    args: ['--endpoint', '127.0.0.1:1'],
+    env: { ...getDefaultEnvironment(), TRUSTD_SCHEMA_TEST_TOKEN: 'fixture-not-a-real-token' },
+    stderr: 'pipe',
   })
-}
+  const client = new Client({ name: 'trustd-schema-regression', version: '1' })
+  transport.stderr?.resume()
+  try {
+    await client.connect(transport)
+    const { tools } = await client.listTools()
+    assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
+    assert.deepEqual(
+      tools.map((tool) => tool.name),
+      ['secrets_list', 'secrets_get', 'enter_interactive', 'run', 'destroy']
+    )
+    for (const removed of ['preauthor', 'pre-author', 'remember', 'automatic', 'reused']) {
+      assert.equal(JSON.stringify(tools).includes(removed), false)
+    }
+    for (const tool of tools) {
+      assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), properties[tool.name].toSorted())
+      assert.deepEqual((tool.inputSchema.required ?? []).toSorted(), required[tool.name].toSorted())
+      assert.equal(tool.inputSchema.additionalProperties, false)
+      for (const schema of [tool.inputSchema, tool.outputSchema]) {
+        if (Object.hasOwn(schema, 'required')) {
+          assert.ok(Array.isArray(schema.required), `${tool.name}: required must be an array, not null`)
+          assert.ok(schema.required.length > 0, `${tool.name}: empty required must be omitted`)
+          for (const key of schema.required) {
+            assert.equal(typeof key, 'string')
+            assert.ok(Object.hasOwn(schema.properties, key), `${tool.name}: required refers to an absent property`)
+          }
+        }
+        assert.equal(Object.hasOwn(schema.properties, 'handle'), false)
+        assert.equal(Object.hasOwn(schema.properties, 'token'), false)
+      }
+    }
+    // No open session: exercise an empty-argument tool and SDK output validation
+    // without contacting a daemon or making an authorization decision.
+    const destroyed = await client.callTool({ name: 'destroy', arguments: {} })
+    assert.equal(destroyed.isError, false)
+    assert.deepEqual(destroyed.structuredContent, { destroyed: true })
+    // Guard the original failure against accidentally weakening the test/parser.
+    const broken = structuredClone(tools)
+    broken[0].inputSchema.required = null
+    assert.throws(() => ListToolsResultSchema.parse({ tools: broken }))
+  } finally {
+    await client.close()
+    await transport.close()
+  }
+})

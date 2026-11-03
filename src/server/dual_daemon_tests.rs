@@ -5,6 +5,15 @@ fn command<'a>(windows: &'a str, bash: &'a str) -> &'a str {
     if cfg!(windows) { windows } else { bash }
 }
 
+async fn enter_linked(
+    root: &AppState,
+    user: &AppState,
+    token: &str,
+) -> Result<EnterResult, ApiError> {
+    let entered = root.enter(token).await?;
+    user.attach_remote(&entered.handle).await
+}
+
 async fn pair() -> (
     AppState,
     AppState,
@@ -62,10 +71,13 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
             .output
             .contains("local-only")
     );
-    let entered = user.enter(&root_token).await.unwrap();
+    let entered = enter_linked(&root, &user, &root_token).await.unwrap();
     assert!(entered.sudo_available);
     assert_eq!(
-        user.enter(&root_token).await.unwrap().handle,
+        enter_linked(&root, &user, &root_token)
+            .await
+            .unwrap()
+            .handle,
         entered.handle
     );
     let direct = root.enter(&root_token).await.unwrap();
@@ -123,13 +135,13 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
 async fn revocation_and_daemon_shutdown_cancel_both_backends() {
     for action in [
         "revoke-at-root",
-        "revoke-at-user",
+        "destroy-at-user",
         "root-shutdown",
         "user-shutdown",
         "destroy",
     ] {
         let (root, user, token, _, serving) = pair().await;
-        let entered = user.enter(&token).await.unwrap();
+        let entered = enter_linked(&root, &user, &token).await.unwrap();
         let handle = entered.handle;
         let mut running = Vec::new();
         for sudo in [false, true] {
@@ -148,7 +160,7 @@ async fn revocation_and_daemon_shutdown_cancel_both_backends() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         match action {
             "revoke-at-root" => root.revoke_token(&token).await.unwrap(),
-            "revoke-at-user" => user.revoke_token(&token).await.unwrap(),
+            "destroy-at-user" => user.destroy_session(&handle).await.unwrap(),
             "root-shutdown" => root.shutdown().await,
             "user-shutdown" => user.shutdown().await,
             _ => user.destroy_session(&handle).await.unwrap(),
@@ -173,7 +185,7 @@ async fn revocation_and_daemon_shutdown_cancel_both_backends() {
 #[tokio::test]
 async fn root_loss_expiry_and_shell_exit_invalidate_linked_user_session() {
     let (root, user, token, _, serving) = pair().await;
-    let first = user.enter(&token).await.unwrap();
+    let first = enter_linked(&root, &user, &token).await.unwrap();
     let exited = user.run(&first.handle, "exit 7", true, None).await.unwrap();
     assert!(exited.session_ended);
     assert_eq!(exited.exit_code, Some(7));
@@ -185,7 +197,7 @@ async fn root_loss_expiry_and_shell_exit_invalidate_linked_user_session() {
     // Expiry uses whole Unix seconds, so a one-second token can have almost no
     // usable lifetime. Allow both real shells to start on a loaded CI runner.
     let expiring = root.auth.lock().await.issue_token(Some(10)).unwrap().0;
-    let second = user.enter(&expiring).await.unwrap();
+    let second = enter_linked(&root, &user, &expiring).await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if !user
@@ -203,7 +215,7 @@ async fn root_loss_expiry_and_shell_exit_invalidate_linked_user_session() {
     .await
     .expect("expiry did not close the linked session");
     // A backend disappearing must not fall back to executing as another identity.
-    let third = user.enter(&token).await.unwrap();
+    let third = enter_linked(&root, &user, &token).await.unwrap();
     root.shutdown().await;
     serving.abort();
     assert!(
@@ -241,16 +253,14 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
             "secrets_list",
             "secrets_get",
             "enter_interactive",
-            "enter_preauthorized",
             "run",
-            "destroy",
-            "revoke"
+            "destroy"
         ]
     );
     let (_, rpc) = super::tests::request(&app, "/mcp", json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"localshelld_enter_with_preauthorized_credential", "arguments":{"token":token, "confirm_text":"OK"}}})).await;
-    let handle = rpc["result"]["structuredContent"]["handle"]
-        .as_str()
-        .unwrap();
+    assert!(rpc.get("error").is_some());
+    let entered = user.enter(&token).await.unwrap();
+    let handle = entered.handle.as_str();
     for invalid in [
         None,
         Some(Value::Null),
@@ -292,7 +302,7 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
 async fn either_backend_timeout_preserves_both_backends_and_the_handle() {
     for sudo in [false, true] {
         let (root, user, token, _, serving) = pair().await;
-        let entered = user.enter(&token).await.unwrap();
+        let entered = enter_linked(&root, &user, &token).await.unwrap();
         let result = user
             .run(
                 &entered.handle,

@@ -29,12 +29,18 @@ pub enum Request {
     UserContext,
     Consent {
         prompt: Prompt,
+        agent: Option<crate::agents::Identity>,
     },
     EnterInteractive {
         agent_name: String,
         request_reason: String,
         #[serde(default)]
         secret_keys: Vec<String>,
+        agent: Option<crate::agents::Identity>,
+    },
+    AgentsList,
+    AgentPolicy {
+        change: localshelld_telegram::agents::Change,
     },
     SecretsList,
     SecretsExport,
@@ -284,10 +290,10 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
         (_, Request::Ping) => {
             Ok(json!({"daemon": state.mode, "desktop_available": state.consent.is_some()}))
         }
-        (DaemonMode::User, Request::Consent { prompt }) => {
+        (DaemonMode::User, Request::Consent { prompt, agent }) => {
             crate::consent::validate_request(&prompt.agent_name, &prompt.request_reason)?;
             crate::secrets::normalize_keys(&prompt.secret_keys)?;
-            serde_json::to_value(state.request_consent(prompt).await?)
+            serde_json::to_value(state.authorize_agent(prompt, agent).await?)
                 .map_err(|_| ApiError::internal("decision serialization failed"))
         }
         (
@@ -296,14 +302,21 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
                 agent_name,
                 request_reason,
                 secret_keys,
+                agent,
             },
         ) => {
-            Box::pin(state.enter_interactive_with_secrets(
+            Box::pin(state.enter_interactive_for_agent(
                 &agent_name,
                 &request_reason,
                 &secret_keys,
+                agent,
             ))
             .await
+        }
+        (DaemonMode::User, Request::AgentsList) => Ok(json!(Box::pin(state.agent_list()).await?)),
+        (DaemonMode::User, Request::AgentPolicy { change }) => {
+            Box::pin(state.set_agent_policy(change)).await?;
+            Ok(Value::Null)
         }
         (DaemonMode::User, Request::SecretsList) => Ok(json!(Box::pin(state.secret_keys()).await?)),
         (DaemonMode::User, Request::SecretsExport) => {

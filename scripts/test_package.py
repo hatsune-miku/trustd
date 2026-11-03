@@ -36,7 +36,7 @@ class PackageTests(unittest.TestCase):
             directory = Path(temp)
             shutil.copytree(ROOT / "scripts/package", directory / "scripts/package")
             shutil.copyfile(ROOT / "scripts/package-release.sh", directory / "scripts/package-release.sh")
-            for file in ("README.md", "LICENSE-MIT"):
+            for file in ("README.md", "LICENSE-MIT", "install.ps1", "install.sh"):
                 shutil.copyfile(ROOT / file, directory / file)
             platforms = {
                 "windows-x86_64": ("trustd-system.exe", "INSTALL.cmd"),
@@ -71,6 +71,8 @@ class PackageTests(unittest.TestCase):
                     self.assertIn(f"{prefix}/{name}", names)
             checksums = (directory / "assets/SHA256SUMS").read_text()
             self.assertEqual(len(checksums.splitlines()), 3)
+            for installer in ("install.ps1", "install.sh"):
+                self.assertEqual((directory / "assets" / installer).read_bytes(), (ROOT / installer).read_bytes())
 
 
 if __name__ == "__main__":

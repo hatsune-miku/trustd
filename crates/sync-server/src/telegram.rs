@@ -157,3 +157,18 @@ pub(super) async fn finish(
         .map_err(bad)?;
     Ok(Json(json!({"closed":true})))
 }
+
+pub(super) async fn agents(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<localshelld_telegram::agents::Exchange>,
+) -> Result<Json<localshelld_telegram::agents::ExchangeReply>> {
+    let sid = owner(&app, &headers).await?;
+    let result = app
+        .telegram
+        .exchange_agents(&sid, body)
+        .await
+        .map_err(bad)?;
+    owner(&app, &headers).await?;
+    Ok(Json(result))
+}

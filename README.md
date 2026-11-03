@@ -13,7 +13,7 @@ trustd 读作 trusted，末尾的 d 仍然代表 daemon。它给 AI 提供接受
 ## 日常使用
 
 1. AI 说明任务和需要的凭据名称。
-2. 用户通过桌面窗口或 Telegram 接受、拒绝，或记住选择。
+2. 用户通过桌面窗口、网页后台或 Telegram 管理授权。
 3. AI 执行命令，程序自动附带授权并注入所选凭据。
 4. 完成后关闭会话；用户也可随时在管理页面撤销授权。
 
@@ -35,7 +35,23 @@ Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个�
 
 系统 daemon 默认监听 `127.0.0.1:32119`，用户 daemon 默认监听 `127.0.0.1:32120`。维护向导使用临时本机端口，stdio 不监听端口。安装、更新不通过 daemon 的 HTTP/MCP 执行接口提供。
 
-## 安装
+## 单行安装与更新
+
+Windows PowerShell：
+
+```powershell
+irm https://github.com/hatsune-miku/trustd/releases/latest/download/install.ps1 | iex
+```
+
+Linux / macOS：
+
+```sh
+curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/install.sh | sh
+```
+
+首次安装和更新使用同一条命令。脚本下载最新发布的完整平台套件，校验 SHA-256 后直接打开网页维护向导；在向导内选择“完成”后清理临时下载和解压目录，失败时也会清理。仅关闭浏览器标签页不会立即退出向导，监听最多保留 30 分钟。安装产生的正式程序、数据和备份不在清理范围内。Linux / macOS 请从普通登录用户终端运行，不要在命令前加 sudo。
+
+## 手动安装
 
 下载并解压完整平台发布包，从对应入口开始：
 
@@ -65,7 +81,7 @@ Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页�
 2. 登录 [系统管理页](http://localhost:32119/)，填入用户 daemon 地址与配对码。
 3. 将 Agent 连接到用户入口，或启动下面的 stdio 接入程序。
 
-配对码只用于两个 daemon 建立互信，不是交给 AI 的执行令牌。已有密码、TOTP、通行密钥、配对、凭据和授权记忆不会因改名或修复而重新初始化。
+配对码只用于两个 daemon 建立互信，不是交给 AI 的执行令牌。已有密码、TOTP、通行密钥、配对和凭据不会因改名或修复而重新初始化。
 
 | 平台 | 程序目录 | 系统配置 |
 | --- | --- | --- |
@@ -131,11 +147,22 @@ macOS/Linux 将 `command` 改为 `trustd-stdio` 的绝对路径。默认 endpoin
 - stdin EOF 或正常终止会尝试关闭会话。尚在等待批准的请求会接收迟到的结果并清理；强杀进程、断电、daemon 不可达时无法保证清理成功，必要时在管理页撤销令牌。
 - stdio 的 stdout 仅承载换行分隔的 JSON-RPC，诊断写入 stderr。对结果未知的执行请求，不自动重试。
 
-### 预授权也不必经过模型
+### Agent 授权
 
-用户可以把执行 token 配置到启动环境，再传 `--token-env TRUSTD_TOKEN`。这里只传环境变量名，值不在命令行中。
+daemon 主动扫描当前用户的已知 Agent 进程，网页后台的“Agent 授权”和 Telegram `/agents` 显示程序完整路径及 PID。同名但路径不同的程序独立管理；同一路径的多个进程共享策略。
 
-配置后多出 `enter_preauthorized` 与 `revoke`，两者都没有 token 参数。前者仍需要 `confirm_text: "OK"`，可选 `secret_keys`；后者撤销配置的 token。每个接入进程使用单独的 token，不要跨进程或与 HTTP 调用者共享；检测到 token 已有存活会话时拒绝接管，也不销毁别人的会话。
+初始扫描名称包括 Codex、Claude、Cursor、Windsurf、Code / Code Insiders、Gemini、Devin 及相应的已知 Helper 进程，不按任意命令行关键词匹配。使用通用 `node` 进程且没有这些祖先进程的客户端仍可请求当次授权，但不会被猜测为某个已信任的 Agent。
+
+| 状态 | 行为 |
+| --- | --- |
+| 授权 1 次 | 下一次请求允许，随即持久化恢复为无预授权；并发请求只能消费一次 |
+| 长期信任 | 持久信任此完整路径，不限次数允许，包括以后请求的凭据 key |
+| 无预授权 | 每次请求询问用户 |
+| 总是拒绝 | 拒绝此路径的请求 |
+
+弹窗接受时勾选“记住我的选择”等同于长期信任。daemon 根据连接所属进程及祖先进程识别实际路径，不接受 stdio 自报 PID 或路径；路径无法核验时仍请求用户确认，不能持久信任。旧版本按自报名保存的记忆不会转换成路径信任。
+
+Agent 只使用 `enter_interactive`，接受或拒绝的结果不包含授权来源或策略。授权码签发、复制授权文本、旧的预授权工具及 token 启动参数已移除。现有会话可在“已授权会话”中撤销；更改路径策略只影响后续请求。
 
 ## 执行身份与会话
 
@@ -172,17 +199,17 @@ macOS/Linux 将 `command` 改为 `trustd-stdio` 的绝对路径。默认 endpoin
 
 默认使用离线库，也可连接自托管同步后端。连接后以云端为准，版本冲突拒绝覆盖，断网不悄悄改用缓存完成凭据操作。同步不是端到端加密；协议、恢复和部署方式见 [同步文档](docs/SYNC.md)。桌面与 Telegram 授权可并行使用，配置见 [Telegram 授权](docs/telegram.md)。
 
-交互授权限时 60 秒；忽略或关闭窗口仍等待原截止时间。名称是代理自报信息，不是身份认证；记忆选择按名称和已授权 key 范围生效。新增 key 会重新请求同意。记忆接受不声称本次发生了点击，记忆拒绝返回 `automatic: true`。用户可清除记忆，也可单独撤销已建立的授权。
+需要询问用户时，授权限时 60 秒；忽略或关闭窗口仍等待原截止时间。请求里的名称只是说明，不能覆盖 daemon 核验的程序路径。
 
 ## HTTP 与直接 MCP
 
-已有 HTTP 与 Streamable HTTP MCP 客户端继续工作：
+HTTP 与 Streamable HTTP MCP 入口：
 
 - `http://127.0.0.1:32120/mcp`：用户入口。
 - `http://127.0.0.1:32119/mcp`：系统入口。
 - 两端的 `/llms.txt` 和 `/v1/capabilities` 无需鉴权，返回说明及实际接口 schema。
 
-直接连接 daemon 时，token/handle 仍然是必要的执行凭据；只有 stdio 适配层替调用者保管它们。HTTP 断连不自动取消执行；HTTP MCP 取消仍须使用初始化响应的 `Mcp-Session-Id`。完整接口、错误和取消语义见 [API 文档](docs/API.md)。
+直接连接 daemon 时，handle 仍然是必要的执行凭据；stdio 适配层替调用者保管它。HTTP 断连不自动取消执行；HTTP MCP 取消仍须使用初始化响应的 `Mcp-Session-Id`。完整接口、错误和取消语义见 [API 文档](docs/API.md)。
 
 ## 更新与旧安装迁移
 

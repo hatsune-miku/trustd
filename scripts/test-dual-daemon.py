@@ -7,11 +7,14 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import urllib.error
 import urllib.request
 
@@ -82,6 +85,72 @@ def stop_processes(processes):
         raise RuntimeError("Failed to clean up " + "; ".join(errors))
 
 
+class Agent:
+    """A real named process; only authenticated management sets its path policy."""
+
+    def __init__(self, binary, directory, endpoint, policy_base, session):
+        directory.mkdir()
+        executable = directory / "codex"
+        shutil.copy2(binary.with_name("trustd-stdio"), executable)
+        self.process = subprocess.Popen(
+            [str(executable), "--endpoint", endpoint], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.counter = 0
+        try:
+            for _ in range(100):
+                agents = request(policy_base, "/v1/admin/agents", session=session)["agents"]
+                agent = next((a for a in agents if any(p["pid"] == self.process.pid for p in a["processes"])), None)
+                if agent:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("real agent process was not discovered")
+            assert Path(agent["path"]).resolve() == executable.resolve(), agent
+            request(policy_base, "/v1/admin/agents/policy", {
+                "id": agent["id"], "revision": agent["revision"], "policy": "once",
+                "command_id": str(uuid.uuid4()),
+            }, session)
+            self.agent_id = agent["id"]
+        except BaseException:
+            self.close()
+            raise
+
+    def call(self, name, arguments=None):
+        self.counter += 1
+        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.counter,
+                                            "method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}) + "\n")
+        self.process.stdin.flush()
+        assert select.select([self.process.stdout], [], [], 75)[0], "stdio request timed out"
+        line = self.process.stdout.readline()
+        assert line, "stdio terminated without a response"
+        return json.loads(line)
+
+    def enter(self):
+        response = self.call("enter_interactive", {"agent_name": "untrusted display name",
+                                                   "request_reason": "CI identity check", "confirm_text": "OK"})
+        assert "error" not in response, response
+        result = response["result"]["structuredContent"]
+        assert result["status"] == "authorized", response
+        assert all(field not in result for field in ("handle", "token", "automatic", "reused", "policy"))
+        return result
+
+    def run(self, sudo):
+        response = self.call("run", {"command": "id -u", "sudo": sudo, "timeout_seconds": 10})
+        if "error" in response or response.get("result", {}).get("isError"):
+            return response
+        return response["result"]["structuredContent"]
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.stdin.close()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+
+
 def main():
     assert os.name == "posix" and os.geteuid() != 0, "run as an ordinary Unix user with sudo access"
     binary = Path(sys.argv[1]).resolve()
@@ -90,6 +159,7 @@ def main():
     while user_port == root_port:
         user_port = port()
     processes = []
+    clients = []
     with tempfile.TemporaryDirectory(prefix="localshelld-dual-") as directory:
         temp = Path(directory)
         password = "localshelld CI test password"
@@ -113,45 +183,47 @@ def main():
                 health = wait_ready(f"http://127.0.0.1:{listen}", process)
                 assert health["daemon"] == ("user" if user else "privileged")
             root_url, user_url = f"http://127.0.0.1:{root_port}", f"http://127.0.0.1:{user_port}"
-            token = request(root_url, "/v1/admin/tokens/issue", {"credential": credential})["token"]
-            entered = request(user_url, "/v1/sessions/enter", {"token": token})
-            assert entered["sudo_available"]
-            handle = entered["handle"]
-            for sudo, uid in [(False, os.geteuid()), (True, 0)]:
-                result = request(user_url, "/v1/commands/run", {"handle": handle, "command": "id -u", "sudo": sudo})
-                assert result["success"] and int(result["output"].strip()) == uid, result
-            # Also exercise the privileged front door after explicit pairing.
             root_session = request(root_url, "/v1/admin/login", {"credential": credential})["session"]
             user_session = request(user_url, "/v1/admin/login", {"credential": credential})["session"]
+            local = Agent(binary, temp / "local agent", f"127.0.0.1:{user_port}", user_url, user_session)
+            clients.append(local)
+            assert not local.enter()["sudo_available"]
+            result = local.run(False)
+            assert result["success"] and int(result["stdout"].strip()) == os.geteuid(), result
+            rejected = local.run(True)
+            assert "error" in rejected or rejected.get("result", {}).get("isError"), rejected
+            local.call("destroy")
+            # Pair only through authenticated human management.
             pairing = request(user_url, "/v1/admin/pairing/new", {}, user_session)
             request(root_url, "/v1/admin/pairing/connect", {
                 "code": pairing["code"], "user_daemon": f"127.0.0.1:{user_port}"
             }, root_session)
-            root_entered = request(root_url, "/v1/sessions/enter", {"token": token})
-            for sudo, uid in [(False, os.geteuid()), (True, 0)]:
-                result = request(root_url, "/v1/commands/run", {
-                    "handle": root_entered["handle"], "command": "id -u", "sudo": sudo
-                })
-                assert result["success"] and int(result["output"].strip()) == uid, result
-            local_token = request(user_url, "/v1/admin/tokens/issue", {"credential": credential})["token"]
-            local = request(user_url, "/v1/sessions/enter", {"token": local_token})
-            assert not local["sudo_available"]
-            try:
-                request(user_url, "/v1/commands/run", {"handle": local["handle"], "command": "id -u", "sudo": True})
-                raise AssertionError("user token was elevated")
-            except urllib.error.HTTPError as error:
-                assert error.code == 403
-            request(root_url, "/v1/tokens/revoke", {"token": token})
-            try:
-                request(user_url, "/v1/commands/run", {"handle": handle, "command": "id -u", "sudo": False})
-                raise AssertionError("revoked token remained usable")
-            except urllib.error.HTTPError as error:
-                assert error.code == 401
+            for label, endpoint, base, session in [
+                ("paired user", f"127.0.0.1:{user_port}", user_url, user_session),
+                ("paired root", f"127.0.0.1:{root_port}", root_url, root_session),
+            ]:
+                previous = {r["id"] for r in request(root_url, "/v1/admin/sessions/list", {}, root_session)}
+                client = Agent(binary, temp / label, endpoint, base, session)
+                clients.append(client)
+                assert client.enter()["sudo_available"]
+                listing = request(user_url, "/v1/admin/agents", session=user_session)["agents"]
+                assert next(a for a in listing if a["id"] == client.agent_id)["policy"] == "ask"
+                for sudo, uid in [(False, os.geteuid()), (True, 0)]:
+                    result = client.run(sudo)
+                    assert result["success"] and int(result["stdout"].strip()) == uid, result
+                records = request(root_url, "/v1/admin/sessions/list", {}, root_session)
+                created = [r for r in records if r["id"] not in previous]
+                assert len(created) == 1, created
+                request(root_url, "/v1/admin/sessions/revoke", {"id": created[0]["id"]}, root_session)
+                rejected = client.run(False)
+                assert "error" in rejected or rejected.get("result", {}).get("isError"), rejected
             rejected = subprocess.run(["sudo", "-n", "--", str(binary.with_name("trustd-user")), "--config", str(config)],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
             assert rejected.returncode != 0 and "non-elevated" in rejected.stderr
             print("Dual daemon identities verified: sudo=false is current user; sudo=true is root.")
         finally:
+            for client in reversed(clients):
+                client.close()
             stop_processes(processes)
 
 

@@ -1,4 +1,5 @@
 //! Exercise the actual CLI process and its inherited OS identity, not just AppState.
+mod support;
 use std::{
     io::Write,
     process::{Child, Command, Stdio},
@@ -180,18 +181,12 @@ async fn verify_user_daemon(headless: bool) {
         .unwrap();
     assert!(page.contains("本机授权管理"));
     assert!(page.contains("/assets/"));
-    let issued: Value = client.post(format!("{base}/v1/admin/tokens/issue")).json(&json!({"credential":{"type":"password", "value":"localshelld integration test password"}}))
-        .send().await.unwrap().json().await.unwrap();
-    assert!(issued["warning"].as_str().unwrap().contains("current-user"));
-    let entered: Value = client
-        .post(format!("{base}/v1/sessions/enter"))
-        .json(&json!({"token":issued["token"]}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let approval_base = base.clone();
+    let entered = tokio::task::spawn_blocking(move || {
+        support::authorize(&approval_base, "localshelld integration test password")
+    })
+    .await
+    .unwrap();
     if cfg!(windows) {
         assert_eq!(entered["privilege_levels"], json!(["current-user"]));
     } else {

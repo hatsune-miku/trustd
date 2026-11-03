@@ -113,6 +113,7 @@ mod tests {
         Prompt {
             id: "request".into(),
             agent_name: "agent".into(),
+            agent_path: None,
             request_reason: "reason <script> unchanged".into(),
             scope: "user".into(),
             secret_keys: vec![],
