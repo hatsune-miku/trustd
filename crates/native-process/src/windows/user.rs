@@ -12,27 +12,30 @@ fn linked_token(handle: HANDLE) -> io::Result<OwnedHandle> {
     own(unsafe { (*data.as_ptr().cast::<TOKEN_LINKED_TOKEN>()).LinkedToken })
 }
 
-fn primary_token(handle: HANDLE) -> io::Result<OwnedHandle> {
-    let mut primary = null_mut();
-    // SAFETY: handle remains open and primary is writable output storage.
+fn adjustable_token_handle(handle: HANDLE) -> io::Result<OwnedHandle> {
+    let mut duplicate = null_mut();
+    // SAFETY: both process pseudo-handles and the source token remain valid.
+    // Duplicate the handle, not the token object or its parent-token identity.
     check(unsafe {
-        DuplicateTokenEx(
+        DuplicateHandle(
+            GetCurrentProcess(),
             handle,
-            TOKEN_ALL_ACCESS,
-            null(),
-            SecurityImpersonation,
-            TokenPrimary,
-            &mut primary,
+            GetCurrentProcess(),
+            &mut duplicate,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
+            0,
+            0,
         )
     })?;
-    own(primary)
+    own(duplicate)
 }
 
 fn restricted_token(handle: HANDLE) -> io::Result<OwnedHandle> {
-    // CreateRestrictedToken preserves the handle's access mask. Duplicate with
-    // adjustment rights before lowering the new token's mandatory label.
-    let source = primary_token(handle)?;
-    let groups = token_data(source.as_raw_handle(), TokenGroups)?;
+    // Filter the original token, not a duplicate: process creation without
+    // SeAssignPrimaryTokenPrivilege requires a restriction of the caller's
+    // own primary token. Duplicating first breaks that relationship for a
+    // built-in Administrator without a split UAC token.
+    let groups = token_data(handle, TokenGroups)?;
     // SAFETY: the variable-sized TOKEN_GROUPS stays allocated through filtering.
     let groups = unsafe { &*groups.as_ptr().cast::<TOKEN_GROUPS>() };
     let groups =
@@ -49,7 +52,7 @@ fn restricted_token(handle: HANDLE) -> io::Result<OwnedHandle> {
     // Remove privileges except traversal; never use SANDBOX_INERT.
     check(unsafe {
         CreateRestrictedToken(
-            source.as_raw_handle(),
+            handle,
             DISABLE_MAX_PRIVILEGE,
             disabled.len() as u32,
             disabled.as_ptr(),
@@ -61,6 +64,9 @@ fn restricted_token(handle: HANDLE) -> io::Result<OwnedHandle> {
         )
     })?;
     let restricted = own(restricted)?;
+    // Filtering inherits the source handle's access mask. Reopen that SAME
+    // token object with rights to adjust its defaults; do not clone it again.
+    let restricted = adjustable_token_handle(restricted.as_raw_handle())?;
     user_default_security(restricted.as_raw_handle())?;
     let mut sid = SID {
         Revision: 1,

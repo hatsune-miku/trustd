@@ -3,6 +3,18 @@ use std::io::Read;
 use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 
 #[test]
+fn adjustment_handle_preserves_the_original_token_object() {
+    let source = token(unsafe { GetCurrentProcess() }).unwrap();
+    let reopened = adjustable_token_handle(source.as_raw_handle()).unwrap();
+    let original = token_data(source.as_raw_handle(), TokenStatistics).unwrap();
+    let reopened = token_data(reopened.as_raw_handle(), TokenStatistics).unwrap();
+    let original = unsafe { (*original.as_ptr().cast::<TOKEN_STATISTICS>()).TokenId };
+    let reopened = unsafe { (*reopened.as_ptr().cast::<TOKEN_STATISTICS>()).TokenId };
+    assert_eq!(original.LowPart, reopened.LowPart);
+    assert_eq!(original.HighPart, reopened.HighPart);
+}
+
+#[test]
 fn filtering_keeps_the_user_and_logon_sids_but_removes_admin_groups() {
     for sid in [
         "S-1-5-32-544",
@@ -102,11 +114,10 @@ fn restricted_token_removes_admin_rights_and_runs_a_medium_child() {
         "only traversal privilege may remain"
     );
 
-    // Production only switches tokens for an elevated interactive login.
-    // Standard CI accounts can filter a token without possessing the process
-    // assignment privileges needed to launch with it; they keep their existing
-    // process in production. Service sessions are rejected before relaunching.
-    if !original.has_elevated_rights() || !original.is_interactive_user() {
+    // A service-session token has no interactive desktop for the reduced
+    // child. Token filtering above still runs; production rejects this login
+    // before relaunching. Exercise real child creation for every other user.
+    if !original.is_interactive_user() {
         return;
     }
 
