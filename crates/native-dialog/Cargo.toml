@@ -27,7 +27,12 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSText", "NSTextView", "NSTextContainer", "NSScrollView", "NSFont",
     "NSStackView", "NSLayoutConstraint", "NSLayoutAnchor", "NSEvent",
     "NSUserInterfaceLayout", "NSRunningApplication", "NSGraphics", "NSButtonCell",
+    "NSMenu", "NSMenuItem",
 ] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSUndoManager"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSGraphicsContext"] }
 
 [[test]]
 name = "macos_native"

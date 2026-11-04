@@ -27,24 +27,8 @@ mod sockets;
 #[cfg(target_os = "macos")]
 use sockets::socket_owners;
 
-/// Exact executable names, not substrings, command lines or an adapter's claims.
-pub const PROCESS_NAMES: &[&str] = &[
-    "codex",
-    "claude",
-    "cursor",
-    "windsurf",
-    "code",
-    "code-insiders",
-    "gemini",
-    "devin",
-    "codex helper",
-    "codex helper (plugin)",
-    "claude helper",
-    "claude helper (plugin)",
-    "cursor helper (plugin)",
-    "windsurf helper (plugin)",
-    "code helper (plugin)",
-];
+mod catalog;
+pub use catalog::PROCESS_NAMES;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Identity {
