@@ -180,9 +180,10 @@ fn install_edit_menu(mtm: MainThreadMarker, app: &NSApplication) {
     let edit_item = NSMenuItem::new(mtm);
     edit_item.setTitle(ns_string!("编辑"));
     let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("编辑"));
+    // Use the shifted character for redo so AppKit matches Command+Shift+Z.
     for (title, action, key, shift) in [
         ("撤销", sel!(undo:), "z", false),
-        ("重做", sel!(redo:), "z", true),
+        ("重做", sel!(redo:), "Z", true),
         ("剪切", sel!(cut:), "x", false),
         ("复制", sel!(copy:), "c", false),
         ("粘贴", sel!(paste:), "v", false),
