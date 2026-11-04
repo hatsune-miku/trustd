@@ -168,7 +168,7 @@ HTTP 与 Streamable HTTP MCP 入口：
 
 daemon 主动扫描当前用户的已知 Agent 进程，网页后台的“Agent 授权”和 Telegram `/agents` 显示程序完整路径及 PID。同名但路径不同的程序独立管理；同一路径的多个进程共享策略。
 
-初始扫描名称包括 Codex、Claude、Cursor、Windsurf、Code / Code Insiders、Gemini、Devin 及相应的已知 Helper 进程，不按任意命令行关键词匹配。使用通用 `node` 进程且没有这些祖先进程的客户端仍可请求当次授权，但不会被猜测为某个已信任的 Agent。
+扫描名称覆盖 Codex、Claude、DeepSeek Harness、OpenCode、Goose、Kiro、Kimi、Copilot CLI、Droid、Amp、Antigravity 等客户端及已知 Helper，完整目录与官方依据见 [Agent 识别](AGENT-RECOGNITION.md)。这个目录独立于安装向导，只用于发现程序，不自动授予信任。不按任意命令行关键词匹配；只有通用 `node`、`python` 等运行时且没有已知祖先进程的客户端仍可请求当次授权，但不能按运行时路径持久信任。
 
 | 状态      | 行为                                                           |
 | --------- | -------------------------------------------------------------- |
@@ -178,6 +178,8 @@ daemon 主动扫描当前用户的已知 Agent 进程，网页后台的“Agent 
 | 总是拒绝  | 拒绝此路径的请求                                               |
 
 弹窗接受时勾选“记住我的选择”等同于长期信任。daemon 根据连接所属进程及祖先进程识别实际路径，不接受 stdio 自报 PID 或路径；路径无法核验时仍请求用户确认，不能持久信任。按自报名保存的授权记忆不转换成路径信任。
+
+macOS 原生弹窗支持 `Command+A/C/X/V/Z` 与 `Command+Shift+Z`，分别用于全选、复制、剪切、粘贴、撤销和重做；只读字段可以选择、复制，授权按钮没有回车、空格或 Escape 快捷键。
 
 Agent 通过 `enter_interactive` 请求授权，接受或拒绝的结果不包含授权来源或策略。现有会话可在“已授权会话”中撤销；更改路径策略只影响后续请求。
 
@@ -260,5 +262,7 @@ pnpm --dir web test:e2e
 ```
 
 测试覆盖 HTTP/MCP 授权、原生 shell、凭据快照、双 daemon 生命周期、stdio 会话隔离/取消/EOF 清理，以及整套程序校验。CI 在 Windows x86_64、Linux x86_64、macOS Apple Silicon 构建并检查平台所需的全部程序；只有各平台成功后才发布完整 RC 套件与 SHA256SUMS。
+
+macOS 原生弹窗的主线程交互测试可单独运行：`cargo test -p localshelld-native-dialog --test macos_native`，包含编辑快捷键、只读字段和授权按钮防误触检查。
 
 设计取舍见 [架构文档](ARCHITECTURE.md)。

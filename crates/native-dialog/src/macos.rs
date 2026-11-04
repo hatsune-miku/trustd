@@ -25,6 +25,10 @@ use crate::{Choice, Event, Outcome, Request, types::Completion};
 const MAX_WINDOWS: usize = 8;
 const NOTE_LIMIT: usize = 4096;
 
+#[cfg(test)]
+#[path = "macos/tests.rs"]
+mod tests;
+
 struct Mailbox {
     queue: mpsc::SyncSender<Event>,
     stop: Option<i32>,
@@ -68,6 +72,7 @@ impl EventLoop {
             .ok_or_else(|| io::Error::other("AppKit requires the main thread"))?;
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        install_edit_menu(mtm, &app);
         app.finishLaunching();
         let (queue, receiver) = mpsc::sync_channel(64);
         Ok(Self {
@@ -159,6 +164,50 @@ impl Drop for EventLoop {
         }
         self.windows.clear();
     }
+}
+
+fn install_edit_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    let menu = NSMenu::new(mtm);
+    // AppKit reserves the first submenu for the application menu, even for an
+    // accessory app. Editing actions belong to a separate responder-chain menu.
+    let application = NSMenuItem::new(mtm);
+    application.setTitle(ns_string!("trustd"));
+    application.setSubmenu(Some(&NSMenu::initWithTitle(
+        NSMenu::alloc(mtm),
+        ns_string!("trustd"),
+    )));
+    menu.addItem(&application);
+    let edit_item = NSMenuItem::new(mtm);
+    edit_item.setTitle(ns_string!("编辑"));
+    let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("编辑"));
+    for (title, action, key, shift) in [
+        ("撤销", sel!(undo:), "z", false),
+        ("重做", sel!(redo:), "z", true),
+        ("剪切", sel!(cut:), "x", false),
+        ("复制", sel!(copy:), "c", false),
+        ("粘贴", sel!(paste:), "v", false),
+        ("全选", sel!(selectAll:), "a", false),
+    ] {
+        // SAFETY: standard AppKit action selectors. A nil target sends the action
+        // to the current first responder; AppKit validates editable/read-only state.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(if shift {
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift
+        } else {
+            NSEventModifierFlags::Command
+        });
+        edit.addItem(&item);
+    }
+    edit_item.setSubmenu(Some(&edit));
+    menu.addItem(&edit_item);
+    app.setMainMenu(Some(&menu));
 }
 
 struct State {
@@ -443,6 +492,7 @@ fn text_area(
         note.setRichText(false);
         note.setEditable(editable);
         note.setSelectable(true);
+        note.setAllowsUndo(editable);
         note.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         note.setTextContainerInset(NSSize::new(6.0, 6.0));
         note.setAutomaticQuoteSubstitutionEnabled(false);
@@ -462,6 +512,7 @@ pub(super) fn verify_native_controls() {
         desktop.app.activationPolicy(),
         NSApplicationActivationPolicy::Accessory
     );
+    tests::verify_editing(&desktop);
     for choice in [Choice::Accept, Choice::Deny, Choice::Ignore] {
         let replies = Arc::new(Mutex::new(Vec::new()));
         let output = Arc::clone(&replies);
@@ -510,6 +561,7 @@ pub(super) fn verify_native_controls() {
         },
     );
     expired.delegate.finish(Choice::Accept);
+    assert!(!expired.delegate.ivars().remember.isEnabled());
     assert_eq!(replies.lock().unwrap()[0].choice, Choice::Ignore);
     assert!(!replies.lock().unwrap()[0].remember);
     let sender = desktop.sender();
@@ -519,5 +571,7 @@ pub(super) fn verify_native_controls() {
     sender.send(Event::Stop(7)).unwrap();
     assert_eq!(desktop.run(), 7);
     assert!(sender.send(Event::Close("closed".into())).is_err());
-    println!("AppKit consent controls, deadlines, one-shot replies and mailbox lifecycle passed");
+    println!(
+        "AppKit editing shortcuts, consent controls, deadlines, one-shot replies and mailbox lifecycle passed"
+    );
 }
