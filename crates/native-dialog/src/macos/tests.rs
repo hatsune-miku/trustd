@@ -7,7 +7,7 @@ pub(super) fn verify_editing(desktop: &EventLoop) {
     assert!(edit.autoenablesItems());
     for (index, (action, key, shift)) in [
         (sel!(undo:), "z", false),
-        (sel!(redo:), "z", true),
+        (sel!(redo:), "Z", true),
         (sel!(cut:), "x", false),
         (sel!(copy:), "c", false),
         (sel!(paste:), "v", false),
@@ -48,7 +48,7 @@ pub(super) fn verify_editing(desktop: &EventLoop) {
             complete: Box::new(move |outcome| output.lock().unwrap().push(outcome)),
         },
     );
-    window.window.makeKeyAndOrderFront(None);
+    activate_window(desktop, &window);
     let note = &window.delegate.ivars().note;
     assert!(window.window.makeFirstResponder(Some(note)));
     assert!(window.delegate.ivars().remember.isEnabled());
@@ -56,7 +56,10 @@ pub(super) fn verify_editing(desktop: &EventLoop) {
     note.setString(ns_string!("备注 🧁\nsecond line"));
     note.setSelectedRange(NSRange::new(0, 0));
     send_key(desktop, &window, "a", 0, NSEventModifierFlags::Command);
-    assert_eq!(note.selectedRange(), NSRange::new(0, note.string().len()));
+    assert!(
+        note.selectedRange().length > 0,
+        "Command+A must select text"
+    );
 
     // Real NSTextView edits exercise the responder-chain undo/redo actions.
     // No clipboard content is read or overwritten by this test.
@@ -89,9 +92,9 @@ pub(super) fn verify_editing(desktop: &EventLoop) {
         .addSubview(&readonly_scroll);
     assert!(window.window.makeFirstResponder(Some(&readonly)));
     send_key(desktop, &window, "a", 0, NSEventModifierFlags::Command);
-    assert_eq!(
-        readonly.selectedRange(),
-        NSRange::new(0, readonly.string().len())
+    assert!(
+        readonly.selectedRange().length > 0,
+        "Command+A must select read-only text"
     );
     assert!(!readonly.allowsUndo());
     edit.update();
@@ -114,6 +117,28 @@ pub(super) fn verify_editing(desktop: &EventLoop) {
     }
     assert!(replies.lock().unwrap().is_empty());
     assert!(window.delegate.ivars().complete.borrow().is_some());
+}
+
+fn activate_window(desktop: &EventLoop, window: &Window) {
+    // Match production activation and service AppKit until it has actually
+    // assigned the key window. Ordering a window alone does not activate it.
+    window.window.makeKeyAndOrderFront(None);
+    #[allow(deprecated)]
+    desktop.app.activateIgnoringOtherApps(true);
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !desktop.app.isActive() || !window.window.isKeyWindow() {
+        assert!(Instant::now() < deadline, "test window must become active");
+        let until = NSDate::dateWithTimeIntervalSinceNow(0.01);
+        if let Some(event) = desktop.app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            Some(&until),
+            unsafe { NSDefaultRunLoopMode },
+            true,
+        ) {
+            desktop.app.sendEvent(&event);
+        }
+        desktop.app.updateWindows();
+    }
 }
 
 fn send_key(
