@@ -97,6 +97,83 @@ fn exact_names_and_full_paths_never_collapse_same_name_programs() {
     );
 }
 
+#[test]
+fn discovery_catalog_is_exact_normalized_and_excludes_generic_runtimes() {
+    let mut seen = BTreeSet::new();
+    for name in PROCESS_NAMES {
+        assert_eq!(*name, name.to_lowercase());
+        assert!(!name.ends_with(".exe"));
+        assert!(seen.insert(*name), "duplicate executable: {name}");
+        assert!(recognized(name));
+        assert!(recognized(&format!("{}.EXE", name.to_uppercase())));
+        assert!(!recognized(&format!("not-{name}")));
+        assert!(!recognized(&format!("{name}-unrelated")));
+    }
+    for name in [
+        "DeepSeek Harness",
+        "DeepSeek Harness Helper (Plugin)",
+        "OpenCode",
+        "opencode-cli",
+        "ai.opencode",
+        "Goose",
+        "Kiro",
+        "kiro-cli",
+        "kimi",
+        "copilot",
+        "droid",
+        "amp",
+        "kilo",
+        "crush",
+        "grok",
+        "Antigravity",
+        "agy",
+        "Trae CN",
+        "CodeBuddy",
+        "Qoder",
+        "ZCode",
+        "Cherry Studio",
+        "Jan-Desktop",
+        "Zed",
+        "cline",
+        "qwen",
+        "auggie",
+        "aider",
+        "pi",
+        "hermes",
+        "openhands",
+        "dsh",
+    ] {
+        assert!(recognized(name), "missing discovery entry: {name}");
+    }
+    for name in [
+        "node",
+        "node.exe",
+        "python",
+        "python3",
+        "python3.14",
+        "pythonw.exe",
+        "bun",
+        "deno",
+        "electron",
+        "java",
+        "bash",
+        "sh",
+        "pwsh",
+        "cmd.exe",
+        "agent",
+        "helper",
+        "unknown helper (plugin)",
+        "DeepSeek Harness Updater",
+        "DeepSeek Harness Helper (GPU)",
+        "dsh.js",
+        "node /opt/dsh/lib/bin.js",
+        "/Applications/DeepSeek Harness",
+        "copilot.exe.bak",
+    ] {
+        assert!(!recognized(name), "unsafe discovery entry: {name}");
+    }
+}
+
 #[tokio::test]
 async fn once_is_atomic_persisted_and_not_replayed_after_consumption() {
     let dir = tempfile::tempdir().unwrap();
@@ -326,11 +403,22 @@ fn process_probe() {
 
 #[tokio::test]
 async fn real_process_scan_and_socket_owner_use_actual_path_not_self_report() {
+    verify_real_process("codex").await;
+}
+
+#[tokio::test]
+async fn deepseek_harness_is_discovered_and_its_adapter_uses_the_verified_parent() {
+    verify_real_process("DeepSeek Harness").await;
+}
+
+async fn verify_real_process(executable_name: &str) {
     use tokio::io::AsyncWriteExt;
     let directory = tempfile::tempdir().unwrap();
-    let executable = directory
-        .path()
-        .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+    let executable = directory.path().join(if cfg!(windows) {
+        format!("{executable_name}.exe")
+    } else {
+        executable_name.to_owned()
+    });
     std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let adapter = directory.path().join(if cfg!(windows) {
         "fixture-adapter.exe"
@@ -387,6 +475,7 @@ async fn real_process_scan_and_socket_owner_use_actual_path_not_self_report() {
     })
     .await
     .unwrap();
+    assert_eq!(agent.policy, Policy::Ask);
     assert!(
         agent
             .path
