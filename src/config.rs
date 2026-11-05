@@ -27,6 +27,8 @@ pub struct Config {
     pub max_output_bytes: usize,
     /// Only the user daemon connects to this privileged loopback endpoint.
     pub privileged_daemon: SocketAddr,
+    /// Installation choice; None keeps legacy configurations auto-detected.
+    pub user_headless: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ impl Default for Config {
             bind: SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), DEFAULT_PORT),
             password_hash: String::new(),
             totp_secret: None,
+            user_headless: None,
             shell: crate::shell::ShellKind::native().executable().to_owned(),
             max_output_bytes: 8 * 1024 * 1024,
             privileged_daemon: SocketAddr::new(

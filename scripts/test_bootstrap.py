@@ -18,7 +18,16 @@ ROOT = Path(__file__).resolve().parent.parent
 class BootstrapTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX shell fixture")
     def test_shell_download_verification_launch_and_cleanup(self):
-        for platform in ("linux-x86_64", "macos-aarch64"):
+        cases = [
+            ("linux-x86_64", [], ":0", ""),
+            ("linux-x86_64", [], "", "wayland-0"),
+            ("linux-x86_64", [], "", ""),
+            ("linux-x86_64", ["--headless"], ":0", ""),
+            ("linux-x86_64", ["--desktop"], "", ""),
+            ("macos-aarch64", [], "", ""),
+            ("macos-aarch64", ["--headless", "--no-open"], "", ""),
+        ]
+        for platform, selectors, display, wayland in cases:
             for mode in ("success", "download", "checksum", "missing", "wizard"):
                 with self.subTest(platform=platform, mode=mode), tempfile.TemporaryDirectory(prefix="trustd-bootstrap-test-") as temp:
                     base = Path(temp)
@@ -31,8 +40,8 @@ class BootstrapTests(unittest.TestCase):
                     (base / "release.json").write_text(json.dumps({"tag_name": "v0.1.0-test"}), encoding="utf-8")
                     asset = f"trustd-{platform}.tar.gz"
                     with tarfile.open(base / asset, "w:gz") as archive:
-                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-stdio"):
-                            if mode == "missing" and role == "trustd-stdio":
+                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-user-headless", "trustd-stdio"):
+                            if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             content = b'#!/bin/sh\nprintf "%s\\n" "$@" > "$TRUSTD_FIXTURE/launched"\n[ "$TRUSTD_FIXTURE_MODE" != wizard ]\n'
                             info = tarfile.TarInfo(f"trustd-{platform}/{role}")
@@ -59,13 +68,14 @@ cp "$TRUSTD_FIXTURE/$file" "$output"
                         path.write_text(content, encoding="utf-8")
                         path.chmod(0o755)
                     arguments = ["--cli"] if platform.startswith("linux") and mode == "success" else []
-                    result = subprocess.run(["sh", str(ROOT / "install.sh"), *arguments], capture_output=True, text=True, timeout=20,
+                    result = subprocess.run(["sh", str(ROOT / "install.sh"), *arguments, *selectors], capture_output=True, text=True, timeout=20,
                                             env={**os.environ, "PATH": str(mock) + os.pathsep + os.environ["PATH"],
+                                                 "DISPLAY": display, "WAYLAND_DISPLAY": wayland,
                                                  "TMPDIR": str(tmp), "TRUSTD_FIXTURE": str(base), "TRUSTD_FIXTURE_MODE": mode})
                     self.assertEqual(result.returncode == 0, mode == "success", result.stderr)
                     self.assertEqual((base / "launched").exists(), mode in ("success", "wizard"))
                     if (base / "launched").exists():
-                        self.assertEqual((base / "launched").read_text(), "maintenance\n" + "".join(arg + "\n" for arg in arguments))
+                        self.assertEqual((base / "launched").read_text(), "maintenance\n" + "".join(arg + "\n" for arg in [*arguments, *selectors]))
                     self.assertEqual(list(tmp.iterdir()), [sentinel])
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell fixture")
@@ -81,8 +91,8 @@ cp "$TRUSTD_FIXTURE/$file" "$output"
                     sentinel.write_text("unrelated", encoding="utf-8")
                     asset = "trustd-windows-x86_64.zip"
                     with zipfile.ZipFile(base / asset, "w") as archive:
-                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-stdio"):
-                            if mode == "missing" and role == "trustd-stdio":
+                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-user-headless", "trustd-stdio"):
+                            if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             archive.writestr(f"trustd-windows-x86_64/{role}.exe", b"never executed")
                     digest = hashlib.sha256((base / asset).read_bytes()).hexdigest()

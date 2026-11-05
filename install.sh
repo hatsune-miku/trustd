@@ -30,7 +30,7 @@ esac
 case "$trustd_tag" in *[!A-Za-z0-9._-]*) printf '%s\n' 'Invalid release tag.' >&2; exit 1 ;; esac
 trustd_url="https://github.com/hatsune-miku/trustd/releases/download/$trustd_tag"
 trustd_archive="trustd-$trustd_platform.tar.gz"
-printf 'Downloading trustd %s...\n' "$trustd_tag"
+printf 'Downloading trustd %s (%s)...\n' "$trustd_tag" "$trustd_platform"
 trustd_fetch "$trustd_url/$trustd_archive" "$trustd_tmp/$trustd_archive"
 trustd_fetch "$trustd_url/SHA256SUMS" "$trustd_tmp/SHA256SUMS"
 trustd_expected=$(awk -v asset="$trustd_archive" '$2 == asset {print $1}' "$trustd_tmp/SHA256SUMS")
@@ -44,7 +44,7 @@ fi
 [ "$trustd_actual" = "$trustd_expected" ] || { printf '%s\n' 'Release checksum verification failed.' >&2; exit 1; }
 tar -xzf "$trustd_tmp/$trustd_archive" -C "$trustd_tmp"
 trustd_bundle="$trustd_tmp/trustd-$trustd_platform"
-for trustd_role in trustd trustd-root trustd-user trustd-stdio; do
+for trustd_role in trustd trustd-root trustd-user trustd-user-headless trustd-stdio; do
   [ -f "$trustd_bundle/$trustd_role" ] || { printf '%s\n' 'The release package is incomplete.' >&2; exit 1; }
   chmod +x "$trustd_bundle/$trustd_role"
 done

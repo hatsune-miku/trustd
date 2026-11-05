@@ -17,9 +17,20 @@ impl Drop for Daemon {
     }
 }
 
-fn cli(user: bool) -> Command {
+fn cli(user: bool, headless: bool) -> Command {
     let command = Command::new(if user {
-        env!("CARGO_BIN_EXE_trustd-user")
+        if headless {
+            env!("CARGO_BIN_EXE_trustd-user-headless")
+        } else {
+            #[cfg(feature = "desktop")]
+            {
+                env!("CARGO_BIN_EXE_trustd-user")
+            }
+            #[cfg(not(feature = "desktop"))]
+            {
+                panic!("desktop tests require the desktop feature")
+            }
+        }
     } else {
         env!("CARGO_BIN_EXE_trustd")
     });
@@ -38,19 +49,19 @@ async fn actual_user_daemon_executes_as_current_user_without_root_backend() {
     verify_user_daemon(true).await;
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop"))]
 #[tokio::test]
 async fn windowless_user_daemon_keeps_the_native_desktop_event_loop_and_http_alive() {
     verify_user_daemon(false).await;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "desktop"))]
 #[tokio::test]
 async fn background_user_daemon_has_accessory_policy_and_keeps_http_alive() {
     verify_user_daemon(false).await;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "desktop"))]
 async fn assert_accessory_process(pid: u32) {
     // Read AppKit's policy for only our disposable child. This needs neither
     // Accessibility permissions nor System Events automation access.
@@ -84,7 +95,7 @@ async fn assert_accessory_process(pid: u32) {
 async fn verify_user_daemon(headless: bool) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("user/config.toml");
-    let mut init = cli(false)
+    let mut init = cli(false, headless)
         .args(["init", "--user", "--password-stdin", "--config"])
         .arg(&path)
         .stdin(Stdio::piped())
@@ -121,10 +132,9 @@ async fn verify_user_daemon(headless: bool) {
             .save(&path)
             .unwrap();
         } else {
-            let serve = cli(true)
+            let serve = cli(true, headless)
                 .args(["--config"])
                 .arg(&path)
-                .args(headless.then_some("--headless"))
                 .output()
                 .unwrap();
             assert!(!serve.status.success());
@@ -140,10 +150,9 @@ async fn verify_user_daemon(headless: bool) {
     config.save(&path).unwrap();
     drop(reservation);
     let mut daemon = Daemon(
-        cli(true)
+        cli(true, headless)
             .args(["--config"])
             .arg(&path)
-            .args(headless.then_some("--headless"))
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
@@ -167,7 +176,7 @@ async fn verify_user_daemon(headless: bool) {
     .await
     .unwrap();
     assert_eq!(health["daemon"], "user");
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
     if !headless {
         assert_accessory_process(daemon.0.id()).await;
     }

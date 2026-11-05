@@ -10,13 +10,13 @@ use std::{path::Path, path::PathBuf};
 #[derive(Clone, Copy)]
 pub(super) enum Elevation {
     Graphical,
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     Terminal,
 }
 
 impl Elevation {
     pub fn check(self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if matches!(self, Self::Terminal) {
             ensure!(
                 Path::new("/usr/bin/sudo").is_file(),
@@ -32,7 +32,7 @@ impl Elevation {
     }
 
     pub fn apply(self, helper: &Path, plan: &Path, digest: &str) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if matches!(self, Self::Terminal) {
             // Inherit the controlling terminal for sudo; never collect or pipe
             // the sudo password through the installer or place it in argv.

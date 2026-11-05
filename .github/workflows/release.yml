@@ -18,7 +18,7 @@ jobs:
           - os: windows-latest
             artifact: trustd-windows-x86_64
             binary: target/release/trustd.exe
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact: trustd-linux-x86_64
             binary: target/release/trustd
           - os: macos-15
@@ -48,10 +48,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --all-targets --no-default-features
       - name: Validate MCP tool schemas with the official TypeScript SDK
         working-directory: web
         run: pnpm test:mcp
-      - run: cargo build --release
+      - name: Validate headless MCP tool schemas
+        run: |
+          cargo build --no-default-features --bin trustd-stdio
+          node --test web/tests/mcp/stdio.test.mjs
+      - name: Build the unified desktop and headless bundle
+        shell: bash
+        run: bash scripts/build-bundle.sh
+      - name: Verify headless bundle without desktop runtime libraries
+        if: runner.os == 'Linux'
+        run: bash scripts/test-headless-runtime.sh target/release
       - name: Verify embedded version
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -66,6 +76,8 @@ jobs:
             ${{ matrix.binary }}
             target/release/trustd-user
             target/release/trustd-user.exe
+            target/release/trustd-user-headless
+            target/release/trustd-user-headless.exe
             target/release/trustd-stdio
             target/release/trustd-stdio.exe
             target/release/trustd-system.exe

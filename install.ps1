@@ -26,7 +26,7 @@
         if ((Get-FileHash -LiteralPath $trustdArchive -Algorithm SHA256).Hash -ne $trustdExpected) { throw 'Release checksum verification failed.' }
         Expand-Archive -LiteralPath $trustdArchive -DestinationPath $trustdTemp
         $trustdBundle = Join-Path $trustdTemp 'trustd-windows-x86_64'
-        foreach ($trustdRole in @('trustd', 'trustd-system', 'trustd-user', 'trustd-stdio')) {
+        foreach ($trustdRole in @('trustd', 'trustd-system', 'trustd-user', 'trustd-user-headless', 'trustd-stdio')) {
             if (-not (Test-Path -LiteralPath (Join-Path $trustdBundle ($trustdRole + '.exe')) -PathType Leaf)) { throw 'The release package is incomplete.' }
         }
         Write-Host 'Opening the maintenance wizard. Select Finish in the wizard to remove the temporary download.'

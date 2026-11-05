@@ -55,6 +55,7 @@ fn chooses_only_the_requested_platform_asset() {
         "trustd-windows-x86_64.exe",
         "trustd-windows-x86_64.zip",
         "trustd-linux-x86_64.tar.gz",
+        "trustd-linux-x86_64-headless.tar.gz",
     ] {
         release.assets.push(Asset {
             name: name.into(),
@@ -67,6 +68,10 @@ fn chooses_only_the_requested_platform_asset() {
         "trustd-windows-x86_64.zip"
     );
     assert!(asset_for(&release, "macos-aarch64").is_err());
+    assert_eq!(
+        asset_for(&release, "linux-x86_64").unwrap().1,
+        "trustd-linux-x86_64.tar.gz"
+    );
 }
 
 #[test]
@@ -145,7 +150,12 @@ fn zip_extracts_only_exact_binary_not_path_traversal() {
         .start_file("trustd-windows-x86_64/trustd.exe", options)
         .unwrap();
     archive.write_all(b"binary").unwrap();
-    for binary in ["trustd-user.exe", "trustd-system.exe", "trustd-stdio.exe"] {
+    for binary in [
+        "trustd-user.exe",
+        "trustd-user-headless.exe",
+        "trustd-system.exe",
+        "trustd-stdio.exe",
+    ] {
         archive
             .start_file(format!("trustd-windows-x86_64/{binary}"), options)
             .unwrap();

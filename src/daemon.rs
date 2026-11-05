@@ -44,10 +44,8 @@ pub fn require_user() -> Result<()> {
 
 pub fn user(config: Option<PathBuf>, headless: bool) -> Result<()> {
     #[cfg(windows)]
-    if !headless {
-        localshelld_native_dialog::detach_owned_console()
-            .context("failed to detach the user daemon's standalone console")?;
-    }
+    localshelld_native_process::detach_owned_console()
+        .context("failed to detach the user daemon's standalone console")?;
     #[cfg(windows)]
     if let Some(status) = localshelld_native_process::relaunch_as_user_if_elevated()
         .context("could not start the non-elevated user daemon")?
@@ -62,6 +60,9 @@ pub fn user(config: Option<PathBuf>, headless: bool) -> Result<()> {
     logging();
     let path = config.map_or_else(user_config_path, Ok)?;
     let runtime = tokio::runtime::Runtime::new()?;
+    #[cfg(not(feature = "desktop"))]
+    let _ = headless; // This binary never initializes a desktop, regardless of DISPLAY.
+    #[cfg(feature = "desktop")]
     if !headless && crate::desktop::available() {
         let desktop = crate::desktop::Desktop::new()?;
         let broker = desktop.broker();
