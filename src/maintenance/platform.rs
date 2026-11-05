@@ -7,6 +7,54 @@ use std::fs;
 use std::process::Command;
 use std::{path::Path, path::PathBuf};
 
+#[derive(Clone, Copy)]
+pub(super) enum Elevation {
+    Graphical,
+    #[cfg(target_os = "linux")]
+    Terminal,
+}
+
+impl Elevation {
+    pub fn check(self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if matches!(self, Self::Terminal) {
+            ensure!(
+                Path::new("/usr/bin/sudo").is_file(),
+                "终端向导需要 /usr/bin/sudo。"
+            );
+            return Ok(());
+        }
+        ensure!(
+            elevation_available(),
+            "系统提权工具不可用；Linux 网页向导需要 polkit/pkexec。"
+        );
+        Ok(())
+    }
+
+    pub fn apply(self, helper: &Path, plan: &Path, digest: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if matches!(self, Self::Terminal) {
+            // Inherit the controlling terminal for sudo; never collect or pipe
+            // the sudo password through the installer or place it in argv.
+            let status = Command::new("/usr/bin/sudo")
+                .args([
+                    "--",
+                    "/usr/bin/env",
+                    "-i",
+                    "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                ])
+                .arg(helper)
+                .arg("maintenance-apply")
+                .arg(plan)
+                .arg(digest)
+                .status()?;
+            ensure!(status.success(), "sudo 安装助手未完成 ({status})");
+            return Ok(());
+        }
+        elevate(helper, plan, digest)
+    }
+}
+
 pub(super) fn owner() -> Result<String> {
     #[cfg(windows)]
     {

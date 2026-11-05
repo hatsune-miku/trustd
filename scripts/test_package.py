@@ -29,6 +29,11 @@ class PackageTests(unittest.TestCase):
                 text=True, capture_output=True,
             )
             self.assertEqual(result.stdout, "maintenance\n--no-open\n")
+            result = subprocess.run(
+                [str(launcher), "--cli"], cwd=temp, check=True,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.stdout, "maintenance\n--cli\n")
 
     @unittest.skipUnless(all(shutil.which(tool) for tool in ("bash", "zip", "tar", "sha256sum")), "packaging tools required")
     def test_release_layout_keeps_update_programs_and_adds_installers(self):
