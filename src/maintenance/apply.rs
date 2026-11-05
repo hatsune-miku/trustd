@@ -248,7 +248,7 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         let user = Config::load(&plan.user_config)?;
         super::super::installation::wait_listener_closed(user.bind, Duration::from_secs(30))?;
         super::super::user_service::install_at(
-            &super::super::bundle::beside(&executable, super::super::bundle::USER)?,
+            &super::super::bundle::beside(&executable, super::super::user_service::role(&user))?,
             &plan.user_config,
         )
         .context("system service is ready, but user autostart failed; rerun repair")?;

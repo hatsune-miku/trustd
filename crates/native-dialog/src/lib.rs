@@ -1,5 +1,5 @@
 //! Native presentation only: no daemon connection, token, shell or authorization
-//! policy. Console detachment touches standard handles and the NUL device only.
+//! policy.
 //! The caller supplies an in-process one-shot callback for desktop prompts.
 //!
 //! All FFI lives in this small crate so the application can retain its
@@ -7,8 +7,6 @@
 //! the owning UI thread; the cross-thread sender transports owned Rust data.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(windows)]
-mod console;
 #[cfg(any(windows, target_os = "macos"))]
 mod types;
 #[cfg(any(windows, target_os = "macos"))]
@@ -19,7 +17,5 @@ mod macos;
 pub use macos::{EventLoop, Sender};
 #[cfg(windows)]
 mod windows;
-#[cfg(windows)]
-pub use console::detach_owned_console;
 #[cfg(windows)]
 pub use windows::{EventLoop, Sender};

@@ -11,3 +11,8 @@ pub use windows::*;
 mod maintenance;
 #[cfg(windows)]
 pub use maintenance::*;
+
+#[cfg(windows)]
+mod console;
+#[cfg(windows)]
+pub use console::detach_owned_console;

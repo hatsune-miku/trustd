@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 const REPOSITORY: &str = "hatsune-miku/trustd";
 const API: &str = "https://api.github.com/repos/hatsune-miku/trustd";
 const MAX_DOWNLOAD: u64 = 128 * 1024 * 1024;
-// Four role-specific programs may jointly exceed the old single-executable
+// Five role-specific programs may jointly exceed the old single-executable
 // limit. Keep per-program/download limits and bound total expanded tar bytes.
-const MAX_EXPANDED_BUNDLE: u64 = 4 * MAX_DOWNLOAD + 1024 * 1024;
+const MAX_EXPANDED_BUNDLE: u64 = 5 * MAX_DOWNLOAD + 1024 * 1024;
 const MAX_JSON: u64 = 4 * 1024 * 1024;
 
 /// Reuse the same managed-registration checks for an idempotent installation.
@@ -404,7 +404,7 @@ pub(super) fn checked(command: &mut Command) -> Result<String> {
     Ok(String::from_utf8(result.stdout)?)
 }
 
-fn probe(binary: &Path, role: &str) -> Result<String> {
+pub(super) fn probe(binary: &Path, role: &str) -> Result<String> {
     let text = checked(Command::new(binary).arg("--version"))?;
     let value = text
         .trim()
@@ -468,6 +468,11 @@ pub fn run(options: Options) -> Result<()> {
     for name in super::bundle::names(cfg!(windows)) {
         let path = programs.join(&name);
         service::validate_target(&path)?;
+        // The archive digest covers the desktop executable too. Its loader may
+        // require absent GUI libraries; the installer probes it only if selected.
+        if name == super::bundle::filename(super::bundle::USER) {
+            continue;
+        }
         ensure!(
             version(&probe(&path, name.trim_end_matches(".exe"))?)? == wanted,
             "bundle programs do not report one consistent release version"

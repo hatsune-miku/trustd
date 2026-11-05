@@ -53,7 +53,7 @@ class PackageTests(unittest.TestCase):
                 source = directory / "binaries" / f"trustd-{platform}"
                 source.mkdir(parents=True)
                 suffix = ".exe" if platform.startswith("windows") else ""
-                programs[platform] = [f"{role}{suffix}" for role in ("trustd", "trustd-user", "trustd-stdio")] + [privileged]
+                programs[platform] = [f"{role}{suffix}" for role in ("trustd", "trustd-user", "trustd-user-headless", "trustd-stdio")] + [privileged]
                 for name in programs[platform]:
                     (source / name).write_bytes(b"fixture program")
                 (source / "release-version.txt").write_text("trustd 0.1.0-test\n", encoding="utf-8")

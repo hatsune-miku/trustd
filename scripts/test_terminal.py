@@ -22,8 +22,9 @@ FIXTURE = "maintenance::terminal::tests::native_tty_fixture"
 class TerminalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        features = ["--no-default-features"] if os.environ.get("TRUSTD_HEADLESS") == "1" else []
         result = subprocess.run(
-            ["cargo", "test", "--bin", "trustd", "--no-run", "--message-format=json"],
+            ["cargo", "test", *features, "--bin", "trustd", "--no-run", "--message-format=json"],
             cwd=ROOT, capture_output=True, text=True,
         )
         artifacts = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]

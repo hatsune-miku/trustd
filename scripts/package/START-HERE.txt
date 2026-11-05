@@ -3,13 +3,15 @@ trustd 安装入口 / Start here
 Windows：双击 INSTALL.cmd。
 macOS：双击 INSTALL.command。
 Linux：在终端运行 ./INSTALL.sh；纯终端安装使用 ./INSTALL.sh --cli。
+同一套件包含桌面和无头程序；Linux 无图形会话时自动选择无头模式，无需 GTK/WebKit。
+显式选择无头模式：trustd maintenance --headless；切换桌面模式：trustd maintenance --desktop。
 
 先解压完整目录。默认打开浏览器向导，Linux 无图形会话时使用终端向导。
 Windows 支持 Administrator 登录或同一账号“以管理员身份运行”。
 macOS 和 Linux 请以普通登录用户启动。
 在“安装选项”中选择要接入的 AI agent；安装后重启对应客户端。
 
-trustd-user、trustd-system / trustd-root、trustd-stdio 是配套程序，无需逐个运行。
+trustd-user、trustd-user-headless、trustd-system / trustd-root、trustd-stdio 是配套程序，无需逐个运行。
 请保持它们与安装入口在同一个目录，不要单独拖出安装入口。
 
 macOS 程序安装到 /Library/trustd，维护入口位于 ~/Applications/trustd.app。
@@ -17,4 +19,4 @@ macOS 程序安装到 /Library/trustd，维护入口位于 ~/Applications/trustd
 
 Extract the entire archive, then open the installer for your platform above.
 The other programs are runtime components; do not launch them one by one.
-Keep the installer and all four programs together until installation finishes.
+Keep all five programs together until installation finishes.

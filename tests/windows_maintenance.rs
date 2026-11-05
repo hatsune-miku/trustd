@@ -3,8 +3,9 @@
 
 mod support;
 
+#[cfg(feature = "desktop")]
+use std::io::{BufRead, BufReader};
 use std::{
-    io::{BufRead, BufReader},
     process::{Child, Stdio},
     time::Duration,
 };
@@ -30,6 +31,7 @@ fn client() -> reqwest::blocking::Client {
 }
 
 #[test]
+#[cfg(feature = "desktop")]
 fn wizard_accepts_the_interactive_login_even_when_elevated() {
     let owner = current_identity().unwrap();
     let mut command = background_command(env!("CARGO_BIN_EXE_trustd"));
@@ -134,10 +136,9 @@ fn elevated_daemon_supervises_only_a_medium_same_user_child() {
     let config_before = std::fs::read(&path).unwrap();
     drop(port);
     let mut process = Process(
-        background_command(env!("CARGO_BIN_EXE_trustd-user"))
+        background_command(env!("CARGO_BIN_EXE_trustd-user-headless"))
             .arg("--config")
             .arg(&path)
-            .arg("--headless")
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()

@@ -1,12 +1,17 @@
 //! Platform presentation adapters. Authorization, deadlines and remembered
 //! choices stay in `consent` / `server`, independently of the window toolkit.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(all(feature = "desktop", any(windows, target_os = "macos")))]
 #[path = "desktop/native.rs"]
 mod native;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 mod webview;
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(all(feature = "desktop", any(windows, target_os = "macos")))]
 pub use native::{Desktop, available};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop"))]
 pub use webview::{Desktop, available};
+
+#[cfg(not(feature = "desktop"))]
+pub fn available() -> bool {
+    false
+}

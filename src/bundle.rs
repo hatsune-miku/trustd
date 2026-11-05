@@ -14,6 +14,7 @@ const MAX_PROGRAM: u64 = 128 * 1024 * 1024;
 
 pub const MAINTENANCE: &str = "trustd";
 pub const USER: &str = "trustd-user";
+pub const USER_HEADLESS: &str = "trustd-user-headless";
 #[cfg(windows)]
 pub const PRIVILEGED: &str = "trustd-system";
 #[cfg(not(windows))]
@@ -23,6 +24,7 @@ pub fn names(windows: bool) -> Vec<String> {
     [
         MAINTENANCE,
         USER,
+        USER_HEADLESS,
         if windows {
             "trustd-system"
         } else {

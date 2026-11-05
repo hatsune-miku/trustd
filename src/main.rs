@@ -44,6 +44,12 @@ enum CommandKind {
         /// Print the local wizard URL without opening the browser.
         #[arg(long)]
         no_open: bool,
+        /// Install the user daemon without desktop dependencies or prompts.
+        #[arg(long, conflicts_with = "desktop")]
+        headless: bool,
+        /// Install the desktop user daemon instead of auto-detecting the session.
+        #[arg(long)]
+        desktop: bool,
         /// Use the terminal installation wizard without a browser (Linux only).
         #[cfg(target_os = "linux")]
         #[arg(long, conflicts_with = "no_open")]
@@ -118,6 +124,8 @@ fn main() -> Result<()> {
     let command = if std::env::args_os().len() == 1 {
         CommandKind::Maintenance {
             no_open: false,
+            headless: false,
+            desktop: false,
             #[cfg(target_os = "linux")]
             cli: false,
         }
@@ -125,8 +133,8 @@ fn main() -> Result<()> {
         Cli::parse().command
     };
     #[cfg(windows)]
-    if matches!(&command, CommandKind::Maintenance { no_open: false }) {
-        localshelld_native_dialog::detach_owned_console()
+    if matches!(&command, CommandKind::Maintenance { no_open: false, .. }) {
+        localshelld_native_process::detach_owned_console()
             .context("failed to detach the user daemon's standalone console")?;
     }
     tracing_subscriber::fmt()
@@ -211,14 +219,24 @@ async fn run_command(command: CommandKind) -> Result<()> {
         }
         CommandKind::Maintenance {
             no_open,
+            headless,
+            desktop,
             #[cfg(target_os = "linux")]
             cli,
         } => {
+            let mode = if headless {
+                Some(true)
+            } else if desktop {
+                Some(false)
+            } else {
+                None
+            };
             #[cfg(target_os = "linux")]
-            if maintenance::terminal::requested(cli, no_open) {
-                return tokio::task::spawn_blocking(maintenance::terminal::run).await?;
+            if maintenance::terminal::requested(cli || headless, no_open) {
+                return tokio::task::spawn_blocking(move || maintenance::terminal::run(mode))
+                    .await?;
             }
-            maintenance::run(no_open).await
+            maintenance::run(no_open, mode).await
         }
         CommandKind::MaintenanceApply { plan, digest } => {
             tokio::task::spawn_blocking(move || maintenance::apply(&plan, &digest)).await?
@@ -622,6 +640,9 @@ mod tests {
         assert_eq!(result.is_ok(), cfg!(target_os = "linux"));
         assert!(Cli::try_parse_from(["trustd", "maintenance", "--cli", "--no-open"]).is_err());
         assert!(Cli::try_parse_from(["trustd", "maintenance", "--no-open"]).is_ok());
+        assert!(Cli::try_parse_from(["trustd", "maintenance", "--headless", "--no-open"]).is_ok());
+        assert!(Cli::try_parse_from(["trustd", "maintenance", "--desktop"]).is_ok());
+        assert!(Cli::try_parse_from(["trustd", "maintenance", "--headless", "--desktop"]).is_err());
     }
 
     #[test]

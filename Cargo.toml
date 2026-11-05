@@ -18,6 +18,11 @@ path = "src/main.rs"
 [[bin]]
 name = "trustd-user"
 path = "src/bin/user.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "trustd-user-headless"
+path = "src/bin/user_headless.rs"
 
 [[bin]]
 name = "trustd-system"
@@ -31,8 +36,16 @@ path = "src/bin/root.rs"
 name = "trustd-stdio"
 path = "src/bin/stdio.rs"
 
+[[example]]
+name = "desktop_smoke"
+required-features = ["desktop"]
+
 [workspace]
 members = ["crates/native-dialog", "crates/native-process", "crates/sync-protocol", "crates/sync-server", "crates/telegram"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gtk", "dep:wry", "dep:tao", "dep:localshelld-native-dialog"]
 
 [dependencies]
 aes-gcm = "0.10"
@@ -80,19 +93,19 @@ netstat2 = "0.11"
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 rpassword = "7.5"
-gtk = "0.18"
-wry = "0.54"
-tao = "0.34"
+gtk = { version = "0.18", optional = true }
+wry = { version = "0.54", optional = true }
+tao = { version = "0.34", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
 openssl = { version = "0.10", features = ["vendored"] }
-localshelld-native-dialog = { path = "crates/native-dialog" }
+localshelld-native-dialog = { path = "crates/native-dialog", optional = true }
 localshelld-native-process = { path = "crates/native-process" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
-localshelld-native-dialog = { path = "crates/native-dialog" }
+localshelld-native-dialog = { path = "crates/native-dialog", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"

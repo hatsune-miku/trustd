@@ -191,9 +191,8 @@ def main():
                 ).replace('privileged_daemon = "127.0.0.1:32119"', f'privileged_daemon = "127.0.0.1:{root_port}"')
                 config.write_text(text)
                 prefix = [] if user else ["sudo", "-n", "--"]
-                daemon = binary.with_name("trustd-user" if user else "trustd-root")
-                flags = ["--headless"] if user else []
-                process = subprocess.Popen([*prefix, str(daemon), *flags, "--config", str(config)],
+                daemon = binary.with_name("trustd-user-headless" if user else "trustd-root")
+                process = subprocess.Popen([*prefix, str(daemon), "--config", str(config)],
                                            start_new_session=True, stdout=subprocess.DEVNULL)
                 processes.append((process, not user))
                 health = wait_ready(f"http://127.0.0.1:{listen}", process)
@@ -233,7 +232,7 @@ def main():
                 request(root_url, "/v1/admin/sessions/revoke", {"id": created[0]["id"]}, root_session)
                 rejected = client.run(False)
                 assert "error" in rejected or rejected.get("result", {}).get("isError"), rejected
-            rejected = subprocess.run(["sudo", "-n", "--", str(binary.with_name("trustd-user")), "--config", str(config)],
+            rejected = subprocess.run(["sudo", "-n", "--", str(binary.with_name("trustd-user-headless")), "--config", str(config)],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
             assert rejected.returncode != 0 and "non-elevated" in rejected.stderr
             print("Dual daemon identities verified: sudo=false is current user; sudo=true is root.")

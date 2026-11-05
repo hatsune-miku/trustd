@@ -10,7 +10,44 @@ use anyhow::{Context, Result, bail, ensure};
 mod windows_uninstall;
 
 pub fn install(config: &Path) -> Result<()> {
-    install_at(&super::bundle::sibling(super::bundle::USER)?, config)
+    let mut loaded = localshelld::config::Config::load(config)?;
+    loaded.user_headless = Some(resolve_headless(None, loaded.user_headless));
+    loaded.save(config)?;
+    install_at(&super::bundle::sibling(role(&loaded))?, config)
+}
+
+pub(crate) fn role(config: &localshelld::config::Config) -> &'static str {
+    if resolve_headless(None, config.user_headless) {
+        super::bundle::USER_HEADLESS
+    } else {
+        super::bundle::USER
+    }
+}
+
+pub(crate) fn resolve_headless(explicit: Option<bool>, saved: Option<bool>) -> bool {
+    select_headless(explicit, saved, || {
+        #[cfg(target_os = "linux")]
+        return !["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+        #[cfg(target_os = "macos")]
+        return domain(false).ok().is_none_or(|domain| {
+            !Command::new("/bin/launchctl")
+                .args(["print", &domain])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
+        #[cfg(windows)]
+        false
+    })
+}
+
+fn select_headless(
+    explicit: Option<bool>,
+    saved: Option<bool>,
+    detect: impl FnOnce() -> bool,
+) -> bool {
+    explicit.or(saved).unwrap_or_else(detect)
 }
 
 pub(crate) fn install_at(executable: &Path, config: &Path) -> Result<()> {
@@ -51,7 +88,8 @@ pub fn uninstall() -> Result<()> {
 /// A responding port alone is insufficient: a foreground process might already
 /// own it while the newly installed autostart daemon failed to start.
 pub fn verify_running(config: &Path) -> Result<()> {
-    verify_running_at(&super::bundle::sibling(super::bundle::USER)?, config)
+    let loaded = localshelld::config::Config::load(config)?;
+    verify_running_at(&super::bundle::sibling(role(&loaded))?, config)
 }
 
 pub(crate) fn verify_running_at(executable: &Path, config: &Path) -> Result<()> {
@@ -71,9 +109,14 @@ pub(crate) fn verify_running_at(executable: &Path, config: &Path) -> Result<()> 
     };
     #[cfg(target_os = "macos")]
     let running = {
-        let _ = (config, executable);
+        let _ = executable;
+        let headless =
+            role(&localshelld::config::Config::load(config)?) == super::bundle::USER_HEADLESS;
         let output = Command::new("/bin/launchctl")
-            .args(["print", &format!("{}/dev.localshelld.user", domain()?)])
+            .args([
+                "print",
+                &format!("{}/dev.localshelld.user", domain(headless)?),
+            ])
             .output()?;
         output.status.success()
             && String::from_utf8_lossy(&output.stdout)
@@ -172,19 +215,20 @@ fn agent_path() -> Result<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn domain() -> Result<String> {
+fn domain(headless: bool) -> Result<String> {
     let result = Command::new("/usr/bin/id").arg("-u").output()?;
     let uid = String::from_utf8(result.stdout)?.trim().parse::<u32>()?;
-    Ok(format!("gui/{uid}"))
+    Ok(format!("{}/{uid}", if headless { "user" } else { "gui" }))
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn launch_agent(executable: &Path, config: &Path, directory: &Path) -> String {
+fn launch_agent(executable: &Path, config: &Path, directory: &Path, headless: bool) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>dev.localshelld.user</string>
+<key>LimitLoadToSessionType</key><string>{}</string>
 <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string></array>
 <key>WorkingDirectory</key><string>{}</string>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string></dict>
@@ -192,6 +236,7 @@ fn launch_agent(executable: &Path, config: &Path, directory: &Path) -> String {
 <key>ThrottleInterval</key><integer>3</integer>
 </dict></plist>
 "#,
+        if headless { "Background" } else { "Aqua" },
         xml(&executable.to_string_lossy()),
         xml(&config.to_string_lossy()),
         xml(&directory.to_string_lossy())
@@ -201,7 +246,9 @@ fn launch_agent(executable: &Path, config: &Path, directory: &Path) -> String {
 #[cfg(target_os = "macos")]
 fn install_native(executable: &Path, config: &Path) -> Result<()> {
     let path = agent_path()?;
-    let document = launch_agent(executable, config, &home()?);
+    let headless =
+        role(&localshelld::config::Config::load(config)?) == super::bundle::USER_HEADLESS;
+    let document = launch_agent(executable, config, &home()?, headless);
     if path.exists() {
         ensure!(
             fs::read_to_string(&path)? == document,
@@ -210,7 +257,7 @@ fn install_native(executable: &Path, config: &Path) -> Result<()> {
     } else {
         write_new_registration(&path, document.as_bytes())?;
     }
-    let domain = domain()?;
+    let domain = domain(headless)?;
     let label = format!("{domain}/dev.localshelld.user");
     let existing = Command::new("/bin/launchctl")
         .args(["print", &label])
@@ -247,11 +294,24 @@ fn write_new_registration(path: &Path, bytes: &[u8]) -> Result<()> {
 fn uninstall_native() -> Result<()> {
     let path = agent_path()?;
     if path.exists() {
-        let output = Command::new("/bin/launchctl")
-            .args(["bootout", &format!("{}/dev.localshelld.user", domain()?)])
-            .output()?;
-        if !output.status.success() && output.status.code() != Some(3) {
-            bail!("could not unload user LaunchAgent; plist preserved");
+        for headless in [false, true] {
+            let label = format!("{}/dev.localshelld.user", domain(headless)?);
+            if !Command::new("/bin/launchctl")
+                .args(["print", &label])
+                .output()?
+                .status
+                .success()
+            {
+                continue;
+            }
+            if !Command::new("/bin/launchctl")
+                .args(["bootout", &label])
+                .output()?
+                .status
+                .success()
+            {
+                bail!("could not unload user LaunchAgent; plist preserved");
+            }
         }
         fs::remove_file(path)?;
     }
@@ -395,6 +455,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_mode_overrides_saved_mode_which_overrides_environment() {
+        for detected in [false, true] {
+            assert_eq!(select_headless(None, None, || detected), detected);
+            for saved in [false, true] {
+                assert_eq!(select_headless(None, Some(saved), || detected), saved);
+                for explicit in [false, true] {
+                    assert_eq!(
+                        select_headless(Some(explicit), Some(saved), || detected),
+                        explicit
+                    );
+                }
+                let config = localshelld::config::Config {
+                    user_headless: Some(saved),
+                    ..Default::default()
+                };
+                let roundtrip: localshelld::config::Config =
+                    toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+                assert_eq!(roundtrip.user_headless, Some(saved));
+                assert_eq!(
+                    role(&roundtrip),
+                    if saved {
+                        super::super::bundle::USER_HEADLESS
+                    } else {
+                        super::super::bundle::USER
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn autostart_uses_user_identity_and_escaped_paths() {
         let exe = Path::new("/home/A & B/localshelld");
         let config = Path::new("/home/A & B/config.toml");
@@ -403,7 +494,16 @@ mod tests {
         assert!(task.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(task.contains("A &amp; B"));
         assert!(task.contains("--config"));
-        let agent = launch_agent(exe, config, Path::new("/home/A & B"));
+        let agent = launch_agent(exe, config, Path::new("/home/A & B"), false);
+        assert!(agent.contains("<key>LimitLoadToSessionType</key><string>Aqua</string>"));
+        let headless = launch_agent(
+            Path::new("/bundle/trustd-user-headless"),
+            config,
+            Path::new("/home/A & B"),
+            true,
+        );
+        assert!(headless.contains("<key>LimitLoadToSessionType</key><string>Background</string>"));
+        assert!(headless.contains("<string>/bundle/trustd-user-headless</string>"));
         assert!(!agent.contains("<key>UserName</key>"));
         assert!(!agent.contains("<string>--user</string>"));
         assert!(agent.contains("<string>--config</string>"));
@@ -436,6 +536,67 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_agent_bootstraps_in_the_user_domain() {
+        // Exercise launchd using a unique, disposable label, never the installed service.
+        let directory = tempfile::tempdir().unwrap();
+        let name = format!("dev.trustd.test.{}", uuid::Uuid::new_v4());
+        let user_domain = domain(true).unwrap();
+        let label = format!("{user_domain}/{name}");
+        struct Registration(String);
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                let _ = Command::new("/bin/launchctl")
+                    .args(["bootout", &self.0])
+                    .output();
+            }
+        }
+        let document = launch_agent(
+            Path::new("/bin/sleep"),
+            Path::new("fixture"),
+            directory.path(),
+            true,
+        )
+        .replace("dev.localshelld.user", &name)
+        .replace(
+            "<string>--config</string><string>fixture</string>",
+            "<string>60</string>",
+        );
+        let path = directory.path().join("agent.plist");
+        fs::write(&path, document).unwrap();
+        let _cleanup = Registration(label.clone());
+        let output = Command::new("/bin/launchctl")
+            .args(["bootstrap", &user_domain])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let output = Command::new("/bin/launchctl")
+                .args(["print", &label])
+                .output()
+                .unwrap();
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.trim() == "state = running")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background agent never started: {output:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[cfg(windows)]

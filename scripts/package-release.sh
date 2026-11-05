@@ -12,7 +12,7 @@ for platform in windows-x86_64 linux-x86_64 macos-aarch64; do
   package="trustd-$platform"
   mkdir -p "packages/$package"
   suffix=''
-  roles=(trustd trustd-user trustd-stdio)
+  roles=(trustd trustd-user trustd-user-headless trustd-stdio)
   if [[ "$platform" == windows-* ]]; then
     suffix=.exe
     roles+=(trustd-system)
