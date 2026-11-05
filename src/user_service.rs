@@ -663,6 +663,7 @@ foreach ($mutation in @({{$actual.Principal.RunLevel=1}}, {{$actual.Actions.Item
             Path::new("/Applications/A & B/localshelld"),
             Path::new("/Users/test/config.toml"),
             Path::new("/Users/test"),
+            false,
         );
         let parsed = plist::Value::from_reader(std::io::Cursor::new(document.as_bytes())).unwrap();
         let dictionary = parsed.as_dictionary().unwrap();
