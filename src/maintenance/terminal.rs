@@ -1,5 +1,7 @@
 //! Linux's interactive frontend shares the same digest-bound installer as the
 //! browser. Prompts use the controlling TTY, including when bootstrap is piped.
+mod ssh;
+
 use super::agents;
 use anyhow::Result;
 use zeroize::Zeroizing;
@@ -163,7 +165,7 @@ impl Prompts for Terminal {
         use std::io::Write;
         write!(self.output, "{prompt}")?;
         self.output.flush()?;
-        super::super::read_input_line(&mut self.input).context("输入已结束，安装已取消。")
+        super::super::read_input_line(&mut self.input).context("终端输入已结束。")
     }
 
     fn password(&mut self, prompt: &str) -> Result<Zeroizing<String>> {
@@ -256,7 +258,18 @@ pub(crate) fn run() -> Result<()> {
         user.bind.port(),
         user.privileged_daemon.port()
     ))?;
-    terminal.say("已有配对保持不变。首次使用仍需在管理页完成配对；远程主机可通过 SSH 转发这两个本机端口访问。")?;
+    terminal.say("已有配对保持不变，首次使用需在管理页完成配对。")?;
+    // This optional, read-only step runs after successful service installation.
+    // EOF here must not report that the already completed installation failed.
+    if let Err(error) = ssh::guide(
+        &mut terminal,
+        user.bind,
+        user.privileged_daemon,
+        std::env::var("SSH_CONNECTION").ok().as_deref(),
+        std::env::var("USER").ok().as_deref(),
+    ) {
+        terminal.say(&format!("服务已安装，SSH 转发指引未完成：{error}"))?;
+    }
     if failed {
         bail!("服务安装成功，但部分客户端配置失败；修复后可重新运行向导。");
     }
@@ -268,10 +281,10 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    struct Scripted {
-        lines: VecDeque<&'static str>,
-        passwords: VecDeque<&'static str>,
-        output: String,
+    pub(super) struct Scripted {
+        pub(super) lines: VecDeque<&'static str>,
+        pub(super) passwords: VecDeque<&'static str>,
+        pub(super) output: String,
     }
 
     impl Prompts for Scripted {
@@ -320,6 +333,20 @@ mod tests {
         } else {
             terminal.say("TTY_FIXTURE_CANCELLED").unwrap();
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "driven through a pseudo-terminal by scripts/test_terminal.py"]
+    fn native_ssh_guide_fixture() {
+        ssh::guide(
+            &mut Terminal::open().unwrap(),
+            "127.0.0.1:32120".parse().unwrap(),
+            "127.0.0.1:32119".parse().unwrap(),
+            Some("192.0.2.10 54321 192.0.2.20 2222"),
+            Some("miku"),
+        )
+        .unwrap();
     }
 
     #[test]
