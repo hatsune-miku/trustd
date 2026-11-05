@@ -32,7 +32,7 @@ Linux / macOS：
 curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/install.sh | sh
 ```
 
-首次安装和更新使用同一条命令。脚本下载最新发布的完整平台套件，校验 SHA-256 后直接打开网页维护向导；在向导内选择“完成”后清理临时下载和解压目录，失败时也会清理。仅关闭浏览器标签页不会立即退出向导，监听最多保留 30 分钟。安装产生的正式程序、数据和备份不在清理范围内。Linux / macOS 请从普通登录用户终端运行，不要在命令前加 sudo。
+首次安装和更新使用同一条命令。脚本下载最新发布的完整平台套件，校验 SHA-256 后启动维护向导；Linux 无图形会话时使用终端，其余情况使用网页。向导退出后清理临时下载和解压目录，失败时也会清理。网页向导通过“完成”退出，仅关闭浏览器标签页不会立即退出，监听最多保留 30 分钟。安装产生的正式程序、数据和备份不在清理范围内。Linux / macOS 请从普通登录用户终端运行，不要在命令前加 sudo。
 
 ### 手动安装与平台依赖
 
@@ -44,7 +44,7 @@ curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/insta
 | macOS   | 双击 `INSTALL.command`        |
 | Linux   | 在解压目录运行 `./INSTALL.sh` |
 
-包内 `START-HERE.txt` 提供简短说明。四个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit 授权。Windows 也支持登录 Administrator 后直接运行，或使用同一账号“以管理员身份运行”；已经提权时不再重复请求 UAC。macOS 和 Linux 仍应从普通登录用户启动。
+包内 `START-HERE.txt` 提供简短说明。四个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit / sudo 授权。Windows 也支持登录 Administrator 后直接运行，或使用同一账号“以管理员身份运行”；已经提权时不再重复请求 UAC。macOS 和 Linux 仍应从普通登录用户启动。
 
 Windows 用户服务始终以同一账号的普通权限运行。内置 Administrator 或关闭 UAC 的系统可能忽略计划任务的最低权限设置，此时 `trustd-user` 会先移除管理员权限、降至 Medium 完整性级别，再启动实际服务；高权限父进程只负责生命周期管理，不提供执行接口。显式 `as-administrator` 请求仍须经配对授权，并校验账号、会话和登录身份。
 
@@ -53,7 +53,7 @@ Windows 用户服务始终以同一账号的普通权限运行。内置 Administ
 前置条件：
 
 - Windows 10/11：系统级 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，即 Program Files 下的 `PowerShell/7/pwsh.exe`。桌面授权使用原生 Win32 控件，不依赖 WebView2。
-- Linux：`/bin/bash`、systemd；图形授权使用 GTK 3 / WebKitGTK 4.1，向导提权需要 `pkexec`。
+- Linux：`/bin/bash`、systemd 及当前用户的 systemd 服务管理器；网页向导提权使用 `pkexec`，终端向导使用 `/usr/bin/sudo`。预编译包仍需 GTK 3 / WebKitGTK 4.1 运行库，但终端安装不需要桌面会话或浏览器。
 - macOS：系统 `/bin/bash` 与 launchd，兼容 Bash 3.2；预编译包提供 Apple Silicon。桌面授权使用原生 AppKit 控件，不依赖 WebView / WebKit，也不常驻 Dock。
 
 Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页仍使用浏览器，构建时仍需要 Web 资源。Linux 授权弹窗继续使用 WebKitGTK。
@@ -80,6 +80,22 @@ macOS 的完整程序路径是 `/Library/trustd/versions/<整套摘要>/`，用�
 
 `trustd maintenance --no-open` 只打印向导地址。向导链接是临时管理凭据，不应分享；退出向导或 30 分钟后结束监听。
 
+### Linux 终端安装
+
+```sh
+./INSTALL.sh --cli
+# 或直接运行套件内的安装入口
+./trustd maintenance --cli
+```
+
+仅 Linux 提供 `--cli`；没有 `DISPLAY` 和 `WAYLAND_DISPLAY` 时默认进入终端向导。`--no-open` 仍使用网页向导，不与 `--cli` 混用。macOS 和 Windows 的入口不变。
+
+终端向导设置初始主密码、选择 AI 客户端，并在确认后安装或修复两个服务；主密码输入不回显，提权密码由 sudo 自行读取。提示从 `/dev/tty` 读取，因此支持 `curl … | sh -s -- --cli`；通过 SSH 使用时需分配终端，例如 `ssh -t user@host`。没有交互终端时直接报错，不读取管道内容作为确认或密码。
+
+以目标普通用户登录后运行，不要预先加 sudo。向导在修改配置和服务前检查 systemd 用户服务是否可用；不自动启用 linger，也不修改 SSH/PAM 设置。配置备份、迁移、服务健康检查与网页向导共用，已有密码、凭据和配对不会重置。部分客户端配置失败会逐项报告并返回失败状态，不冒充全部成功。
+
+安装完成后两个 daemon 仍只监听本机。远程主机的首次配对可通过 `ssh -L 32120:127.0.0.1:32120 -L 32119:127.0.0.1:32119 user@host` 转发后访问管理页；终端安装不会自动建立信任，也不会放开监听地址。无桌面时不提供桌面授权弹窗，可使用网页或已配置的 Telegram 授权。
+
 ### 更新与兼容
 
 ```text
@@ -90,6 +106,8 @@ trustd update --download-only
 ```
 
 `--check` 只查询，不下载或停服。正常更新从普通用户终端发起：下载完整套件，验证 SHA-256、平台与每个程序的版本，然后启动新版本维护向导。**向导完成才算更新成功**，启动向导不代表服务已经切换。`--download-only` 只准备已校验套件，适合无图形环境；命令会输出其目录。实际更新应在独立终端运行，不在 daemon 创建的执行会话内执行。
+
+Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 CLI 向导，并等待其退出。
 
 稳定通道排除所有 RC；要包含 RC 使用 `--prerelease`。降级必须显式指定 `--tag` 与 `--allow-downgrade`。发布源为 `hatsune-miku/trustd` GitHub Releases；下载使用系统/环境 HTTP 代理、HTTPS 和发布包校验值，尚无独立发布签名。
 
@@ -264,5 +282,7 @@ pnpm --dir web test:e2e
 测试覆盖 HTTP/MCP 授权、原生 shell、凭据快照、双 daemon 生命周期、stdio 会话隔离/取消/EOF 清理，以及整套程序校验。CI 在 Windows x86_64、Linux x86_64、macOS Apple Silicon 构建并检查平台所需的全部程序；只有各平台成功后才发布完整 RC 套件与 SHA256SUMS。
 
 macOS 原生弹窗的主线程交互测试可单独运行：`cargo test -p localshelld-native-dialog --test macos_native`，包含编辑快捷键、只读字段和授权按钮防误触检查。
+
+Linux 终端向导测试：`python3 -m unittest discover -s scripts -p 'test_terminal.py' -v`。使用伪终端验证密码不回显、管道安装输入、取消、EOF 和中断后的终端恢复，不提权或安装真实服务。
 
 设计取舍见 [架构文档](ARCHITECTURE.md)。

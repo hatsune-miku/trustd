@@ -26,6 +26,12 @@ curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/insta
 
 首次安装和更新使用同一条命令。脚本下载并校验完整套件，然后打开维护向导；在向导中完成安装。macOS / Linux 请从普通登录用户终端执行，不要加 `sudo`。
 
+Linux 无图形会话时自动使用终端向导，也可显式指定：
+
+```sh
+curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/install.sh | sh -s -- --cli
+```
+
 也可从 [Releases](https://github.com/hatsune-miku/trustd/releases) 下载完整平台包，运行其中的 `INSTALL.cmd`、`INSTALL.command` 或 `INSTALL.sh`。平台依赖、手动配置和更新选项见 [技术细节](docs/TECHNICAL.md#安装与维护)。
 
 ## 开始使用

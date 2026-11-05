@@ -38,12 +38,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CommandKind {
-    /// Open the graphical installation and maintenance wizard in a local browser.
+    /// Start installation and maintenance (terminal wizard on headless Linux).
     #[command(alias = "setup")]
     Maintenance {
         /// Print the local wizard URL without opening the browser.
         #[arg(long)]
         no_open: bool,
+        /// Use the terminal installation wizard without a browser (Linux only).
+        #[cfg(target_os = "linux")]
+        #[arg(long, conflicts_with = "no_open")]
+        cli: bool,
     },
     /// Internal, one-shot installer. Never exposed by either daemon.
     #[command(hide = true)]
@@ -112,7 +116,11 @@ enum CommandKind {
 
 fn main() -> Result<()> {
     let command = if std::env::args_os().len() == 1 {
-        CommandKind::Maintenance { no_open: false }
+        CommandKind::Maintenance {
+            no_open: false,
+            #[cfg(target_os = "linux")]
+            cli: false,
+        }
     } else {
         Cli::parse().command
     };
@@ -201,7 +209,17 @@ async fn run_command(command: CommandKind) -> Result<()> {
             state.shutdown().await;
             Ok(())
         }
-        CommandKind::Maintenance { no_open } => maintenance::run(no_open).await,
+        CommandKind::Maintenance {
+            no_open,
+            #[cfg(target_os = "linux")]
+            cli,
+        } => {
+            #[cfg(target_os = "linux")]
+            if maintenance::terminal::requested(cli, no_open) {
+                return tokio::task::spawn_blocking(maintenance::terminal::run).await?;
+            }
+            maintenance::run(no_open).await
+        }
         CommandKind::MaintenanceApply { plan, digest } => {
             tokio::task::spawn_blocking(move || maintenance::apply(&plan, &digest)).await?
         }
@@ -597,6 +615,14 @@ fn checked(command: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_maintenance_is_linux_only_and_conflicts_with_no_open() {
+        let result = Cli::try_parse_from(["trustd", "maintenance", "--cli"]);
+        assert_eq!(result.is_ok(), cfg!(target_os = "linux"));
+        assert!(Cli::try_parse_from(["trustd", "maintenance", "--cli", "--no-open"]).is_err());
+        assert!(Cli::try_parse_from(["trustd", "maintenance", "--no-open"]).is_ok());
+    }
 
     #[test]
     fn line_input_accepts_empty_and_preserves_whitespace() {
