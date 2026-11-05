@@ -3,6 +3,8 @@
 mod agents;
 mod apply;
 mod platform;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod terminal;
 
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -97,31 +99,8 @@ pub async fn run(no_open: bool) -> Result<()> {
         "start maintenance as the logged-in user; the wizard requests elevation when needed",
     )?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let executable = std::env::current_exe()?.canonicalize()?;
-    let hash_path = executable.clone();
-    let binaries = tokio::task::spawn_blocking(move || {
-        super::bundle::Manifest::read(hash_path.parent().context("missing bundle directory")?)
-    })
-    .await??;
-    let binary_hash = binaries.digest()?;
-    let state = Arc::new(Inner {
-        token: format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        ),
-        authority: listener.local_addr()?.to_string(),
-        paths: MachinePaths::resolve()?,
-        executable,
-        binary_hash,
-        binaries,
-        user_config: user_config_path()?,
-        owner: platform::owner()?,
-        agents: agents::catalog()?,
-        busy: AtomicBool::new(false),
-        job: Mutex::new(Job::default()),
-        shutdown: tokio::sync::Notify::new(),
-    });
+    let authority = listener.local_addr()?.to_string();
+    let state = tokio::task::spawn_blocking(move || prepare(authority)).await??;
     let url = format!(
         "http://{}/maintenance.html#{}",
         state.authority, state.token
@@ -143,6 +122,31 @@ pub async fn run(no_open: bool) -> Result<()> {
             tokio::select! { _ = super::shutdown_signal() => {}, _ = stop.shutdown.notified() => {}, _ = tokio::time::sleep(Duration::from_secs(30 * 60)) => {} }
         }).await?;
     Ok(())
+}
+
+fn prepare(authority: String) -> Result<App> {
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let binaries =
+        super::bundle::Manifest::read(executable.parent().context("missing bundle directory")?)?;
+    let binary_hash = binaries.digest()?;
+    Ok(Arc::new(Inner {
+        token: format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ),
+        authority,
+        paths: MachinePaths::resolve()?,
+        executable,
+        binary_hash,
+        binaries,
+        user_config: user_config_path()?,
+        owner: platform::owner()?,
+        agents: agents::catalog()?,
+        busy: AtomicBool::new(false),
+        job: Mutex::new(Job::default()),
+        shutdown: tokio::sync::Notify::new(),
+    }))
 }
 
 fn router(state: App) -> Router {
@@ -257,7 +261,14 @@ fn start_job(
         ..Job::default()
     };
     tokio::task::spawn_blocking(move || {
-        let result = execute(&state, operation, password, &selected, replace_agents);
+        let result = execute(
+            &state,
+            operation,
+            password,
+            &selected,
+            replace_agents,
+            platform::Elevation::Graphical,
+        );
         *state.job.lock().unwrap() = Job {
             running: false,
             stage: if result.is_ok() { "done" } else { "failed" }.into(),
@@ -327,11 +338,9 @@ fn execute(
     mut password: Zeroizing<Option<String>>,
     selected: &[String],
     replace_agents: bool,
+    elevation: platform::Elevation,
 ) -> Result<Vec<agents::Outcome>> {
-    ensure!(
-        platform::elevation_available(),
-        "系统提权工具不可用；Linux 需要安装 polkit/pkexec。"
-    );
+    elevation.check()?;
     let shell = platform::shell()?;
     ensure!(
         operation == Operation::Uninstall || shell.is_file(),
@@ -394,7 +403,7 @@ fn execute(
     platform::private(&path, false)?;
     let digest = format!("{:x}", Sha256::digest(&*bytes));
     set_stage(state, "elevation");
-    platform::elevate(&helper, &path, &digest).with_context(|| {
+    elevation.apply(&helper, &path, &digest).with_context(|| {
         format!(
             "安装未完成或系统授权已取消。已创建的配置会保留；诊断文件：{}",
             state.paths.data.join("maintenance-error.txt").display()
@@ -427,7 +436,9 @@ fn execute(
             Duration::from_secs(30),
         )?;
         super::user_service::verify_running_at(&user_executable, &state.user_config)?;
-        platform::shortcut(&executable)?;
+        if matches!(elevation, platform::Elevation::Graphical) {
+            platform::shortcut(&executable)?;
+        }
         set_stage(state, "agents");
         let stdio = super::bundle::beside(&executable, "trustd-stdio")?;
         return Ok(agents::configure(

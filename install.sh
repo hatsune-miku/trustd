@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install or update through the local browser maintenance wizard.
+# Install or update through the local maintenance wizard.
 set -eu
 
 case "$(uname -s)/$(uname -m)" in
@@ -8,7 +8,7 @@ case "$(uname -s)/$(uname -m)" in
   *) printf '%s\n' 'No trustd release package is available for this operating system / architecture.' >&2; exit 1 ;;
 esac
 if [ "$(id -u)" = 0 ]; then
-  printf '%s\n' 'Run this command as the desktop login user. The wizard requests administrator access when needed.' >&2
+  printf '%s\n' 'Run this command as the intended login user. The wizard requests administrator access when needed.' >&2
   exit 1
 fi
 command -v curl >/dev/null 2>&1 || { printf '%s\n' 'curl is required.' >&2; exit 1; }
@@ -48,5 +48,5 @@ for trustd_role in trustd trustd-root trustd-user trustd-stdio; do
   [ -f "$trustd_bundle/$trustd_role" ] || { printf '%s\n' 'The release package is incomplete.' >&2; exit 1; }
   chmod +x "$trustd_bundle/$trustd_role"
 done
-printf '%s\n' 'Opening the maintenance wizard. Select Finish in the wizard to remove the temporary download.'
-"$trustd_bundle/trustd" maintenance
+printf '%s\n' 'Starting the maintenance wizard. Temporary downloads are removed when it exits.'
+"$trustd_bundle/trustd" maintenance "$@"

@@ -58,13 +58,14 @@ cp "$TRUSTD_FIXTURE/$file" "$output"
                         path = mock / name
                         path.write_text(content, encoding="utf-8")
                         path.chmod(0o755)
-                    result = subprocess.run(["sh", str(ROOT / "install.sh")], capture_output=True, text=True, timeout=20,
+                    arguments = ["--cli"] if platform.startswith("linux") and mode == "success" else []
+                    result = subprocess.run(["sh", str(ROOT / "install.sh"), *arguments], capture_output=True, text=True, timeout=20,
                                             env={**os.environ, "PATH": str(mock) + os.pathsep + os.environ["PATH"],
                                                  "TMPDIR": str(tmp), "TRUSTD_FIXTURE": str(base), "TRUSTD_FIXTURE_MODE": mode})
                     self.assertEqual(result.returncode == 0, mode == "success", result.stderr)
                     self.assertEqual((base / "launched").exists(), mode in ("success", "wizard"))
                     if (base / "launched").exists():
-                        self.assertEqual((base / "launched").read_text(), "maintenance\n")
+                        self.assertEqual((base / "launched").read_text(), "maintenance\n" + "".join(arg + "\n" for arg in arguments))
                     self.assertEqual(list(tmp.iterdir()), [sentinel])
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell fixture")

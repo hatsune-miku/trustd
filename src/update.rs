@@ -488,6 +488,20 @@ pub fn run(options: Options) -> Result<()> {
         println!("No services were changed. Run this bundle's trustd maintenance to apply it.");
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    if super::maintenance::terminal::requested(false, false) {
+        // Keep the terminal and wait for the headless wizard, including sudo.
+        // A detached child would compete with the shell for /dev/tty input.
+        let status = std::process::Command::new(&executable)
+            .args(["maintenance", "--cli"])
+            .status()
+            .context("verified bundle is ready, but the terminal wizard could not start")?;
+        ensure!(
+            status.success(),
+            "terminal maintenance did not complete ({status})"
+        );
+        return Ok(());
+    }
     let log = OpenOptions::new()
         .write(true)
         .create_new(true)
