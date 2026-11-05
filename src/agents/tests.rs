@@ -457,7 +457,22 @@ async fn verify_real_process(executable_name: &str) {
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let mut child = command.spawn().unwrap();
+    // Concurrent fork/exec fixtures can briefly retain a writable descriptor
+    // to the freshly copied program. Retry only ETXTBSY; never hide a different
+    // launch error or relax the process identity assertions below.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("could not launch process fixture: {error}"),
+        }
+    };
     let pid = child.id().unwrap();
     let agent = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
