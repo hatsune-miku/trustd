@@ -35,7 +35,7 @@ class TerminalTests(unittest.TestCase):
                           if item.get("reason") == "compiler-artifact" and item.get("executable")
                           and item["target"]["name"] == "trustd" and item["profile"]["test"])
 
-    def interact(self, answers, piped_stdin=False):
+    def interact(self, answers, piped_stdin=False, fixture=FIXTURE):
         pid, master = pty.fork()
         if pid == 0:
             os.chdir(ROOT)
@@ -45,7 +45,7 @@ class TerminalTests(unittest.TestCase):
                 os.close(write_fd)
                 os.dup2(read_fd, 0)
                 os.close(read_fd)
-            os.execv(self.binary, [self.binary, "--exact", FIXTURE, "--ignored", "--nocapture"])
+            os.execv(self.binary, [self.binary, "--exact", fixture, "--ignored", "--nocapture"])
         transcript = bytearray()
         pending = list(answers)
         deadline = time.monotonic() + 15
@@ -115,6 +115,19 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("TTY_FIXTURE_CANCELLED", output)
         self.assertNotIn("private", output)
+
+    def test_ssh_guide_prefills_session_and_prints_local_command(self):
+        code, output = self.interact([
+            ("另一台电脑打开管理页？ [Y/n]：", b"\n", False),
+            ("[miku@192.0.2.20]：", b"\n", False),
+            ("SSH 端口 [2222]：", b"\n", False),
+        ], piped_stdin=True, fixture="maintenance::terminal::tests::native_ssh_guide_fixture")
+        self.assertEqual(code, 0, output)
+        self.assertIn("ssh -N -o ExitOnForwardFailure=yes", output)
+        self.assertIn("-L '127.0.0.1:32120:127.0.0.1:32120' -p 2222 'miku@192.0.2.20'", output)
+        self.assertIn("http://localhost:32119/", output)
+        self.assertIn("系统管理页填写 127.0.0.1:32120", output)
+        self.assertNotIn("pipeline contents", output)
 
     def test_password_eof_restores_echo_without_confirming(self):
         code, output = self.interact([("主密码：", b"\x04", True)])
