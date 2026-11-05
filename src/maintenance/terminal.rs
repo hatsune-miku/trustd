@@ -189,7 +189,7 @@ impl Prompts for Terminal {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run() -> Result<()> {
+pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     use super::{Operation, execute, platform, prepare};
     super::super::require_user().context("请以普通登录用户运行向导，不要在命令前加 sudo。")?;
     let mut terminal = Terminal::open()?;
@@ -211,7 +211,12 @@ pub(crate) fn run() -> Result<()> {
         user_manager.success(),
         "当前用户的 systemd 服务管理器不可用。请通过该用户的正常登录或 SSH 会话运行，并检查 systemd 用户服务。"
     );
-    let state = prepare(String::new())?;
+    let state = prepare(String::new(), mode)?;
+    terminal.say(if state.user_headless {
+        "用户守护进程：无头模式"
+    } else {
+        "用户守护进程：桌面模式"
+    })?;
     let registered = super::super::update::service::registration()?.is_some();
     terminal.say(&format!(
         "程序目录：{}\n系统配置：{}\n用户配置：{}",

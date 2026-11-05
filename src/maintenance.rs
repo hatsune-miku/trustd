@@ -76,6 +76,7 @@ struct Job {
 }
 
 struct Inner {
+    user_headless: bool,
     token: String,
     authority: String,
     paths: MachinePaths,
@@ -91,7 +92,7 @@ struct Inner {
 }
 type App = Arc<Inner>;
 
-pub async fn run(no_open: bool) -> Result<()> {
+pub async fn run(no_open: bool, mode: Option<bool>) -> Result<()> {
     #[cfg(windows)]
     super::user_service::require_interactive_owner()?;
     #[cfg(not(windows))]
@@ -100,7 +101,7 @@ pub async fn run(no_open: bool) -> Result<()> {
     )?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let authority = listener.local_addr()?.to_string();
-    let state = tokio::task::spawn_blocking(move || prepare(authority)).await??;
+    let state = tokio::task::spawn_blocking(move || prepare(authority, mode)).await??;
     let url = format!(
         "http://{}/maintenance.html#{}",
         state.authority, state.token
@@ -124,12 +125,20 @@ pub async fn run(no_open: bool) -> Result<()> {
     Ok(())
 }
 
-fn prepare(authority: String) -> Result<App> {
+fn prepare(authority: String, mode: Option<bool>) -> Result<App> {
     let executable = std::env::current_exe()?.canonicalize()?;
     let binaries =
         super::bundle::Manifest::read(executable.parent().context("missing bundle directory")?)?;
+    let user_config = user_config_path()?;
+    let saved = if user_config.try_exists()? {
+        Config::load(&user_config)?.user_headless
+    } else {
+        None
+    };
+    let user_headless = super::user_service::resolve_headless(mode, saved);
     let binary_hash = binaries.digest()?;
     Ok(Arc::new(Inner {
+        user_headless,
         token: format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -140,7 +149,7 @@ fn prepare(authority: String) -> Result<App> {
         executable,
         binary_hash,
         binaries,
-        user_config: user_config_path()?,
+        user_config,
         owner: platform::owner()?,
         agents: agents::catalog()?,
         busy: AtomicBool::new(false),
@@ -221,6 +230,7 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "version": localshelld::VERSION, "platform": std::env::consts::OS,
         "program": state.paths.program, "system_config": state.paths.config,
         "user_config": state.user_config, "registered": registration.is_some(),
+        "user_headless": state.user_headless,
         "registered_executable": registration.as_ref().map(|value| &value.executable),
         "registered_config": registration.as_ref().map(|value| &value.config),
         "system_running": registration.as_ref().is_some_and(|value| value.was_running),
@@ -261,13 +271,20 @@ fn start_job(
         ..Job::default()
     };
     tokio::task::spawn_blocking(move || {
+        let elevation = platform::Elevation::Graphical;
+        #[cfg(target_os = "macos")]
+        let elevation = if state.user_headless {
+            platform::Elevation::Terminal
+        } else {
+            elevation
+        };
         let result = execute(
             &state,
             operation,
             password,
             &selected,
             replace_agents,
-            platform::Elevation::Graphical,
+            elevation,
         );
         *state.job.lock().unwrap() = Job {
             running: false,
@@ -341,6 +358,20 @@ fn execute(
     elevation: platform::Elevation,
 ) -> Result<Vec<agents::Outcome>> {
     elevation.check()?;
+    if operation == Operation::Install {
+        // Hash every role, but never load the desktop executable on a headless host.
+        for name in state.binaries.0.keys() {
+            if state.user_headless && *name == super::bundle::filename(super::bundle::USER) {
+                continue;
+            }
+            let program = state.executable.parent().unwrap().join(name);
+            let version = super::update::probe(&program, name.trim_end_matches(".exe"))
+                .with_context(|| {
+                    format!("{name} 无法启动，尚未修改配置或服务；无图形环境请使用 --headless。")
+                })?;
+            ensure!(version == localshelld::VERSION, "套件中的程序版本不一致。");
+        }
+    }
     let shell = platform::shell()?;
     ensure!(
         operation == Operation::Uninstall || shell.is_file(),
@@ -358,6 +389,7 @@ fn execute(
             password_hash: hash,
             bind: format!("127.0.0.1:{}", localshelld::config::USER_PORT).parse()?,
             shell: shell.to_string_lossy().into_owned(),
+            user_headless: Some(state.user_headless),
             ..Config::default()
         };
         config.save(&state.user_config)?;
@@ -366,7 +398,12 @@ fn execute(
         ))?;
     }
     let user = if state.user_config.try_exists()? {
-        Some(Config::load(&state.user_config)?)
+        let mut config = Config::load(&state.user_config)?;
+        if operation == Operation::Install {
+            config.user_headless = Some(state.user_headless);
+            config.save(&state.user_config)?;
+        }
+        Some(config)
     } else {
         None
     };
@@ -412,7 +449,8 @@ fn execute(
     if operation == Operation::Install {
         set_stage(state, "user_service");
         let executable = state.paths.executable(&state.binary_hash)?;
-        let user_executable = super::bundle::beside(&executable, super::bundle::USER)?;
+        let user = Config::load(&state.user_config)?;
+        let user_executable = super::bundle::beside(&executable, super::user_service::role(&user))?;
         #[cfg(not(windows))]
         {
             super::user_service::uninstall()?;

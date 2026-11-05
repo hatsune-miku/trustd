@@ -12,9 +12,10 @@
 | `trustd-system` | Windows 专用，使用真正的 LocalSystem 身份运行           |
 | `trustd-root`   | macOS / Linux 专用，使用 root 身份运行                  |
 | `trustd-user`   | 当前普通用户 daemon、桌面授权与用户凭据库               |
+| `trustd-user-headless` | 当前普通用户 daemon 与用户凭据库，不包含桌面授权依赖 |
 | `trustd-stdio`  | Agent 宿主启动的 MCP stdio 接入程序，内部保管 handle    |
 
-Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个平台的发布包共有四个程序。不要只复制其中一个。独立云同步后端为 `localshelld-sync-server`。
+Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个平台/架构只有一个发布包，包含五个程序。两个用户 daemon 共用配置和服务名，安装时只启动其中一个。不要只复制其中一个程序。独立云同步后端为 `localshelld-sync-server`。
 
 系统 daemon 默认监听 `127.0.0.1:32119`，用户 daemon 默认监听 `127.0.0.1:32120`。维护向导使用临时本机端口，stdio 不监听端口。安装、更新不通过 daemon 的 HTTP/MCP 执行接口提供。
 
@@ -44,7 +45,7 @@ curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/insta
 | macOS   | 双击 `INSTALL.command`        |
 | Linux   | 在解压目录运行 `./INSTALL.sh` |
 
-包内 `START-HERE.txt` 提供简短说明。四个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit / sudo 授权。Windows 也支持登录 Administrator 后直接运行，或使用同一账号“以管理员身份运行”；已经提权时不再重复请求 UAC。macOS 和 Linux 仍应从普通登录用户启动。
+包内 `START-HERE.txt` 提供简短说明。五个程序是配套组件，无需逐个运行，也不要单独拖出安装入口。仍可用 `trustd` 或 `trustd maintenance` 启动向导。向导会在需要时请求 UAC、macOS 管理员授权或 Linux polkit / sudo 授权。Windows 也支持登录 Administrator 后直接运行，或使用同一账号“以管理员身份运行”；已经提权时不再重复请求 UAC。macOS 和 Linux 仍应从普通登录用户启动。
 
 Windows 用户服务始终以同一账号的普通权限运行。内置 Administrator 或关闭 UAC 的系统可能忽略计划任务的最低权限设置，此时 `trustd-user` 会先移除管理员权限、降至 Medium 完整性级别，再启动实际服务；高权限父进程只负责生命周期管理，不提供执行接口。显式 `as-administrator` 请求仍须经配对授权，并校验账号、会话和登录身份。
 
@@ -53,7 +54,7 @@ Windows 用户服务始终以同一账号的普通权限运行。内置 Administ
 前置条件：
 
 - Windows 10/11：系统级 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，即 Program Files 下的 `PowerShell/7/pwsh.exe`。桌面授权使用原生 Win32 控件，不依赖 WebView2。
-- Linux：`/bin/bash`、systemd 及当前用户的 systemd 服务管理器；网页向导提权使用 `pkexec`，终端向导使用 `/usr/bin/sudo`。预编译包仍需 GTK 3 / WebKitGTK 4.1 运行库，但终端安装不需要桌面会话或浏览器。
+- Linux：`/bin/bash`、`procps`（`ps`，用于子进程清理）、systemd 及当前用户的 systemd 服务管理器；网页向导提权使用 `pkexec`，终端向导使用 `/usr/bin/sudo`。仅 `trustd-user` 需要 GTK 3 / WebKitGTK 4.1 运行库；其余四个程序不链接 GTK、WebKitGTK、Tao 或 Wry。无头模式仍使用系统 C / OpenSSL 等基础运行库，并非静态 musl 程序。
 - macOS：系统 `/bin/bash` 与 launchd，兼容 Bash 3.2；预编译包提供 Apple Silicon。桌面授权使用原生 AppKit 控件，不依赖 WebView / WebKit，也不常驻 Dock。
 
 Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页仍使用浏览器，构建时仍需要 Web 资源。Linux 授权弹窗继续使用 WebKitGTK。
@@ -72,7 +73,7 @@ Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页�
 | macOS   | `/Library/trustd`      | `/Library/Application Support/localshelld/system/config.toml` |
 | Linux   | `/opt/trustd`          | `/etc/localshelld/system/config.toml`                         |
 
-每套程序安装到 `versions/<整套摘要>/`。摘要覆盖四个程序的文件名与内容；提权前暂存、提权后安装均重新校验。程序目录可读、可执行，但普通用户不可写；系统配置和备份仅供系统管理员访问。用户数据位于 `localshelld-user` 平台目录，安装不修改 PATH。
+每套程序安装到 `versions/<整套摘要>/`。摘要覆盖五个程序的文件名与内容；提权前暂存、提权后安装均重新校验。程序目录可读、可执行，但普通用户不可写；系统配置和备份仅供系统管理员访问。用户数据位于 `localshelld-user` 平台目录，安装不修改 PATH。
 
 macOS 的完整程序路径是 `/Library/trustd/versions/<整套摘要>/`，用户配置位于 `~/Library/Application Support/dev.localshelld.localshelld-user/config.toml`，维护入口是 `~/Applications/trustd.app`。系统服务由 `/Library/LaunchDaemons/dev.localshelld.plist` 注册。数据目录使用 `localshelld` 命名，与已有安装兼容。
 
@@ -88,7 +89,13 @@ macOS 的完整程序路径是 `/Library/trustd/versions/<整套摘要>/`，用�
 ./trustd maintenance --cli
 ```
 
-仅 Linux 提供 `--cli`；没有 `DISPLAY` 和 `WAYLAND_DISPLAY` 时默认进入终端向导。`--no-open` 仍使用网页向导，不与 `--cli` 混用。macOS 和 Windows 的入口不变。
+仅 Linux 提供 `--cli`；没有 `DISPLAY` 和 `WAYLAND_DISPLAY`，或显式传入 `--headless` 时默认进入终端向导。`--no-open` 仍使用网页向导，不与 `--cli` 混用。`--cli` 选择交互方式，`--headless` / `--desktop` 选择要安装的用户 daemon。
+
+Linux 始终下载 `trustd-linux-x86_64.tar.gz`。向导首次安装时根据显示环境自动选择，已有配置优先保留 `user_headless`；所有平台都支持 `trustd maintenance --headless` / `--desktop` 显式覆盖。在线 POSIX 安装脚本原样传递这些参数。安装前探测所需程序能否启动；无头模式不执行桌面程序，即使它缺少图形运行库也能完成安装。
+
+无头模式保留管理网页、SSH 转发指引、配对、凭据、HTTP/MCP 和 Telegram，不提供桌面授权弹窗。两个用户程序使用相同配置和服务路径；切换时运行完整套件的安装向导，不单独替换程序。macOS 无可用 GUI 会话时自动选择无头模式，并注册到 launchd 的用户域；桌面模式使用 GUI 域。Windows 默认桌面模式，无头模式仍使用同一账号的登录计划任务，不提升为 SYSTEM，也不承诺注销后继续运行。macOS/Windows 维护仍为网页向导，可用 `--no-open` 输出地址后通过 SSH 转发访问。
+
+macOS 无头维护使用终端 sudo 提权；应在分配了 TTY 的登录会话中启动向导（SSH 使用 `ssh -t`），保留终端用于输入 sudo 密码。
 
 终端向导设置初始主密码、选择 AI 客户端，并在确认后安装或修复两个服务；主密码输入不回显，提权密码由 sudo 自行读取。提示从 `/dev/tty` 读取，因此支持 `curl … | sh -s -- --cli`；通过 SSH 使用时需分配终端，例如 `ssh -t user@host`。没有交互终端时直接报错，不读取管道内容作为确认或密码。
 
@@ -109,9 +116,13 @@ trustd update --tag v0.1.0-rc.8.1
 trustd update --download-only
 ```
 
-`--check` 只查询，不下载或停服。正常更新从普通用户终端发起：下载完整套件，验证 SHA-256、平台与每个程序的版本，然后启动新版本维护向导。**向导完成才算更新成功**，启动向导不代表服务已经切换。`--download-only` 只准备已校验套件，适合无图形环境；命令会输出其目录。实际更新应在独立终端运行，不在 daemon 创建的执行会话内执行。
+`--check` 只查询，不下载或停服。正常更新从普通用户终端发起：下载完整套件，验证 SHA-256、平台和非桌面程序的版本，然后启动新版本维护向导；选择桌面模式时再检查桌面程序。**向导完成才算更新成功**，启动向导不代表服务已经切换。`--download-only` 只准备已校验套件，适合无图形环境；命令会输出其目录。实际更新应在独立终端运行，不在 daemon 创建的执行会话内执行。
 
 Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 CLI 向导，并等待其退出。
+
+更新始终下载同一个平台套件，并保留用户配置中的模式选择。显式切换请用新套件运行 `trustd maintenance --headless` / `--desktop`；切换不重置已有密码、凭据或配对。
+
+从旧的四程序套件升级到五程序套件，请重新运行在线安装命令或下载完整发布包。旧更新器只解压它认识的四个程序，无法补齐新增的 `trustd-user-headless`。
 
 稳定通道排除所有 RC；要包含 RC 使用 `--prerelease`。降级必须显式指定 `--tag` 与 `--allow-downgrade`。发布源为 `hatsune-miku/trustd` GitHub Releases；下载使用系统/环境 HTTP 代理、HTTPS 和发布包校验值，尚无独立发布签名。
 
@@ -248,12 +259,12 @@ Agent 通过 `enter_interactive` 请求授权，接受或拒绝的结果不包�
 
 ## 开发与验证
 
-需要 Rust stable、Node.js 22、pnpm 10.14。Linux 构建依赖 `libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev pkg-config`；Windows 的 OpenSSL 构建需要 Perl/NASM。
+需要 Rust stable、Node.js 22、pnpm 10.14。先构建嵌入的管理网页，再执行 `bash scripts/build-bundle.sh`：先启用 `desktop` 构建 `trustd-user`，再以 `--no-default-features` 构建其余四个程序，避免 Cargo 特性合并带入图形依赖。Linux 完整套件构建依赖 `libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev pkg-config`；只构建无头程序时无需桌面开发库。Windows 的 OpenSSL 构建需要 Perl/NASM。
 
 ```powershell
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
-cargo build --release
+bash scripts/build-bundle.sh
 ./target/release/trustd maintenance
 ```
 
@@ -261,7 +272,7 @@ cargo build --release
 
 ```powershell
 ./target/release/trustd init --user --config ./user.local.toml
-./target/release/trustd-user --headless --config ./user.local.toml
+./target/release/trustd-user-headless --config ./user.local.toml
 ./target/release/trustd-stdio
 ```
 

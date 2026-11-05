@@ -4,6 +4,7 @@ use tower::ServiceExt;
 
 fn fixture() -> App {
     Arc::new(Inner {
+        user_headless: true,
         token: "fixture-token".into(),
         authority: "127.0.0.1:31991".into(),
         paths: MachinePaths {

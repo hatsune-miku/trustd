@@ -1,4 +1,4 @@
-//! Release a console created solely for an autostart daemon, not a shared shell.
+//! Release a console created solely for an autostart program, not a shared shell.
 use std::{fs::OpenOptions, io, os::windows::io::IntoRawHandle};
 
 use windows_sys::Win32::System::Console::{

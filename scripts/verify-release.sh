@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${LOCALSHELLD_RELEASE_TAG:?expected release tag is required}"
-roles=(trustd trustd-user trustd-stdio)
+roles=(trustd trustd-user trustd-user-headless trustd-stdio)
 suffix=''
 if [[ "$RUNNER_OS" == Windows ]]; then
   suffix=.exe

@@ -195,7 +195,9 @@ async fn eof_during_authorization_destroys_the_late_session_before_exit() {
 fn entry_points_do_not_mix_maintenance_and_daemon_roles() {
     for (binary, absent) in [
         (env!("CARGO_BIN_EXE_trustd"), "serve"),
+        #[cfg(feature = "desktop")]
         (env!("CARGO_BIN_EXE_trustd-user"), "install"),
+        (env!("CARGO_BIN_EXE_trustd-user-headless"), "install"),
         (env!("CARGO_BIN_EXE_trustd-stdio"), "install"),
     ] {
         let mut command = std::process::Command::new(binary);

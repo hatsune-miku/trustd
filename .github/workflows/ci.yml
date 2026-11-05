@@ -12,7 +12,7 @@ jobs:
         include:
           - os: windows-latest
             platform: windows-x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux-x86_64
           - os: macos-15
             platform: macos-aarch64
@@ -50,12 +50,18 @@ jobs:
         run: /bin/bash --version
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --all-targets --no-default-features
       - name: Bootstrap verification and temporary-file cleanup tests
         run: python -m unittest discover -s scripts -p 'test_bootstrap.py' -v
       - name: Validate MCP tool schemas with the official TypeScript SDK
         working-directory: web
         run: pnpm test:mcp
+      - name: Validate headless MCP tool schemas
+        run: |
+          cargo build --no-default-features --bin trustd-stdio
+          node --test web/tests/mcp/stdio.test.mjs
       - name: Browser and WebAuthn integration tests
         if: runner.os == 'Linux'
         run: |
@@ -67,9 +73,16 @@ jobs:
         with:
           name: browser-test-diagnostics
           path: web/test-results/
-      - run: cargo build --release
+      - name: Build the unified desktop and headless bundle
+        shell: bash
+        run: bash scripts/build-bundle.sh
+      - name: Verify headless bundle without desktop runtime libraries
+        if: runner.os == 'Linux'
+        run: bash scripts/test-headless-runtime.sh target/release
       - name: Verify real user and root daemon identities
         if: runner.os != 'Windows'
+        env:
+          TRUSTD_HEADLESS: '1'
         run: |
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 scripts/test-dual-daemon.py target/release/trustd
@@ -86,6 +99,8 @@ jobs:
             target/release/trustd.exe
             target/release/trustd-user
             target/release/trustd-user.exe
+            target/release/trustd-user-headless
+            target/release/trustd-user-headless.exe
             target/release/trustd-stdio
             target/release/trustd-stdio.exe
             target/release/trustd-system.exe
