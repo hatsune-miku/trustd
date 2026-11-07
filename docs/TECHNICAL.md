@@ -160,7 +160,7 @@ Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 
 
 macOS/Linux 将 `command` 改为 `trustd-stdio` 的绝对路径。默认 endpoint 就是 `127.0.0.1:32120`，可以省略参数。它只接受字面量 loopback 地址，不使用 HTTP 代理、不跟随重定向。
 
-默认工具是 `secrets_list`、`secrets_get`、`enter_interactive`、`run`、`destroy`。交互授权示例：
+默认工具是 `secrets_list`、`secrets_get`、`enter_interactive`、`run`、`destroy`。查找凭据名称时使用 `secrets_list({"query":"github"})`，只返回名称中包含该子串的匹配项，不区分大小写；空串和纯空白会被拒绝，不支持无参数列出全部。交互授权示例：
 
 ```json
 {
@@ -255,7 +255,7 @@ Agent 通过 `enter_interactive` 请求授权，接受或拒绝的结果不包�
 
 默认使用离线库，也可连接自托管同步后端。连接后以云端为准，版本冲突拒绝覆盖，断网不悄悄改用缓存完成凭据操作。同步不是端到端加密；协议、恢复和部署方式见 [同步文档](SYNC.md)。桌面与 Telegram 授权可并行使用，配置见 [Telegram 授权](telegram.md)。
 
-需要询问用户时，授权限时 60 秒；忽略或关闭窗口仍等待原截止时间。请求里的名称只是说明，不能覆盖 daemon 核验的程序路径。
+需要询问用户时，授权限时 600 秒；忽略或关闭窗口仍等待原截止时间。请求里的名称只是说明，不能覆盖 daemon 核验的程序路径。
 
 ## 开发与验证
 

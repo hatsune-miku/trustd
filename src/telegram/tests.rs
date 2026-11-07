@@ -88,7 +88,7 @@ async fn channels(desktop_wins: bool) {
         request_reason: "test only".into(),
         scope: "user".into(),
         secret_keys: vec![],
-        expires_at_ms: chrono::Utc::now().timestamp_millis() + 60000,
+        expires_at_ms: chrono::Utc::now().timestamp_millis() + crate::consent::CONSENT_TIMEOUT_MS,
     };
     let result = tokio::time::timeout(Duration::from_secs(5), state.request_consent(prompt))
         .await
@@ -225,7 +225,8 @@ async fn offline_telegram_does_not_prevent_desktop_consent() {
             request_reason: "test only".into(),
             scope: "user".into(),
             secret_keys: vec![],
-            expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            expires_at_ms: chrono::Utc::now().timestamp_millis()
+                + crate::consent::CONSENT_TIMEOUT_MS,
         })
         .await
         .unwrap();
