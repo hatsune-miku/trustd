@@ -488,6 +488,84 @@ async fn stdio_is_newline_json_and_eof_destroys_the_session() {
 }
 
 #[tokio::test]
+async fn eof_waits_for_late_approval_through_the_full_consent_window() {
+    struct SignalEof<R> {
+        input: R,
+        eof: Arc<tokio::sync::Notify>,
+    }
+    impl<R: AsyncRead + Unpin> AsyncRead for SignalEof<R> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buffer.filled().len();
+            let result = std::pin::Pin::new(&mut self.input).poll_read(context, buffer);
+            if matches!(result, std::task::Poll::Ready(Ok(()))) && buffer.filled().len() == before {
+                self.eof.notify_one();
+            }
+            result
+        }
+    }
+    let (address, state, server) = fake().await;
+    state.delayed.store(true, Ordering::SeqCst);
+    let (client, io) = tokio::io::duplex(65536);
+    let (input, output) = tokio::io::split(io);
+    let eof = Arc::new(tokio::sync::Notify::new());
+    let worker = tokio::spawn(Adapter::new(address).unwrap().serve(
+        SignalEof {
+            input,
+            eof: eof.clone(),
+        },
+        output,
+    ));
+    let (read, mut write) = tokio::io::split(client);
+    let mut read = BufReader::new(read);
+    write_message(
+        &mut write,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+    )
+    .await
+    .unwrap();
+    read.read_line(&mut String::new()).await.unwrap();
+    write_message(
+        &mut write,
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":approval()}),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.requests.lock().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    write.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), eof.notified())
+        .await
+        .unwrap();
+    // EOF is observed, so the adapter is now waiting on its cleanup deadline.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(590)).await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
+    assert!(
+        !worker.is_finished(),
+        "cleanup ended before the consent window"
+    );
+    state.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.sequence.load(Ordering::SeqCst), 1);
+    assert!(state.sessions.lock().await.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn framing_rejects_oversized_and_unterminated_messages() {
     for value in [vec![b'x'; MAX_MESSAGE + 1], b"{}".to_vec()] {
         assert!(

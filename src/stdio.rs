@@ -384,8 +384,12 @@ impl Adapter {
         for cancel in pending.values() {
             let _ = cancel.send(true);
         }
-        // Await late authorization replies and cancellation cleanup, but never forever.
-        let cleanup = tokio::time::timeout(Duration::from_secs(85), async {
+        // Await the full authorization response, its destroy request, and a final
+        // close retry if cleanup failed. EOF must not abandon a late approval.
+        let cleanup_timeout = request_timeout("/v1/sessions/enter/interactive")
+            + CONTROL_TIMEOUT * 2
+            + Duration::from_secs(10);
+        let cleanup = tokio::time::timeout(cleanup_timeout, async {
             while tasks.join_next().await.is_some() {}
             adapter.close().await
         })
