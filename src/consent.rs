@@ -6,10 +6,9 @@ use tokio::{sync::oneshot, time::Instant};
 
 use crate::server::ApiError;
 
-pub const CONSENT_TIMEOUT: Duration = Duration::from_millis(60_000);
 pub const MAX_PENDING: usize = 8;
 
-pub use localshelld_telegram::{Choice, Decision, Prompt};
+pub use localshelld_telegram::{CONSENT_TIMEOUT, CONSENT_TIMEOUT_MS, Choice, Decision, Prompt};
 
 pub enum DesktopEvent {
     Show(Prompt, oneshot::Sender<Decision>),
@@ -43,7 +42,8 @@ impl ConsentBroker {
         let remaining = prompt
             .expires_at_ms
             .saturating_sub(chrono::Utc::now().timestamp_millis());
-        let deadline = Instant::now() + Duration::from_millis(remaining.clamp(0, 60_000) as u64);
+        let deadline =
+            Instant::now() + Duration::from_millis(remaining.clamp(0, CONSENT_TIMEOUT_MS) as u64);
         let id = prompt.id.clone();
         let (reply, receive) = oneshot::channel();
         (self.sink)(DesktopEvent::Show(prompt, reply))?;
@@ -59,7 +59,7 @@ impl ConsentBroker {
             }
             // Deliver Ignore (including its note) to the authority immediately.
             // The authority, not a potentially lossy IPC round trip, owns the
-            // remaining wait until the original 60-second deadline.
+            // remaining wait until the original authorization deadline.
             if Instant::now() < deadline {
                 return Ok(decision);
             }
@@ -117,7 +117,7 @@ mod tests {
             request_reason: "reason <script> unchanged".into(),
             scope: "user".into(),
             secret_keys: vec![],
-            expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + CONSENT_TIMEOUT_MS,
         }
     }
 
@@ -160,5 +160,44 @@ mod tests {
         );
         assert!(validate_request("", "reason").is_err());
         assert!(validate_request("agent", " ").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn desktop_can_approve_after_the_old_sixty_second_deadline() {
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let broker = ConsentBroker::new(move |event| {
+            if let DesktopEvent::Show(_, reply) = event {
+                sent.send(reply).unwrap();
+            }
+            Ok(())
+        });
+        let request = tokio::spawn(async move { broker.request(prompt()).await.unwrap() });
+        let reply = received.recv().await.unwrap();
+        tokio::time::advance(Duration::from_secs(90)).await;
+        reply
+            .send(Decision {
+                choice: Choice::Accept,
+                remember: false,
+                btw: String::new(),
+            })
+            .unwrap();
+        assert_eq!(request.await.unwrap().choice, Choice::Accept);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn desktop_caps_the_wait_at_six_hundred_seconds() {
+        let held = Arc::new(std::sync::Mutex::new(None));
+        let pending = held.clone();
+        let broker = ConsentBroker::new(move |event| {
+            if let DesktopEvent::Show(_, reply) = event {
+                *pending.lock().unwrap() = Some(reply);
+            }
+            Ok(())
+        });
+        let mut p = prompt();
+        p.expires_at_ms += 10_000;
+        let started = Instant::now();
+        assert_eq!(broker.request(p).await.unwrap().choice, Choice::Ignore);
+        assert_eq!(started.elapsed(), Duration::from_secs(600));
     }
 }

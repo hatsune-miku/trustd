@@ -230,17 +230,18 @@ impl Service {
             prompt.secret_keys.join(", ")
         };
         let content = format!(
-            "trustd 授权\n设备：{device}\n代理：{}\n路径：{}\n权限：{}\n凭据名称：{keys}\n\n{}\n\n60 秒内有效。回复本消息可添加备注。",
+            "trustd 授权\n设备：{device}\n代理：{}\n路径：{}\n权限：{}\n凭据名称：{keys}\n\n{}\n\n{} 秒内有效。回复本消息可添加备注。",
             prompt.agent_name,
             prompt.agent_path.as_deref().unwrap_or("无法核验程序路径"),
             prompt.scope,
-            prompt.request_reason
+            prompt.request_reason,
+            (prompt.expires_at_ms.saturating_sub(now()).max(0) as u64).div_ceil(1_000)
         );
         let chunks = chunks(&content, 3400);
         for (index, chunk) in chunks.iter().enumerate() {
             let last = index + 1 == chunks.len();
             let markup = if last {
-                keyboard(&id, false)
+                keyboard(&id, false, prompt.agent_path.is_some())
             } else {
                 json!([])
             };
@@ -346,14 +347,20 @@ impl Service {
                 (
                     format!(
                         "记住选择：{}\n备注：{}",
-                        if p.remember { "是" } else { "否" },
+                        if p.prompt.agent_path.is_none() {
+                            "无法核验程序路径"
+                        } else if p.remember {
+                            "是"
+                        } else {
+                            "否"
+                        },
                         if p.note.is_empty() {
                             "无"
                         } else {
                             "已收到"
                         }
                     ),
-                    keyboard(id, p.remember),
+                    keyboard(id, p.remember, p.prompt.agent_path.is_some()),
                 )
             };
             (
@@ -412,9 +419,13 @@ impl Service {
                         (config, "授权请求已超时")
                     } else if p.candidate.borrow().is_some() {
                         (config, "已提交，等待设备确认")
-                    } else if action == "remember" && p.prompt.agent_path.is_some() {
-                        p.remember = !p.remember;
-                        (config, "已更新记住选择")
+                    } else if action == "remember" {
+                        if p.prompt.agent_path.is_some() {
+                            p.remember = !p.remember;
+                            (config, "已更新记住选择")
+                        } else {
+                            (config, "无法核验程序路径，不能记住选择")
+                        }
                     } else {
                         let choice = match action {
                             "accept" => Some(Choice::Accept),
@@ -589,11 +600,18 @@ async fn worker(weak: Weak<Inner>) {
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
-fn keyboard(id: &str, remember: bool) -> Value {
-    json!([
-        [{"text":"接受","callback_data":format!("{id}:accept")},{"text":"拒绝","callback_data":format!("{id}:deny")},{"text":"忽略","callback_data":format!("{id}:ignore")}],
-        [{"text":if remember{"☑ 记住选择"}else{"☐ 记住选择"},"callback_data":format!("{id}:remember")}]
-    ])
+fn keyboard(id: &str, remember: bool, can_remember: bool) -> Value {
+    let mut rows = vec![json!([
+        {"text":"接受","callback_data":format!("{id}:accept")},
+        {"text":"拒绝","callback_data":format!("{id}:deny")},
+        {"text":"忽略","callback_data":format!("{id}:ignore")}
+    ])];
+    if can_remember {
+        rows.push(json!([
+            {"text":if remember{"☑ 记住选择"}else{"☐ 记住选择"},"callback_data":format!("{id}:remember")}
+        ]));
+    }
+    json!(rows)
 }
 fn chunks(text: &str, size: usize) -> Vec<String> {
     let mut parts = Vec::new();

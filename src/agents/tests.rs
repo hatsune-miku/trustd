@@ -43,7 +43,7 @@ fn prompt() -> Prompt {
         request_reason: "test".into(),
         scope: "test".into(),
         secret_keys: vec![],
-        expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+        expires_at_ms: chrono::Utc::now().timestamp_millis() + crate::consent::CONSENT_TIMEOUT_MS,
     }
 }
 
@@ -111,6 +111,7 @@ fn discovery_catalog_is_exact_normalized_and_excludes_generic_runtimes() {
     }
     for name in [
         "DeepSeek Harness",
+        "claude-desktop",
         "DeepSeek Harness Helper (Plugin)",
         "OpenCode",
         "opencode-cli",
@@ -359,6 +360,11 @@ fn process_probe() {
     let Ok(endpoint) = std::env::var("TRUSTD_TEST_AGENT_ENDPOINT") else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("TRUSTD_TEST_VERSIONED_CLAUDE").is_some() {
+        // Model the native launcher's kernel-reported name, not argv[0].
+        std::fs::write("/proc/self/comm", "claude").unwrap();
+    }
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).unwrap();
     if let Ok(adapter) = std::env::var("TRUSTD_TEST_CHILD_ADAPTER") {
@@ -371,13 +377,28 @@ fn process_probe() {
                 "--nocapture",
             ])
             .env_remove("TRUSTD_TEST_CHILD_ADAPTER")
+            .env_remove("TRUSTD_TEST_VERSIONED_CLAUDE")
             .stdin(std::process::Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let result = command.output().unwrap();
+        // The nested adapter has the same transient ETXTBSY race as its parent
+        // fixture below. Retry only launch failure, never a completed process.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let result = loop {
+            match command.output() {
+                Ok(result) => break result,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("could not launch adapter fixture: {error}"),
+            }
+        };
         assert!(
             result.status.success(),
             "{}",
@@ -411,6 +432,54 @@ async fn deepseek_harness_is_discovered_and_its_adapter_uses_the_verified_parent
     verify_real_process("DeepSeek Harness").await;
 }
 
+#[tokio::test]
+async fn linux_claude_desktop_name_is_discovered_and_verified() {
+    verify_real_process("claude-desktop").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn versioned_native_claude_is_discovered_and_its_adapter_is_verified() {
+    verify_real_process("claude/versions/2.1.319").await;
+}
+
+#[test]
+fn versioned_claude_is_named_without_trusting_generic_process_titles() {
+    use std::{ffi::OsStr, path::Path};
+    let root = if cfg!(windows) {
+        "C:/Users/test"
+    } else {
+        "/home/test"
+    };
+    let path = Path::new(root).join(".local/share/claude/versions/2.1.319");
+    assert_eq!(executable_name(Some(&path), OsStr::new("claude")), "claude");
+    for (relative, title, expected) in [
+        ("bin/node", "claude", "node"),
+        ("bin/python3", "claude", "python3"),
+        ("bin/2.1.319", "claude", "2.1.319"),
+        ("other/versions/2.1.319", "claude", "2.1.319"),
+        ("claude/versions/node", "claude", "node"),
+        ("claude/versions/2.1.319", "unrelated", "2.1.319"),
+        (
+            "claude/versions/2.1.319 (deleted)",
+            "claude",
+            "2.1.319 (deleted)",
+        ),
+    ] {
+        assert_eq!(
+            executable_name(Some(&Path::new(root).join(relative)), OsStr::new(title)),
+            expected
+        );
+    }
+    assert_eq!(
+        executable_name(
+            Some(Path::new("claude/versions/2.1.319")),
+            OsStr::new("claude")
+        ),
+        "2.1.319"
+    );
+}
+
 async fn verify_real_process(executable_name: &str) {
     use tokio::io::AsyncWriteExt;
     let directory = tempfile::tempdir().unwrap();
@@ -419,6 +488,7 @@ async fn verify_real_process(executable_name: &str) {
     } else {
         executable_name.to_owned()
     });
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let adapter = directory.path().join(if cfg!(windows) {
         "fixture-adapter.exe"
@@ -457,6 +527,10 @@ async fn verify_real_process(executable_name: &str) {
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
+    #[cfg(target_os = "linux")]
+    if executable_name == "claude/versions/2.1.319" {
+        command.env("TRUSTD_TEST_VERSIONED_CLAUDE", "1");
+    }
     // Concurrent fork/exec fixtures can briefly retain a writable descriptor
     // to the freshly copied program. Retry only ETXTBSY; never hide a different
     // launch error or relax the process identity assertions below.

@@ -30,7 +30,7 @@ impl Desktop {
                     let remaining = prompt
                         .expires_at_ms
                         .saturating_sub(chrono::Utc::now().timestamp_millis())
-                        .clamp(0, 60_000);
+                        .clamp(0, crate::consent::CONSENT_TIMEOUT_MS);
                     Event::Show(Request {
                         id: prompt.id,
                         agent: prompt.agent_name,

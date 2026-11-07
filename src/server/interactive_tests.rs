@@ -97,7 +97,7 @@ async fn unidentified_denial_is_neutral_and_never_creates_a_session() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ignoring_waits_exactly_sixty_seconds_and_does_not_remember() {
+async fn ignoring_waits_exactly_six_hundred_seconds_and_does_not_remember() {
     let (state, _) = desktop_state(Choice::Ignore, true);
     let started = tokio::time::Instant::now();
     let result = state
@@ -105,9 +105,10 @@ async fn ignoring_waits_exactly_sixty_seconds_and_does_not_remember() {
         .await
         .unwrap();
     assert_eq!(started.elapsed(), CONSENT_TIMEOUT);
+    assert_eq!(started.elapsed(), Duration::from_secs(600));
     assert_eq!(
         result,
-        json!({"status":"timed_out","timeout_ms":60_000,"btw":"user note"})
+        json!({"status":"timed_out","timeout_ms":600_000,"btw":"user note"})
     );
     assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     assert!(state.auth.lock().await.list().is_empty());

@@ -22,6 +22,14 @@ const MAX_MESSAGE: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 64 * 1024 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(75);
 
+fn request_timeout(path: &str) -> Duration {
+    if path == "/v1/sessions/enter/interactive" {
+        crate::consent::CONSENT_TIMEOUT + Duration::from_secs(15)
+    } else {
+        CONTROL_TIMEOUT
+    }
+}
+
 pub struct Adapter {
     endpoint: String,
     client: reqwest::Client,
@@ -62,9 +70,10 @@ impl Adapter {
             }
             match entry["name"].as_str().unwrap() {
                 "enter_interactive" => {
-                    entry["description"] = json!(
-                        "Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. This process holds the resulting session internally. Read status and the owner's btw note. Close the existing session before requesting a new one. The request has a 60 second deadline; allow more than 60 seconds at the client."
-                    )
+                    entry["description"] = json!(format!(
+                        "Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. This process holds the resulting session internally. Read status and the owner's btw note. Close the existing session before requesting a new one. The request has a {seconds} second deadline; allow more than {seconds} seconds at the client.",
+                        seconds = crate::consent::CONSENT_TIMEOUT.as_secs()
+                    ))
                 }
                 "run" => {
                     entry["description"] = json!(
@@ -95,7 +104,7 @@ impl Adapter {
             self.client.get(url)
         };
         if !unlimited {
-            request = request.timeout(CONTROL_TIMEOUT);
+            request = request.timeout(request_timeout(path));
         }
         let mut response = request
             .send()
@@ -185,7 +194,11 @@ impl Adapter {
             "request cancelled"
         );
         match name {
-            "secrets_list" => self.request("/v1/secrets/keys", None, false).await,
+            "secrets_list" => {
+                crate::api::secret_query_arg(&args)?;
+                // An older GET-only daemon must fail closed, not return its full list.
+                self.request("/v1/secrets/keys", Some(args), false).await
+            }
             "enter_interactive" => {
                 let _transition = self.lifecycle.lock().await;
                 ensure!(

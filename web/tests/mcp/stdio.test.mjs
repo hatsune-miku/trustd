@@ -13,14 +13,14 @@ const command =
   )
 const identity = process.platform === 'win32' ? 'privilege_level' : 'sudo'
 const properties = {
-  secrets_list: [],
+  secrets_list: ['query'],
   secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'confirm_text'],
   run: ['command', 'stdin', 'timeout_seconds', identity],
   destroy: [],
 }
 const required = {
-  secrets_list: [],
+  secrets_list: ['query'],
   secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'confirm_text'],
   run: ['command', identity],
@@ -64,6 +64,16 @@ test('official SDK lists a single authorization entry with no policy disclosures
         assert.equal(Object.hasOwn(schema.properties, 'handle'), false)
         assert.equal(Object.hasOwn(schema.properties, 'token'), false)
       }
+    }
+    const querySchema = tools.find((tool) => tool.name === 'secrets_list').inputSchema.properties.query
+    assert.equal(querySchema.minLength, 1)
+    assert.equal(querySchema.pattern, '\\S')
+    // Invalid searches fail locally, even with no daemon listening.
+    for (const args of [{}, { query: '' }, { query: ' \t\n' }, { query: null }, { query: 123 }]) {
+      const result = await client.callTool({ name: 'secrets_list', arguments: args })
+      assert.equal(result.isError, true)
+      assert.match(result.content[0].text, /query|missing required argument/)
+      assert.equal(Object.hasOwn(result, 'structuredContent'), false)
     }
     // No open session: exercise an empty-argument tool and SDK output validation
     // without contacting a daemon or making an authorization decision.

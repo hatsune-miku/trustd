@@ -85,10 +85,32 @@ fn snapshot() -> System {
 }
 
 fn name(process: &sysinfo::Process) -> String {
-    process
-        .exe()
+    executable_name(process.exe(), process.name())
+}
+
+fn executable_name(executable: Option<&std::path::Path>, reported: &std::ffi::OsStr) -> String {
+    // Claude's native installer resolves ~/.local/bin/claude to
+    // .../claude/versions/<semver>. Do not fall back to arbitrary process titles:
+    // that could turn a shared node/python runtime into a remembered agent.
+    if reported == "claude"
+        && let Some(path) = executable
+        && path.is_absolute()
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| semver::Version::parse(n).is_ok())
+        && let Some(versions) = path.parent()
+        && versions.file_name().is_some_and(|n| n == "versions")
+        && versions
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "claude")
+    {
+        return "claude".into();
+    }
+    executable
         .and_then(|p| p.file_name())
-        .unwrap_or(process.name())
+        .unwrap_or(reported)
         .to_string_lossy()
         .into_owned()
 }

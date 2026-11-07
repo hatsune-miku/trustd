@@ -79,7 +79,13 @@ async fn fake() -> (SocketAddr, Arc<Fake>, tokio::task::JoinHandle<()>) {
         .route("/v1/commands/run", post(run))
         .route(
             "/v1/secrets/keys",
-            get(|| async { Json(json!({"keys":["TEST_TOKEN"]})) }),
+            post(
+                |State(state): State<Arc<Fake>>, Json(args): Json<Value>| async move {
+                    assert_eq!(args, json!({"query":"tEsT"}));
+                    state.requests.lock().await.push(args);
+                    Json(json!({"keys":["TEST_TOKEN"]}))
+                },
+            ),
         )
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -92,6 +98,29 @@ async fn fake() -> (SocketAddr, Arc<Fake>, tokio::task::JoinHandle<()>) {
 
 fn approval() -> Value {
     json!({"name":"enter_interactive","arguments":{"agent_name":"Test","request_reason":"test","confirm_text":"OK"}})
+}
+
+#[test]
+fn interactive_transport_timeout_outlasts_the_full_consent_deadline() {
+    assert_eq!(
+        request_timeout("/v1/sessions/enter/interactive"),
+        Duration::from_secs(615)
+    );
+    assert!(request_timeout("/v1/sessions/enter/interactive") > crate::consent::CONSENT_TIMEOUT);
+    assert_eq!(request_timeout("/v1/sessions/destroy"), CONTROL_TIMEOUT);
+    assert_eq!(request_timeout("/v1/secrets/keys"), CONTROL_TIMEOUT);
+    let adapter = Adapter::new("127.0.0.1:1".parse().unwrap()).unwrap();
+    for definitions in [adapter.definitions(), crate::mcp_text::tool_definitions()] {
+        let description = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "enter_interactive")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("600 seconds"));
+    }
 }
 
 fn command(value: &str) -> Value {
@@ -107,6 +136,89 @@ fn command(value: &str) -> Value {
 async fn call(adapter: &Adapter, params: Value) -> Result<Value> {
     let (_tx, rx) = watch::channel(false);
     adapter.call(params, rx).await
+}
+
+#[tokio::test]
+async fn credential_search_validates_locally_and_forwards_only_explicit_queries() {
+    let (address, state, task) = fake().await;
+    let adapter = Adapter::new(address).unwrap();
+    for args in [
+        json!({}),
+        json!({"query":""}),
+        json!({"query":" \n\t"}),
+        json!({"query":null}),
+        json!({"query":1}),
+        json!({"query":false}),
+        json!({"query":[]}),
+    ] {
+        assert!(
+            call(&adapter, json!({"name":"secrets_list","arguments":args}))
+                .await
+                .is_err()
+        );
+    }
+    assert!(state.requests.lock().await.is_empty());
+    let result = call(
+        &adapter,
+        json!({"name":"secrets_list","arguments":{"query":"tEsT"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, json!({"keys":["TEST_TOKEN"]}));
+    assert_eq!(*state.requests.lock().await, vec![json!({"query":"tEsT"})]);
+    assert!(adapter.handle.lock().await.is_none());
+    task.abort();
+}
+
+#[tokio::test]
+async fn credential_search_does_not_fall_back_to_an_old_daemons_full_list() {
+    let router = Router::new().route(
+        "/v1/secrets/keys",
+        get(|| async { Json(json!({"keys":["TEST_TOKEN","UNRELATED_PRIVATE_KEY"]})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let adapter = Adapter::new(listener.local_addr().unwrap()).unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let error = call(
+        &adapter,
+        json!({"name":"secrets_list","arguments":{"query":"test"}}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("HTTP 405"));
+    assert!(!error.to_string().contains("UNRELATED_PRIVATE_KEY"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn interactive_http_wait_survives_the_old_control_timeout() {
+    let (address, state, task) = fake().await;
+    state.delayed.store(true, Ordering::SeqCst);
+    let adapter = Arc::new(Adapter::new(address).unwrap());
+    let waiting = adapter.clone();
+    let request = tokio::spawn(async move { call(&waiting, approval()).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.requests.lock().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Advance only after HTTP delivery, then resume real I/O before releasing
+    // the fake approval. This exercises reqwest's timeout, not just a constant.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(90)).await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
+    state.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "authorized");
+    adapter.close().await.unwrap();
+    task.abort();
 }
 
 #[test]

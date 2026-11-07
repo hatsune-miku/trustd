@@ -10,6 +10,7 @@ pub const PROCESS_NAMES: &[&str] = &[
     "codex helper",
     "codex helper (plugin)",
     "claude",
+    "claude-desktop",
     "claude helper",
     "claude helper (plugin)",
     "cursor",

@@ -15,7 +15,10 @@ use crate::{
     auth::{AuthError, AuthManager, Credential, DEFAULT_TOKEN_TTL_SECONDS, TokenRecord},
     bridge::{self, ReplayGuard},
     config::Config,
-    consent::{CONSENT_TIMEOUT, Choice, ConsentBroker, Decision, Prompt, validate_request},
+    consent::{
+        CONSENT_TIMEOUT, CONSENT_TIMEOUT_MS, Choice, ConsentBroker, Decision, Prompt,
+        validate_request,
+    },
     execution::{PrivilegeLevel, RunOptions},
     mcp,
     peer::Peer,
@@ -334,7 +337,7 @@ impl AppState {
                     "当前用户命令（不含管理员 / root）"
                 }
                 .into(),
-                expires_at_ms: Utc::now().timestamp_millis() + 60_000,
+                expires_at_ms: Utc::now().timestamp_millis() + CONSENT_TIMEOUT_MS,
             };
             let decision: Decision = if self.mode == DaemonMode::Privileged {
                 let pairing = self.pairing().await?;
@@ -363,7 +366,9 @@ impl AppState {
             btw = decision.btw;
             if decision.choice == Choice::Ignore {
                 tokio::time::sleep_until(deadline).await;
-                return Ok(json!({"status":"timed_out", "timeout_ms":60_000, "btw":btw}));
+                return Ok(
+                    json!({"status":"timed_out", "timeout_ms":CONSENT_TIMEOUT_MS, "btw":btw}),
+                );
             }
             if decision.choice == Choice::Deny {
                 return Ok(json!({"status":"denied", "btw":btw}));

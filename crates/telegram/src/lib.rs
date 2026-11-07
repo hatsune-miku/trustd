@@ -11,6 +11,9 @@ mod service;
 pub use api::Api;
 pub use localshelld_sync_protocol::{TelegramBinding as Binding, TelegramConfig as Config};
 use serde::{Deserialize, Serialize};
+
+pub const CONSENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub const CONSENT_TIMEOUT_MS: i64 = CONSENT_TIMEOUT.as_millis() as i64;
 #[cfg(feature = "bot")]
 pub use service::Service;
 
@@ -128,7 +131,7 @@ pub fn validate_prompt(prompt: &Prompt) -> Result<()> {
     let remaining = prompt
         .expires_at_ms
         .saturating_sub(chrono::Utc::now().timestamp_millis());
-    if !(1..=61_000).contains(&remaining) {
+    if !(1..=CONSENT_TIMEOUT_MS + 1_000).contains(&remaining) {
         return Err("authorization request expired or has an invalid deadline");
     }
     Ok(())

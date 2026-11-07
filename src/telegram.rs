@@ -96,7 +96,7 @@ impl AppState {
         let remaining = prompt
             .expires_at_ms
             .saturating_sub(chrono::Utc::now().timestamp_millis())
-            .clamp(0, 60_000);
+            .clamp(0, crate::consent::CONSENT_TIMEOUT_MS);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining as u64);
         let mut telegram = Channel::start(self.clone(), prompt.clone(), deadline);
         let desktop = async {

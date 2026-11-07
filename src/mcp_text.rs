@@ -98,9 +98,9 @@ pub fn tool_definitions() -> Value {
     }
     json!([
         {
-            "name":"secrets_list", "title":"List available credential keys",
-            "description":"List public uppercase credential names without authorization. No credential values are returned. Pass needed names as secret_keys to enter_interactive, then reference their environment variables in commands.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+            "name":"secrets_list", "title":"Search credential keys",
+            "description":"Search credential names without authorization using a required non-empty, case-insensitive literal substring. Returns only matching names, never values; no unfiltered list is available. Pass needed names as secret_keys to enter_interactive, then reference their environment variables in commands.",
+            "inputSchema":{"type":"object","properties":{"query":{"type":"string","minLength":1,"pattern":"\\S","description":"Case-insensitive literal substring of a credential name, for example github. Empty or whitespace-only queries are rejected. Spaces are not trimmed; wildcards and regular expressions are not supported."}},"required":["query"],"additionalProperties":false},
             "outputSchema":{"type":"object","properties":{"keys":{"type":"array","items":{"type":"string"}}},"required":["keys"],"additionalProperties":false},
             "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}
         },
@@ -116,7 +116,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name":"enter_interactive", "title":format!("Request authorized access to {shell}"),
-            "description":"Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. Waits for authorization, denial or a fixed 60000 ms deadline; allow more than 60 seconds at the client. Read status and the owner's btw note. Use the returned session handle for subsequent calls.",
+            "description":format!("Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. Waits for authorization, denial or a fixed {} ms deadline; allow more than {} seconds at the client. Read status and the owner's btw note. Use the returned session handle for subsequent calls.", crate::consent::CONSENT_TIMEOUT_MS, crate::consent::CONSENT_TIMEOUT.as_secs()),
             "inputSchema":{"type":"object","properties":{
                 "agent_name":{"type":"string","minLength":1,"maxLength":128},
                 "request_reason":{"type":"string","minLength":1,"maxLength":16384},
