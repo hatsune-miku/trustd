@@ -45,7 +45,7 @@ fn prompt(id: &str) -> Prompt {
         request_reason: "literal <b>reason</b>".into(),
         scope: "user".into(),
         secret_keys: vec!["TEST_KEY".into()],
-        expires_at_ms: now() + 60_000,
+        expires_at_ms: now() + crate::CONSENT_TIMEOUT_MS,
     }
 }
 pub(super) async fn setup() -> (Service, Fixture, tokio::task::JoinHandle<()>) {
@@ -275,7 +275,11 @@ async fn ignore_expiry_and_generation_are_fail_closed() {
 fn length_bounds_account_for_callback_suffix_and_unicode() {
     let mut p = prompt(&"a".repeat(48));
     assert!(validate_prompt(&p).is_ok());
-    assert!(keyboard(&p.id, false).to_string().contains("remember"));
+    assert!(
+        keyboard(&p.id, false, true)
+            .to_string()
+            .contains("remember")
+    );
     p.id.push('a');
     assert!(validate_prompt(&p).is_err());
     p = prompt("id");
@@ -285,4 +289,94 @@ fn length_bounds_account_for_callback_suffix_and_unicode() {
     let parts = chunks(&long, 1700);
     assert_eq!(parts.concat(), long);
     assert!(parts.iter().all(|p| p.encode_utf16().count() <= 3400));
+}
+
+#[tokio::test]
+async fn unverified_paths_hide_remember_and_stale_callbacks_explain_why() {
+    let (service, fixture, server) = setup().await;
+    let mut p = prompt("unverified");
+    p.agent_path = None;
+    service.create("owner", "device", p).await.unwrap();
+    {
+        let calls = fixture.calls.lock().await;
+        let sent = &calls.iter().find(|(m, _)| m == "sendMessage").unwrap().1;
+        assert_eq!(
+            sent["reply_markup"]["inline_keyboard"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!sent["reply_markup"].to_string().contains(":remember"));
+    }
+    // An old Telegram message can still contain the former always-visible button.
+    click(&service, "unverified", "remember", 42, 1).await;
+    assert!(!service.inner.state.lock().await.pending["unverified"].remember);
+    {
+        let calls = fixture.calls.lock().await;
+        let answer = &calls
+            .iter()
+            .rev()
+            .find(|(m, _)| m == "answerCallbackQuery")
+            .unwrap()
+            .1;
+        assert_eq!(answer["text"], "无法核验程序路径，不能记住选择");
+        let edited = &calls
+            .iter()
+            .rev()
+            .find(|(m, _)| m == "editMessageText")
+            .unwrap()
+            .1;
+        assert!(!edited["reply_markup"].to_string().contains(":remember"));
+    }
+    click(&service, "unverified", "accept", 42, 1).await;
+    let decision = service.poll("owner", "unverified").await.unwrap().unwrap();
+    assert_eq!(decision.choice, Choice::Accept);
+    assert!(!decision.remember);
+    service.stop().await;
+    server.abort();
+}
+
+#[test]
+fn consent_deadlines_accept_ten_minutes_and_legacy_shorter_requests() {
+    assert_eq!(crate::CONSENT_TIMEOUT_MS, 600_000);
+    let mut p = prompt("deadline");
+    assert!(validate_prompt(&p).is_ok());
+    p.expires_at_ms = now() + 60_000;
+    assert!(validate_prompt(&p).is_ok());
+    p.expires_at_ms = now() + 610_000;
+    assert!(validate_prompt(&p).is_err());
+    p.expires_at_ms = now() - 1;
+    assert!(validate_prompt(&p).is_err());
+}
+
+#[tokio::test]
+async fn telegram_displays_the_actual_request_window() {
+    let (service, fixture, server) = setup().await;
+    service
+        .create("owner", "device", prompt("ten-minutes"))
+        .await
+        .unwrap();
+    let mut legacy = prompt("legacy");
+    legacy.expires_at_ms = now() + 60_000;
+    service.create("owner", "device", legacy).await.unwrap();
+    let calls = fixture.calls.lock().await;
+    let sent: Vec<_> = calls.iter().filter(|(m, _)| m == "sendMessage").collect();
+    let displayed_seconds = |body: &Value| {
+        body["text"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert!((61..=600).contains(&displayed_seconds(&sent[0].1)));
+    assert!((1..=60).contains(&displayed_seconds(&sent[1].1)));
+    service.stop().await;
+    server.abort();
 }

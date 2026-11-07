@@ -10,7 +10,7 @@ stdio 与下文的 HTTP/直接 MCP 业务语义相同，但输入／输出 schem
 | --- | --- |
 | `enter_interactive` | 无 token 参数，授权响应不返回 handle；由接入进程保存 |
 | `run` / `secrets_get` / `destroy` | 不接受 handle，自动使用本接入进程的会话 |
-| `secrets_list` | 与直接连接一致，只返回名称 |
+| `secrets_list` | 与直接连接一致，必填 `query`，只返回匹配的名称 |
 
 始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle 字段填入 stdio 工具。工具共五项。显式明文读取仍要求存活会话及已授权 key。
 
@@ -26,11 +26,11 @@ stdio 取消通知按本进程的 requestId 定位，不需要 MCP HTTP 会话�
 
 ## 能力发现与 MCP 对应关系
 
-`GET /v1/capabilities` 无需凭据，返回当前 daemon 的 `protocol`、`version`、`commit`、`platform` 和 `operations`。每项操作包含 `name`、`method`、`path`、`inputSchema`、`outputSchema`；schema 与 MCP `tools/list` 共用同一份定义。返回的 `cancellation` 描述取消方式，`interactive_timeout_ms` 为 60000。
+`GET /v1/capabilities` 无需凭据，返回当前 daemon 的 `protocol`、`version`、`commit`、`platform` 和 `operations`。每项操作包含 `name`、`method`、`path`、`inputSchema`、`outputSchema`；schema 与 MCP `tools/list` 共用同一份定义。返回的 `cancellation` 描述取消方式，`interactive_timeout_ms` 为 600000。
 
 | MCP 工具 | HTTP 接口 |
 |---|---|
-| `secrets_list` | `GET /v1/secrets/keys` |
+| `secrets_list` | `POST /v1/secrets/keys` |
 | `secrets_get` | `POST /v1/secrets/get` |
 | `enter_interactive` | `POST /v1/sessions/enter/interactive` |
 | `run` | `POST /v1/commands/run` |
@@ -57,11 +57,11 @@ HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对
 
 请求进入同一套授权流程。名字、原因、凭据选择和权限范围与 MCP 完全相同；`confirm_text` 只是隐私确认，不代表用户已批准执行。
 
-客户端调用超时应大于 60 秒。接受、拒绝和超时都返回 HTTP 200，必须检查 `status`：
+客户端调用超时应大于 600 秒。接受、拒绝和超时都返回 HTTP 200，必须检查 `status`：
 
 - `authorized`：包含 `status`、`btw`、`handle`、`secret_keys`、`shell`、`platform`、`daemon`、`privilege_levels`、`identities`、`expires_at`、`expires_at_iso` 和 `message`。Linux/macOS 另有 `sudo_available`。
 - `denied`：`status`、`btw`，不包含 handle。
-- `timed_out`：`status`、`timeout_ms:60000`、`btw`，不包含 handle。忽略或关闭弹窗仍等待原来的截止时间。
+- `timed_out`：`status`、`timeout_ms:600000`、`btw`，不包含 handle。忽略或关闭弹窗仍等待原来的截止时间。
 
 `btw` 是用户附言。`expires_at` 为 Unix 秒，`expires_at_iso` 为 UTC ISO 8601。`identities` 按执行身份名返回实际操作系统账户信息，仅报告可用且授权允许的身份。交互授权目前没有单独的提前取消接口。不要在客户端超时后自动重发，以免重复请求授权。
 
@@ -136,7 +136,7 @@ stdout、stderr 分别捕获，各最多保存 `max_output_bytes` 字节；非 U
 ```powershell
 $apiBase = 'http://127.0.0.1:32120'
 $approval = Invoke-RestMethod -Method Post -Uri "$apiBase/v1/sessions/enter/interactive" `
-  -ContentType 'application/json' -TimeoutSec 75 -Body (@{
+  -ContentType 'application/json' -TimeoutSec 615 -Body (@{
     agent_name = 'Example App'
     request_reason = '检查当前执行账户。'
     confirm_text = 'OK'
@@ -163,7 +163,7 @@ try {
 
 ### 环境变量凭据
 
-`GET /v1/secrets/keys` 无需授权，返回 `{"keys":["JENKINS_CI_TOKEN","OPENAI_API_KEY"]}`，只列名称。
+`POST /v1/secrets/keys` 无需授权，必填 JSON `{"query":"jenkins"}`，返回 `{"keys":["JENKINS_CI_TOKEN"]}`，只返回匹配的名称，不含凭据值。按不区分大小写的字面子串匹配，不修剪空格，不支持通配符或正则；无匹配返回 `{"keys":[]}`。缺少 `query`、非字符串、空串或纯空白返回 400。MCP `secrets_list` 使用相同参数和规则。旧的 GET 全量列表入口返回 405，不提供无条件枚举；升级时 daemon 与 stdio 接入需一并更新，旧 daemon 不会被回退调用。管理页登录后的 `GET /v1/admin/secrets` 仍保留完整名称列表。
 
 `POST /v1/secrets/get` 与 MCP `secrets_get` 同步提供明文读取：请求 `{"handle":"<HANDLE>","key":"JENKINS_CI_TOKEN"}`，返回 `{"key":"JENKINS_CI_TOKEN","value":"..."}`。必须先通过任一 enter 将该 key 纳入 `secret_keys` 并获得授权；只有存活且未过期的会话可以读取自己的授权快照。未授权 key 返回 403，无效、过期、已销毁或已撤销的 handle 返回 401；关联的系统授权不可用时不使用本地快照兜底。后台更新或删除凭据不改变会话快照，重新进入后才读取新值。该接口使用 POST JSON body，响应保持 `Cache-Control: no-store`。
 
@@ -258,7 +258,7 @@ Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。
 
 | 工具 | 用途 |
 |---|---|
-| `secrets_list` | 无需授权列出凭据 key，不返回 value |
+| `secrets_list` | 必填 `query`，无需授权搜索匹配的凭据 key，不返回 value |
 | `secrets_get` | 读取会话已授权 key 的明文快照；不鼓励使用，除非用户明确要求 |
 | `enter_interactive` | 桌面／Telegram 交互式请求授权，无 token 参数 |
 | `run` | 显式选择身份，执行单次命令并传入可选 stdin |
@@ -274,7 +274,7 @@ initialize 响应通过 HTTP `Mcp-Session-Id` 返回强随机传输会话标识�
 {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":17,"reason":"User cancelled"}}
 ```
 
-服务器只取消同一传输会话中仍在执行的 run，销毁其整个 handle 并清理进程树；取消通知与被取消的 HTTP 请求返回 204，不再给被取消请求发送工具结果。未知或已完成的 requestId、其他客户端的同号请求、没有归属信息的通知均不影响执行。交互授权仍使用固定 60 秒期限，不由此通知取消。闲置传输会话可回收；传输会话失效不会自动撤销执行 handle。当前无后台任务 API。
+服务器只取消同一传输会话中仍在执行的 run，销毁其整个 handle 并清理进程树；取消通知与被取消的 HTTP 请求返回 204，不再给被取消请求发送工具结果。未知或已完成的 requestId、其他客户端的同号请求、没有归属信息的通知均不影响执行。交互授权仍使用固定 600 秒期限，不由此通知取消。闲置传输会话可回收；传输会话失效不会自动撤销执行 handle。当前无后台任务 API。
 
 ### 授权请求
 
@@ -288,9 +288,9 @@ agent_name 是 1–128 字符的自报名，不得有控制字符；request_reas
 
 - 接受：上述会话字段，加 `status:"authorized"`、`btw`。
 - 拒绝：`{"status":"denied","btw":"..."}`。
-- 超时：`{"status":"timed_out","timeout_ms":60000,"btw":"..."}`。忽略、关闭弹窗仍等至原 60 秒截止时间。
+- 超时：`{"status":"timed_out","timeout_ms":600000,"btw":"..."}`。忽略、关闭弹窗仍等至原 600 秒截止时间。
 - btw 是用户在弹窗填写的附言，类型为 string，不是无来源的服务端噪音。
 
-客户端应给授权留出超过 60 秒的调用时间。授权通道不可用或通信失败时明确报错。最多同时等待 8 个请求。名称只是自报显示信息，不能用于认证。
+客户端应给授权留出超过 600 秒的调用时间。stdio 适配器为授权请求保留 615 秒传输时间，其余控制请求仍为 75 秒。授权通道不可用或通信失败时明确报错。最多同时等待 8 个请求。名称只是自报显示信息，不能用于认证。
 
 配对用户入口由系统端建立授权会话；未配对用户入口仅允许当前用户权限。会话授权默认 24 小时，可在签发端管理页面撤销。handle 是 bearer 凭据，可能保存在客户端调用历史中，不应再次回显、写日志或放入 URL。

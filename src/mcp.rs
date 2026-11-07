@@ -322,9 +322,12 @@ mod tests {
             .put_secret("JENKINS_CI_TOKEN", "fixture-secret-123")
             .await
             .unwrap();
-        let listed = call_tool(&state, json!({"name":"secrets_list"}))
-            .await
-            .unwrap();
+        let listed = call_tool(
+            &state,
+            json!({"name":"secrets_list","arguments":{"query":"jenkins"}}),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             listed["structuredContent"],
             json!({"keys":["JENKINS_CI_TOKEN"]})

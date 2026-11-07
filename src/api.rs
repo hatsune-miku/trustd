@@ -45,7 +45,7 @@ impl Operation {
     }
     fn fields(self) -> &'static [&'static str] {
         match self {
-            Self::SecretsList => &[],
+            Self::SecretsList => &["query"],
             Self::SecretsGet => &["handle", "key"],
             Self::EnterInteractive => &[
                 "agent_name",
@@ -71,9 +71,9 @@ impl Operation {
 pub(crate) fn routes() -> Router<AppState> {
     let mut routes = Router::new()
         .route("/llms.txt", get(llms::document))
-        .route("/v1/capabilities", get(capabilities))
-        .route(Operation::SecretsList.path(), get(secrets_list));
+        .route("/v1/capabilities", get(capabilities));
     for operation in [
+        Operation::SecretsList,
         Operation::SecretsGet,
         Operation::EnterInteractive,
         Operation::Run,
@@ -100,11 +100,7 @@ fn operation_definitions() -> Value {
     for entry in operations.as_array_mut().expect("static tool definitions") {
         let operation = Operation::from_name(entry["name"].as_str().expect("tool name"))
             .expect("every advertised tool has an HTTP operation");
-        entry["method"] = json!(if matches!(operation, Operation::SecretsList) {
-            "GET"
-        } else {
-            "POST"
-        });
+        entry["method"] = json!("POST");
         entry["path"] = json!(operation.path());
     }
     operations
@@ -116,14 +112,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<Value> {
         "daemon":state.mode,"platform":std::env::consts::OS,
         "operations":operation_definitions(),
         "cancellation":{"method":"POST","path":Operation::Destroy.path(),"scope":"session","disconnect_cancels":false},
-        "interactive_timeout_ms":60_000
+        "interactive_timeout_ms":crate::consent::CONSENT_TIMEOUT_MS
     }))
-}
-
-async fn secrets_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    execute_from(&state, Operation::SecretsList, json!({}), None)
-        .await
-        .map(Json)
 }
 
 pub(crate) async fn execute_from(
@@ -145,7 +135,17 @@ pub(crate) async fn execute_from(
         ));
     }
     match operation {
-        Operation::SecretsList => Ok(json!({"keys":state.secret_keys().await?})),
+        Operation::SecretsList => {
+            // Validate before reading the local vault or calling its paired owner.
+            let query = secret_query_arg(&arguments)?;
+            let keys: Vec<_> = state
+                .secret_keys()
+                .await?
+                .into_iter()
+                .filter(|key| key.to_ascii_lowercase().contains(&query))
+                .collect();
+            Ok(json!({"keys":keys}))
+        }
         Operation::SecretsGet => {
             let handle = string_arg(&arguments, "handle")?;
             let key = string_arg(&arguments, "key")?;
@@ -202,6 +202,18 @@ fn confirmation(arguments: &Value) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("confirm_text must equal OK"));
     }
     Ok(())
+}
+
+pub(crate) fn secret_query_arg(arguments: &Value) -> Result<String, ApiError> {
+    let query = string_arg(arguments, "query")?;
+    if query.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "query must not be empty or whitespace-only",
+        ));
+    }
+    // Keys are restricted to ASCII environment-variable names. Preserve spaces
+    // and punctuation: search is a literal substring, not a pattern or prefix.
+    Ok(query.to_ascii_lowercase())
 }
 
 pub(crate) fn secret_keys_arg(arguments: &Value) -> Result<Vec<String>, ApiError> {

@@ -45,9 +45,9 @@ Windows 的管理员后端使用配对用户进程的 linked elevated token，�
 - `auth`：Master/TOTP、运行期执行令牌；`management`：10 分钟管理会话、WebAuthn 和凭据设置。
 - `settings` / `storage`：原子、受 ACL 保护的配置写入，以及独立的 `config.authorization.json`。后者保存配对共享密钥、通行密钥公钥/元数据、用户 UUID、按程序路径保存的授权策略、加密后的环境变量凭据；备份或迁移时需同时保留它、原配置和 seal key。
 - `agents`：主动扫描当前用户的已知进程名，用操作系统连接归属和进程祖先核验完整路径。不同路径独立管理，同路径多个进程共享策略；无法核验时只允许当次人工决定。
-- `consent`：最多 8 个 pending 请求、60 秒截止时间、取消清理与进程内一次性决策回调；`server` 统一决定权限与创建会话。
+- `consent`：最多 8 个 pending 请求、600 秒截止时间、取消清理与进程内一次性决策回调；`server` 统一决定权限与创建会话。
 - `desktop`：平台适配。Windows 的 `crates/native-dialog` 封装 Win32 FFI；应用主库继续禁止 unsafe。模型无关的窗口层只接收文字和完成回调，不知道 token、shell 或提权接口。Linux/macOS 保留 Tao/Wry 实现。
-- `bridge`：显式配对后使用 AES-256-GCM 信封，绑定角色、方向、请求 ID，限制请求年龄并阻止重放。控制请求有短超时，授权请求遵循 60 秒截止时间，命令不默认限时、不重试。
+- `bridge`：显式配对后使用 AES-256-GCM 信封，绑定角色、方向、请求 ID，限制请求年龄并阻止重放。控制请求有短超时，授权请求遵循 600 秒截止时间，命令不默认限时、不重试。
 
 Windows 使用模型无关的原生无模式对话框，`IsDialogMessageW` 负责键盘导航，W 系列控件处理 Unicode。GUI 线程只处理窗口、布局和事件；有界 Rust 队列与 `PostMessageW` 传递唤醒，停止事件不受队列满影响。GUI 不读取配置、不阻塞等待 HTTP、不创建 shell。DPI 切换时替换字体并重排，关闭 HWND 后释放 GDI 资源。原生窗口不需要 WebView2；Windows 构建不引入 Wry/Tao。
 
@@ -87,7 +87,7 @@ Master Password 只保存 Argon2id PHC verifier。TOTP 验证使用可恢复的�
 
 `enter.secret_keys` 选择本次需要的凭据，复用原有 token / 交互授权。用户同意后在 session 中保留不可变的环境快照，各身份 shell 创建时直接覆盖对应子进程环境，不在命令文本、参数或日志中插值。Windows 按不区分大小写的名称替换继承项；管理员后端先取得同用户 profile 环境，再应用所选凭据。惰性创建的用户/管理员 shell 也使用原快照，不重新读取已轮换的值。内部 `SessionEnvironment` 仅在配对加密桥上、验证有效 handle 后返回快照，不作为公开 secret 工具。
 
-长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 只列名称，`secrets_get` 通过存活 handle 显式读取该会话已授权 key 的明文快照，与 HTTP `POST /v1/secrets/get` 共用实现；关联会话在读取前再次验证系统授权，失联时不返回缓存。列表和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
+长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 必填非空 `query`，按不区分大小写的字面子串返回匹配名称，与 HTTP `POST /v1/secrets/keys` 共用实现，不提供全量列表。`secrets_get` 通过存活 handle 显式读取该会话已授权 key 的明文快照，与 HTTP `POST /v1/secrets/get` 共用实现；关联会话在读取前再次验证系统授权，失联时不返回缓存。搜索和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
 
 ### 本机传输
 

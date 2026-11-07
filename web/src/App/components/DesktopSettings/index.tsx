@@ -32,7 +32,7 @@ export function DesktopSettings({ session }: { session: string }) {
   return (
     <div className="desktop-settings">
       <h2 className="section-title">桌面授权</h2>
-      <p className="description">代理可请求本机弹窗授权。接受、拒绝由用户选择，忽略会等待至 60 秒超时。</p>
+      <p className="description">代理可请求本机弹窗授权。接受、拒绝由用户选择，忽略会等待至 600 秒超时。</p>
       <Feedback {...action} />
       <section className="desktop-section">
         <h3 className="subsection-title">用户进程配对</h3>

@@ -82,11 +82,7 @@ async fn request(
 }
 
 async fn http(app: &Router, operation: Operation, arguments: Value) -> (StatusCode, Value) {
-    if matches!(operation, Operation::SecretsList) {
-        request(app, "GET", operation.path(), None).await
-    } else {
-        request(app, "POST", operation.path(), Some(arguments)).await
-    }
+    request(app, "POST", operation.path(), Some(arguments)).await
 }
 
 async fn mcp(app: &Router, name: &str, arguments: Value) -> Value {
@@ -263,7 +259,7 @@ async fn capabilities_publish_all_mcp_schemas_and_registered_http_operations() {
     assert_eq!(capabilities["version"], crate::VERSION);
     assert_eq!(capabilities["commit"], crate::COMMIT);
     assert_eq!(capabilities["daemon"], "user");
-    assert_eq!(capabilities["interactive_timeout_ms"], 60_000);
+    assert_eq!(capabilities["interactive_timeout_ms"], 600_000);
     assert_eq!(capabilities["cancellation"]["disconnect_cancels"], false);
     let tools = tool_definitions();
     let operations = capabilities["operations"].as_array().unwrap();
@@ -287,6 +283,71 @@ async fn capabilities_publish_all_mcp_schemas_and_registered_http_operations() {
 }
 
 #[tokio::test]
+async fn credential_search_requires_a_nonblank_literal_substring_on_every_transport() {
+    for state in [
+        user_state().0,
+        AppState::new(Config::default(), AuthManager::new("unused".into(), None)),
+    ] {
+        for key in ["GITHUB_TOKEN", "GITHUB_PRIVATE_KEY", "JENKINS_TOKEN"] {
+            state.put_secret(key, "fixture-secret-value").await.unwrap();
+        }
+        let app = router(state.clone());
+        for (query, expected) in [
+            ("gItHuB", vec!["GITHUB_PRIVATE_KEY", "GITHUB_TOKEN"]),
+            ("HUB_T", vec!["GITHUB_TOKEN"]),
+            ("token", vec!["GITHUB_TOKEN", "JENKINS_TOKEN"]),
+            ("GITHUB_TOKEN", vec!["GITHUB_TOKEN"]),
+            ("absent", vec![]),
+            ("*", vec![]),
+            (".*", vec![]),
+            (" github ", vec![]),
+            ("凭据", vec![]),
+        ] {
+            let args = json!({"query":query});
+            let (status, found) = http(&app, Operation::SecretsList, args.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(found, json!({"keys":expected}));
+            assert_eq!(
+                mcp(&app, "secrets_list", args).await["result"]["structuredContent"],
+                found
+            );
+            assert!(!found.to_string().contains("fixture-secret-value"));
+        }
+        for args in [
+            json!({}),
+            json!({"query":""}),
+            json!({"query":" \t\r\n"}),
+            json!({"query":"\u{3000}"}),
+            json!({"query":null}),
+            json!({"query":42}),
+            json!({"query":false}),
+            json!({"query":[]}),
+            json!({"query":{}}),
+            json!({"query":"github","fixture-secret-value":true}),
+            json!([]),
+        ] {
+            let (status, error) = http(&app, Operation::SecretsList, args.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let rpc = mcp(&app, "secrets_list", args).await;
+            assert_eq!(rpc["error"]["code"], -32602);
+            for response in [error, rpc] {
+                assert!(!response.to_string().contains("fixture-secret-value"));
+                assert!(!response.to_string().contains("GITHUB_TOKEN"));
+                assert!(response.get("keys").is_none());
+            }
+        }
+        // Old clients cannot enumerate by omitting a body or passing a query in the URL.
+        for path in ["/v1/secrets/keys", "/v1/secrets/keys?query=github"] {
+            assert_eq!(
+                request(&app, "GET", path, None).await.0,
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+        }
+        state.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn interactive_secrets_execution_and_lifecycle_are_interoperable() {
     let (state, _) = consent_state(Choice::Accept, false);
     state
@@ -294,11 +355,11 @@ async fn interactive_secrets_execution_and_lifecycle_are_interoperable() {
         .await
         .unwrap();
     let app = router(state.clone());
-    let (status, keys) = http(&app, Operation::SecretsList, json!({})).await;
+    let (status, keys) = http(&app, Operation::SecretsList, json!({"query":"api"})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         keys,
-        mcp(&app, "secrets_list", json!({})).await["result"]["structuredContent"]
+        mcp(&app, "secrets_list", json!({"query":"api"})).await["result"]["structuredContent"]
     );
     assert_eq!(keys, json!({"keys":["TEST_API_SECRET"]}));
 
@@ -589,11 +650,11 @@ async fn http_interactive_ignore_preserves_the_fixed_deadline_and_note() {
     let app = router(state.clone());
     let started = tokio::time::Instant::now();
     let (status, result) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
-    assert_eq!(started.elapsed(), Duration::from_secs(60));
+    assert_eq!(started.elapsed(), Duration::from_secs(600));
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         result,
-        json!({"status":"timed_out","timeout_ms":60000,"btw":"fixture note"})
+        json!({"status":"timed_out","timeout_ms":600000,"btw":"fixture note"})
     );
     assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     state.shutdown().await;
