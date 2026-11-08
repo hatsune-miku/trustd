@@ -176,3 +176,96 @@ fn paths_with_spaces_quotes_and_unicode_are_data_not_shell_commands() {
         }
     }
 }
+
+#[test]
+fn legacy_commands_migrate_once_without_touching_custom_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let stable = dir.path().join(crate::bundle::filename("trustd-stdio"));
+    fs::write(&stable, b"fixture").unwrap();
+    let old = dir
+        .path()
+        .join("versions")
+        .join("a".repeat(64))
+        .join(stable.file_name().unwrap());
+    for id in ["codex", "cursor", "vscode"] {
+        let agent = Agent {
+            id,
+            name: id,
+            path: dir.path().join(format!("{id}.config")),
+            detected: true,
+        };
+        let source = if id == "codex" {
+            format!(
+                "# keep\n[mcp_servers.trustd]\ncommand = '{}' # path comment\nargs = ['--endpoint', '127.0.0.1:45678']\nenv = {{KEEP = 'value'}}\ntool_timeout_sec = 999\n",
+                old.display()
+            )
+        } else {
+            let key = if id == "vscode" {
+                "servers"
+            } else {
+                "mcpServers"
+            };
+            format!(
+                "// keep\n{}",
+                serde_json::json!({key: {"trustd": {"command": old, "args": ["custom"], "env": {"KEEP": "value"}, "timeout": 999}}})
+            )
+        };
+        fs::write(&agent.path, &source).unwrap();
+        let results = configure(
+            std::slice::from_ref(&agent),
+            &[],
+            &stable,
+            endpoint(),
+            false,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].error.is_none(), "{:?}", results[0].error);
+        assert_eq!(
+            fs::read_to_string(results[0].backup.as_ref().unwrap()).unwrap(),
+            source
+        );
+        let migrated = fs::read_to_string(&agent.path).unwrap();
+        assert!(migrated.contains("keep"));
+        if id == "codex" {
+            assert!(migrated.contains("# path comment"));
+            let mut before: toml::Value = toml::from_str(&source).unwrap();
+            before["mcp_servers"]["trustd"]["command"] =
+                toml::Value::String(stable.to_str().unwrap().into());
+            assert_eq!(before, toml::from_str::<toml::Value>(&migrated).unwrap());
+        } else {
+            let key = if id == "vscode" {
+                "servers"
+            } else {
+                "mcpServers"
+            };
+            let mut before = json(&source);
+            before[key]["trustd"]["command"] = stable.to_str().unwrap().into();
+            assert_eq!(before, json(&migrated));
+        }
+        let results = configure(
+            std::slice::from_ref(&agent),
+            &[id.into()],
+            &stable,
+            endpoint(),
+            false,
+        );
+        assert!(results[0].error.is_none());
+        assert!(results[0].backup.is_none());
+        assert_eq!(fs::read_to_string(&agent.path).unwrap(), migrated);
+    }
+}
+
+#[test]
+fn custom_and_remote_commands_are_not_implicitly_migrated() {
+    let stable = PathBuf::from("/fixed/trustd-stdio");
+    for old in [
+        "/other/versions/aaaaaaaa/trustd-stdio",
+        "/fixed/versions/../trustd-stdio",
+        "/fixed/versions/not-a-digest/trustd-stdio",
+    ] {
+        let source = serde_json::json!({"mcpServers": {"trustd": {"command": old}}}).to_string();
+        assert!(stable_entry(&source, "cursor", &stable).unwrap().is_none());
+    }
+    let source = serde_json::json!({"mcpServers": {"trustd": {"command": stable, "url": "https://custom/mcp"}}}).to_string();
+    assert!(stable_entry(&source, "cursor", &stable).unwrap().is_none());
+}

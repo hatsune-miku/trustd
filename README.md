@@ -46,6 +46,25 @@ curl -fsSL https://github.com/hatsune-miku/trustd/releases/latest/download/insta
 2. 在 [用户管理页](http://localhost:32120/) 生成配对码，到 [系统管理页](http://localhost:32119/) 填入用户 daemon 地址与配对码，建立两端互信
 3. 按需使用更多扩展功能：Telegram Bot 或自定义中心化服务器等
 
+## 卸载
+
+Windows 在当前账户的管理员 PowerShell 中运行：
+
+```powershell
+& "$env:ProgramFiles\trustd\trustd.exe" uninstall
+```
+
+macOS / Linux 从普通登录用户的终端运行对应命令：
+
+```sh
+# macOS
+sudo /Library/trustd/trustd uninstall
+# Linux（含 headless）
+sudo /opt/trustd/trustd uninstall
+```
+
+也可在网页维护向导中选择卸载。卸载会停止并注销系统服务和当前用户的自启动，保留程序、配置、凭据及配对。需要彻底移除时，再删除[程序与数据目录](docs/TECHNICAL.md#安装与维护)，并移除 AI 客户端中的 trustd MCP 配置。升级只需重新运行安装命令，无需先卸载。
+
 ## 技术细节、安全细节
 
 程序组成、安装目录、MCP 配置、授权策略、执行身份、凭据存储、构建与验证命令集中在 [技术细节](docs/TECHNICAL.md)。

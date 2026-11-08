@@ -2,6 +2,16 @@ use super::*;
 use axum::{body::Body, http::Request};
 use tower::ServiceExt;
 
+#[test]
+fn separate_wizards_cannot_mutate_the_same_user_installation() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    let lock = user_maintenance_lock(&config).unwrap();
+    assert!(user_maintenance_lock(&config).is_err());
+    drop(lock);
+    assert!(user_maintenance_lock(&config).is_ok());
+}
+
 fn fixture() -> App {
     Arc::new(Inner {
         user_headless: true,

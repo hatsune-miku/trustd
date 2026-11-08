@@ -94,6 +94,8 @@ fn read_plan(path: &Path, digest: &str) -> Result<Plan> {
 }
 
 fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
+    prepare_directory(&paths.data, false)?;
+    let _lock = maintenance_lock(&paths.data.join("maintenance.lock"))?;
     let previous = super::super::update::service::registration()?;
     if plan.operation == Operation::Uninstall {
         #[cfg(windows)]
@@ -137,12 +139,27 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         .parent()
         .context("missing system configuration directory")?;
     prepare_directory(system_directory, false)?;
-    let versions = paths.program.join("versions");
-    prepare_directory(&versions, true)?;
-    let executable = paths.executable(&plan.binary_hash)?;
-    prepare_directory(executable.parent().unwrap(), true)?;
-    let directory = executable.parent().context("missing version directory")?;
-    plan.binaries.copy(
+    let executable = paths.executable();
+    let directory = &paths.program;
+    // Stop registrations before replacing any executable. MCP adapters and
+    // foreground instances are scoped to exact managed paths, never just names.
+    #[cfg(windows)]
+    super::super::user_service::uninstall()?;
+    if previous.is_some() {
+        super::super::uninstall_system()?;
+    }
+    super::programs::stop(paths)?;
+    // Keep only a short-lived private snapshot to verify unchanged credentials.
+    // There is no retained release directory, registration backup or rollback.
+    let snapshot = tempfile::Builder::new()
+        .prefix("state-check-")
+        .tempdir_in(&paths.data)?;
+    let backup = snapshot.path();
+    protect(backup, true, false)?;
+    if existing_config.try_exists()? {
+        backup_configuration(existing_config, backup)?;
+    }
+    plan.binaries.replace(
         std::env::current_exe()?
             .parent()
             .context("missing bundle directory")?,
@@ -155,23 +172,7 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
     let system_executable =
         super::super::bundle::beside(&executable, super::super::bundle::PRIVILEGED)?;
 
-    let backups = paths.data.join("backups");
-    prepare_directory(&backups, false)?;
-    let backup = backups.join(uuid::Uuid::new_v4().simple().to_string());
-    prepare_directory(&backup, false)?;
-    private_write(
-        &backup.join("registration.json"),
-        &serde_json::to_vec_pretty(&previous)?,
-    )?;
-    // Stop before copying mutable authorization state; source files are never
-    // removed. Rollback can re-register the old executable/configuration.
-    if previous.is_some() {
-        super::super::uninstall_system()?;
-    }
-    let result = (|| -> Result<()> {
-        if existing_config.try_exists()? {
-            backup_configuration(existing_config, &backup)?;
-        }
+    (|| -> Result<()> {
         if let Some(source) = &source {
             migrate_configuration(source, &paths.config)?;
             // Keeping the legacy copy for recovery must not leave the same
@@ -205,7 +206,7 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
                 protect(&path, false, false)?;
             }
         }
-        verify_preserved_state(&backup, &paths.config)?;
+        verify_preserved_state(backup, &paths.config)?;
         super::super::install_system_at(&system_executable, &paths.config)?;
         super::super::installation::wait_healthy_version(
             config.bind,
@@ -214,37 +215,11 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
             Duration::from_secs(30),
         )?;
         Ok(())
-    })();
-    if let Err(error) = result {
-        let recovery = (|| -> Result<()> {
-            super::super::uninstall_system()?;
-            if source.is_none() && backup.join("config.toml").is_file() {
-                restore_configuration(&backup, &paths.config)?;
-            }
-            if source.is_some() {
-                // These exact files did not exist before this migration. The
-                // unchanged originals and protected backup remain recoverable.
-                for path in state_files(&paths.config) {
-                    if path.try_exists()? {
-                        fs::remove_file(path)?;
-                    }
-                }
-            }
-            if let Some(previous) = &previous {
-                super::super::install_system_at(&previous.executable, &previous.config)?;
-            }
-            Ok(())
-        })();
-        return Err(error).with_context(|| match recovery {
-            Ok(()) => format!("system installation failed; previous registration restored where available; backup: {}", backup.display()),
-            Err(recovery) => format!("system installation and rollback failed ({recovery:#}); backup: {}", backup.display()),
-        });
-    }
+    })().context("installation is incomplete; configuration is preserved; rerun installation to repair (no version rollback)")?;
     #[cfg(windows)]
     {
         // Same-account elevated management can replace an administrator-owned
         // old task, but the new task still uses InteractiveToken/LeastPrivilege.
-        super::super::user_service::uninstall()?;
         let user = Config::load(&plan.user_config)?;
         super::super::installation::wait_listener_closed(user.bind, Duration::from_secs(30))?;
         super::super::user_service::install_at(
@@ -253,6 +228,7 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         )
         .context("system service is ready, but user autostart failed; rerun repair")?;
     }
+    super::programs::remove_legacy(paths)?;
     // Public receipt contains only paths and successful checks, never secret
     // values or password verifiers. The UI can inspect it without elevation.
     let receipt = paths.program.join("installation.json");
@@ -262,7 +238,7 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
             "version": localshelld::VERSION,
             "binary_sha256": plan.binary_hash,
             "system_config": paths.config,
-            "backup": backup,
+            "program_directory": paths.program,
             "previous_state_verified": backup.join("config.toml").is_file(),
             "legacy_files_restricted": source.is_some(),
         }))?,
@@ -320,19 +296,6 @@ fn backup_configuration(config: &Path, backup: &Path) -> Result<()> {
     {
         if source.try_exists()? {
             private_write(&backup.join(name), &read_state(source)?)?;
-        }
-    }
-    Ok(())
-}
-fn restore_configuration(backup: &Path, config: &Path) -> Result<()> {
-    for (target, name) in
-        state_files(config)
-            .iter()
-            .zip(["config.toml", "config.authorization.json", "seal.key"])
-    {
-        let source = backup.join(name);
-        if source.try_exists()? {
-            private_write(target, &read_state(&source)?)?;
         }
     }
     Ok(())
@@ -462,6 +425,23 @@ fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
+}
+
+fn maintenance_lock(path: &Path) -> Result<fs::File> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => regular(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    protect(path, false, false)?;
+    fs2::FileExt::try_lock_exclusive(&file).context("another installation is running")?;
+    Ok(file)
 }
 
 #[cfg(test)]

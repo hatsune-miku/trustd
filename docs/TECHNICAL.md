@@ -73,11 +73,11 @@ Windows 和 macOS 的授权弹窗均为原生界面；维护向导和管理页�
 | macOS   | `/Library/trustd`      | `/Library/Application Support/localshelld/system/config.toml` |
 | Linux   | `/opt/trustd`          | `/etc/localshelld/system/config.toml`                         |
 
-每套程序安装到 `versions/<整套摘要>/`。摘要覆盖五个程序的文件名与内容；提权前暂存、提权后安装均重新校验。程序目录可读、可执行，但普通用户不可写；系统配置和备份仅供系统管理员访问。用户数据位于 `localshelld-user` 平台目录，安装不修改 PATH。
+五个程序直接安装到上述固定目录，文件名保持不变。SHA-256 覆盖整套程序的文件名与内容；提权前暂存、提权后替换均重新校验。程序目录可读、可执行，但普通用户不可写；系统配置仅供系统管理员访问。用户数据位于 `localshelld-user` 平台目录，安装不修改 PATH。
 
-macOS 的完整程序路径是 `/Library/trustd/versions/<整套摘要>/`，用户配置位于 `~/Library/Application Support/dev.localshelld.localshelld-user/config.toml`，维护入口是 `~/Applications/trustd.app`。系统服务由 `/Library/LaunchDaemons/dev.localshelld.plist` 注册。数据目录使用 `localshelld` 命名，与已有安装兼容。
+macOS 的维护程序是 `/Library/trustd/trustd`，用户配置位于 `~/Library/Application Support/dev.localshelld.localshelld-user/config.toml`，维护入口是 `~/Applications/trustd.app`。系统服务由 `/Library/LaunchDaemons/dev.localshelld.plist` 注册。数据目录使用 `localshelld` 命名，与已有安装兼容。
 
-迁移保留旧程序，备份原配置、`config.authorization.json` 和同目录的 `seal.key`。系统安装失败会尝试恢复原注册；用户自启动失败会明确报告，可以重新修复。卸载只停止并注销服务，保留程序、配置和备份。更新和重启会中断执行会话，使相应 daemon 签发的运行期令牌失效。
+安装会停止旧服务及固定目录、旧摘要目录内的运行实例，替换程序后重新注册并检查两端健康状态。配置、`config.authorization.json` 和同目录的 `seal.key` 保留并校验；不保留历史程序，也不执行版本回退，失败后重新运行安装修复。迁移会清理只包含已知程序文件的旧摘要目录，含未知文件或链接的目录保留供手动处理；旧安装已有的数据备份不删除。卸载只停止并注销服务，保留程序和数据。更新和重启会中断执行会话，使相应 daemon 签发的运行期令牌失效；升级后重启 AI 客户端。
 
 `trustd maintenance --no-open` 只打印向导地址。向导链接是临时管理凭据，不应分享；退出向导或 30 分钟后结束监听。
 
@@ -99,7 +99,7 @@ macOS 无头维护使用终端 sudo 提权；应在分配了 TTY 的登录会话
 
 终端向导设置初始主密码、选择 AI 客户端，并在确认后安装或修复两个服务；主密码输入不回显，提权密码由 sudo 自行读取。提示从 `/dev/tty` 读取，因此支持 `curl … | sh -s -- --cli`；通过 SSH 使用时需分配终端，例如 `ssh -t user@host`。没有交互终端时直接报错，不读取管道内容作为确认或密码。
 
-以目标普通用户登录后运行，不要预先加 sudo。向导在修改配置和服务前检查 systemd 用户服务是否可用；不自动启用 linger，也不修改 SSH/PAM 设置。配置备份、迁移、服务健康检查与网页向导共用，已有密码、凭据和配对不会重置。部分客户端配置失败会逐项报告并返回失败状态，不冒充全部成功。
+以目标普通用户登录后运行，不要预先加 sudo。向导在修改配置和服务前检查 systemd 用户服务是否可用；不自动启用 linger，也不修改 SSH/PAM 设置。固定路径安装、迁移、服务健康检查与网页向导共用，已有密码、凭据和配对不会重置。部分客户端配置失败会逐项报告并返回失败状态，不冒充全部成功。
 
 安装完成后，终端向导可生成 SSH 转发命令。通过 SSH 安装时默认进入此步骤，根据 `SSH_CONNECTION` 预填服务器地址和 SSH 端口，账号来自当前 `USER`；这些信息仅作为可修改的建议。NAT、跳板机和 SSH 别名无法从服务端完整推断，应改为平时连接使用的目标。修改目标后，端口留空会沿用客户端 SSH 配置。
 
@@ -141,7 +141,7 @@ Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 
 
 向导的“安装选项”可自动配置 Codex、Claude Code、Claude Desktop、Cursor、Windsurf、VS Code、Gemini CLI 和 Devin Desktop。默认不勾选；只写入所选客户端的用户级配置。VS Code 使用默认本地用户配置，便携版、自定义 profile 和远端配置需手动接入。
 
-配置指向所安装套件目录内的 `trustd-stdio`，使用实际用户 daemon 地址。其他条目和注释保留，已有文件先保存同目录的 `*.trustd-backup-*` 备份；替换已有 `trustd` 条目需另行勾选。各客户端的结果和备份位置分别显示，单个配置失败不影响服务安装。升级后可重新勾选客户端以切换到新版本，旧版本目录不会自动删除。完成后重启客户端。
+配置指向固定程序目录内的 `trustd-stdio`，使用实际用户 daemon 地址。上述客户端已有的旧摘要路径会自动迁移，仅修改 `command`，保留参数、环境变量、超时和注释；固定路径配置在后续升级中不再改写。自定义路径或远端连接不会自动替换，需另行勾选；未纳入向导的客户端首次迁移需手动更新路径。改写已有文件前保存同目录的 `*.trustd-backup-*` 备份，各客户端的结果和备份位置分别显示。单个配置失败不影响服务安装，完成后重启客户端。
 
 配置格式参照 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[VS Code MCP](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) 等官方文档。向导只写配置，不修改客户端的工具审批设置。
 
@@ -279,6 +279,16 @@ bash scripts/build-bundle.sh
 低层 `trustd install` 注册同目录的专用 daemon，不负责移动程序和收紧自定义目录。系统配置需先 `trustd init --config <绝对路径>`；完整安装需从目标登录用户的管理员终端或 sudo 会话执行，初始化用户端后立即启动两端，但不自动配对。`--system-only` 仅安装系统服务，`--user` 仅安装用户自启动，`--user-config` 指定完整安装的用户配置。旧注册路径不匹配时保留原配置并报错，迁移使用向导。
 
 `trustd uninstall` 默认移除两端，`--system-only` 或 `--user` 限定范围。Windows 用户任务可能需要同一账户的管理员权限；SYSTEM/Session 0 不能替代登录用户管理用户任务。卸载不按端口查杀手工启动的进程。
+
+彻底移除时，先退出 AI 客户端，再删除上方列出的程序目录、系统数据目录，以及当前用户的数据目录：
+
+| 平台 | 用户数据目录 |
+| --- | --- |
+| Windows | `%APPDATA%\localshelld\localshelld-user\config` |
+| macOS | `~/Library/Application Support/dev.localshelld.localshelld-user` |
+| Linux | `~/.config/localshelld-user`；设置了 `XDG_CONFIG_HOME` 时使用该目录下的 `localshelld-user` |
+
+系统数据目录为 Windows 的 `%ProgramData%\localshelld`、macOS 的 `/Library/Application Support/localshelld`、Linux 的 `/etc/localshelld`。删除数据会同时删除凭据、通行密钥和配对，重装不会恢复。手动指定过 `--config` 的安装还需自行处理对应路径。最后移除客户端中的 trustd MCP 条目及维护快捷方式。
 
 初始化支持空密码并保留空格，`--password-stdin` 读取一行；`--totp` 先显示 URI/secret，再要求动态码确认。运行 daemon 的程序仅接受自身配置/运行参数，不提供 init、install 或 update。
 
