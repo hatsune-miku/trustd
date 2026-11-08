@@ -137,6 +137,9 @@ fn main() -> Result<()> {
         localshelld_native_process::detach_owned_console()
             .context("failed to detach the user daemon's standalone console")?;
     }
+    if matches!(&command, CommandKind::Maintenance { .. }) && maintenance::relocate()? {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -99,17 +99,24 @@ pub(super) fn configure(
 ) -> Vec<Outcome> {
     agents
         .iter()
-        .filter(|agent| ids.iter().any(|id| id == agent.id))
-        .map(|agent| {
-            let result = write_config(agent, command, endpoint, replace);
-            Outcome {
+        .filter_map(|agent| {
+            let selected = ids.iter().any(|id| id == agent.id);
+            let result = if selected {
+                write_config(agent, command, endpoint, replace)
+            } else {
+                migrate_config(agent, command)
+            };
+            if !selected && matches!(&result, Ok(None)) {
+                return None;
+            }
+            Some(Outcome {
                 name: agent.name.into(),
                 path: agent.path.clone(),
                 backup: result.as_ref().ok().cloned().flatten(),
                 // Parser diagnostics can contain existing secrets. Only display our
                 // outer, deliberately content-free error message.
                 error: result.err().map(|error| error.to_string()),
-            }
+            })
         })
         .collect()
 }
@@ -172,6 +179,9 @@ fn render(
     endpoint: SocketAddr,
     replace: bool,
 ) -> Result<String> {
+    if !replace && let Some(updated) = stable_entry(source, id, command)? {
+        return Ok(updated);
+    }
     let command = command.to_str().context("程序路径不是 UTF-8。")?;
     let args = ["--endpoint", &endpoint.to_string()];
     // Preserve BOM, comments and unrelated settings instead of round-tripping
@@ -246,6 +256,116 @@ fn render(
     Ok(format!("{bom}{result}"))
 }
 
+/// Return None for unrelated/custom entries. A recognized installation only
+/// changes `command`; env, arguments, timeouts, comments and transport settings
+/// remain the user's. Already-stable entries are byte-for-byte no-ops.
+fn stable_entry(source: &str, id: &str, command: &Path) -> Result<Option<String>> {
+    let (bom, source) = source
+        .strip_prefix('\u{feff}')
+        .map_or(("", source), |s| ("\u{feff}", s));
+    let managed = |old: &str| {
+        let paths = localshelld::paths::MachinePaths {
+            program: command.parent().unwrap_or(Path::new("")).to_owned(),
+            data: PathBuf::new(),
+            config: PathBuf::new(),
+        };
+        let old = Path::new(old);
+        paths.owns_program(old)
+            && old.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case(&crate::bundle::filename("trustd-stdio"))
+            })
+    };
+    let command = command.to_str().context("程序路径不是 UTF-8。")?;
+    if id == "codex" {
+        let mut doc = source
+            .parse::<toml_edit::DocumentMut>()
+            .context("TOML 配置格式无效，原文件未改动。")?;
+        let Some(server) = doc
+            .get_mut("mcp_servers")
+            .and_then(|s| s.as_table_like_mut())
+            .and_then(|s| s.get_mut("trustd"))
+            .and_then(|s| s.as_table_like_mut())
+        else {
+            return Ok(None);
+        };
+        if server.contains_key("url") {
+            return Ok(None);
+        }
+        let Some(old) = server.get("command").and_then(|s| s.as_str()) else {
+            return Ok(None);
+        };
+        if !managed(old) {
+            return Ok(None);
+        }
+        if old == command {
+            return Ok(Some(format!("{bom}{source}")));
+        }
+        let item = server.get_mut("command").unwrap();
+        let decor = item.as_value().unwrap().decor().clone();
+        let mut value = toml_edit::Value::from(command);
+        *value.decor_mut() = decor;
+        *item = toml_edit::Item::Value(value);
+        Ok(Some(format!("{bom}{doc}")))
+    } else {
+        let root = json_root(if source.trim().is_empty() {
+            "{}"
+        } else {
+            source
+        })?;
+        let object = root.object_value().context("JSON 配置必须是对象。")?;
+        unique(&object)?;
+        let key = if id == "vscode" {
+            "servers"
+        } else {
+            "mcpServers"
+        };
+        let Some(servers) = object.object_value(key) else {
+            return Ok(None);
+        };
+        unique(&servers)?;
+        let Some(server) = servers.object_value("trustd") else {
+            return Ok(None);
+        };
+        unique(&server)?;
+        if server.get("url").is_some() {
+            return Ok(None);
+        }
+        let Some(property) = server.get("command") else {
+            return Ok(None);
+        };
+        let Some(old) = property.value().and_then(|v| v.as_string_lit()) else {
+            return Ok(None);
+        };
+        let old = old.decoded_value().context("程序路径无效。")?;
+        if !managed(&old) {
+            return Ok(None);
+        }
+        if old == command {
+            return Ok(Some(format!("{bom}{source}")));
+        }
+        property.set_value(CstInputValue::String(command.into()));
+        Ok(Some(format!("{bom}{root}")))
+    }
+}
+
+fn migrate_config(agent: &Agent, command: &Path) -> Result<Option<PathBuf>> {
+    let original = read(&agent.path)?;
+    let Some(source) = original.as_ref() else {
+        return Ok(None);
+    };
+    // Do not parse or touch unrelated unselected clients. The actual decision
+    // below is based on the parsed exact command path, not this quick filter.
+    let candidate = source.to_ascii_lowercase();
+    if !candidate.contains("versions") || !candidate.contains("trustd-stdio") {
+        return Ok(None);
+    }
+    let Some(updated) = stable_entry(source, agent.id, command)? else {
+        return Ok(None);
+    };
+    save_config(agent, original, Zeroizing::new(updated))
+}
+
 fn write_config(
     agent: &Agent,
     command: &Path,
@@ -264,6 +384,14 @@ fn write_config(
         endpoint,
         replace,
     )?);
+    save_config(agent, original, updated)
+}
+
+fn save_config(
+    agent: &Agent,
+    original: Option<Zeroizing<String>>,
+    updated: Zeroizing<String>,
+) -> Result<Option<PathBuf>> {
     if original
         .as_ref()
         .is_some_and(|s| s.as_str() == updated.as_str())

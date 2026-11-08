@@ -1,4 +1,4 @@
-//! A release is an indivisible set of role-specific programs, never one mutable exe.
+//! A release is an integrity-checked set of role-specific programs.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -150,6 +150,38 @@ impl Manifest {
         }
         Ok(())
     }
+
+    /// Call only after stopping installed instances. Stage the ENTIRE verified
+    /// bundle before replacing any file; each rename is atomic, not the bundle.
+    /// A failed install is repaired by rerunning it, never by starting a mix of
+    /// old and new programs or restoring a previous registration.
+    pub fn replace(&self, source: &Path, target: &Path) -> Result<()> {
+        self.validate()?;
+        let stage = tempfile::Builder::new()
+            .prefix(".install-")
+            .tempdir_in(target)?;
+        self.copy(source, stage.path())?;
+        self.verify(stage.path())?;
+        // Validate all existing targets before making the first replacement.
+        for name in self.0.keys() {
+            match fs::symlink_metadata(target.join(name)) {
+                Ok(_) => regular(&target.join(name))?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for name in self.0.keys() {
+            let staged = stage.path().join(name);
+            tempfile::TempPath::try_from_path(staged)?
+                .persist(target.join(name))
+                .with_context(|| {
+                    format!(
+                        "could not replace {name}; close installed instances and rerun installation"
+                    )
+                })?;
+        }
+        self.verify(target)
+    }
 }
 
 fn regular(path: &Path) -> Result<()> {
@@ -214,5 +246,65 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         assert!(manifest.copy(source.path(), target.path()).is_err());
         assert!(fs::read_dir(target.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn replacement_is_fixed_path_and_validates_all_source_bytes_first() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        for name in names(cfg!(windows)) {
+            fs::write(source.path().join(&name), b"new").unwrap();
+            fs::write(target.path().join(&name), b"old").unwrap();
+        }
+        let manifest = Manifest::read(source.path()).unwrap();
+        let last = manifest.0.keys().next_back().unwrap();
+        fs::write(source.path().join(last), b"tampered").unwrap();
+        assert!(manifest.replace(source.path(), target.path()).is_err());
+        for name in manifest.0.keys() {
+            assert_eq!(fs::read(target.path().join(name)).unwrap(), b"old");
+        }
+        fs::write(source.path().join(last), b"new").unwrap();
+        manifest.replace(source.path(), target.path()).unwrap();
+        manifest.replace(source.path(), target.path()).unwrap();
+        manifest.verify(target.path()).unwrap();
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 5);
+    }
+
+    #[test]
+    fn invalid_destination_is_rejected_before_replacing_any_program() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        for name in names(cfg!(windows)) {
+            fs::write(source.path().join(&name), b"new").unwrap();
+        }
+        let manifest = Manifest::read(source.path()).unwrap();
+        let last = manifest.0.keys().next_back().unwrap();
+        for name in manifest.0.keys() {
+            if name == last {
+                fs::create_dir(target.path().join(name)).unwrap();
+            } else {
+                fs::write(target.path().join(name), b"old").unwrap();
+            }
+        }
+        assert!(manifest.replace(source.path(), target.path()).is_err());
+        for name in manifest.0.keys().filter(|name| *name != last) {
+            assert_eq!(fs::read(target.path().join(name)).unwrap(), b"old");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_never_follows_an_existing_program_symlink() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), b"outside").unwrap();
+        for name in names(cfg!(windows)) {
+            fs::write(source.path().join(name), b"new").unwrap();
+        }
+        let manifest = Manifest::read(source.path()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), target.path().join(filename(USER))).unwrap();
+        assert!(manifest.replace(source.path(), target.path()).is_err());
+        assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
     }
 }

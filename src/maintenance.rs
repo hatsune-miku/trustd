@@ -3,6 +3,7 @@
 mod agents;
 mod apply;
 mod platform;
+mod programs;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod terminal;
 
@@ -35,6 +36,7 @@ use std::{
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub(crate) use apply::apply;
+pub(crate) use programs::relocate;
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -358,6 +360,9 @@ fn execute(
     elevation: platform::Elevation,
 ) -> Result<Vec<agents::Outcome>> {
     elevation.check()?;
+    // Hold across privileged apply AND user registration/configuration. The
+    // machine helper also locks its own state; neither lock file is unlinked.
+    let _lock = user_maintenance_lock(&state.user_config)?;
     if operation == Operation::Install {
         // Hash every role, but never load the desktop executable on a headless host.
         for name in state.binaries.0.keys() {
@@ -439,6 +444,8 @@ fn execute(
     std::fs::write(&path, &*bytes)?;
     platform::private(&path, false)?;
     let digest = format!("{:x}", Sha256::digest(&*bytes));
+    #[cfg(unix)]
+    super::user_service::uninstall()?;
     set_stage(state, "elevation");
     elevation.apply(&helper, &path, &digest).with_context(|| {
         format!(
@@ -448,12 +455,11 @@ fn execute(
     })?;
     if operation == Operation::Install {
         set_stage(state, "user_service");
-        let executable = state.paths.executable(&state.binary_hash)?;
+        let executable = state.paths.executable();
         let user = Config::load(&state.user_config)?;
         let user_executable = super::bundle::beside(&executable, super::user_service::role(&user))?;
         #[cfg(not(windows))]
         {
-            super::user_service::uninstall()?;
             super::installation::wait_listener_closed(
                 Config::load(&state.user_config)?.bind,
                 Duration::from_secs(30),
@@ -486,11 +492,51 @@ fn execute(
             user.bind,
             replace_agents,
         ));
-    } else {
-        #[cfg(not(windows))]
-        super::user_service::uninstall()?;
     }
     Ok(vec![])
+}
+
+fn user_maintenance_lock(config: &Path) -> Result<std::fs::File> {
+    let directory = config
+        .parent()
+        .context("missing user configuration directory")?;
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join("maintenance.lock");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "invalid maintenance lock"
+            );
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                ensure!(
+                    metadata.file_attributes() & 0x400 == 0,
+                    "invalid maintenance lock"
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                ensure!(
+                    metadata.uid() == rustix::process::getuid().as_raw() && metadata.nlink() == 1,
+                    "invalid maintenance lock owner/links"
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    platform::private(&path, false)?;
+    fs2::FileExt::try_lock_exclusive(&file).context("另一个安装或卸载任务正在运行。")?;
+    Ok(file)
 }
 
 fn set_stage(state: &Inner, stage: &str) {
