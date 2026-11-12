@@ -72,6 +72,43 @@ fn state(choice: Choice, remember: bool) -> (AppState, Arc<AtomicUsize>) {
     (state, count)
 }
 
+/// Run `check` with the thread ID of a live, non-main thread of this process.
+#[cfg(target_os = "linux")]
+fn with_live_thread(check: impl FnOnce(u32)) {
+    let (sent, received) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let worker = std::thread::spawn(move || {
+        // /proc/thread-self resolves to <pid>/task/<tid> for the calling thread.
+        let link = std::fs::read_link("/proc/thread-self").unwrap();
+        let tid = link.file_name().unwrap().to_str().unwrap().parse::<u32>();
+        sent.send(tid.unwrap()).unwrap();
+        let _ = wait.recv();
+    });
+    let tid = received.recv().unwrap();
+    assert_ne!(tid, std::process::id());
+    check(tid);
+    drop(release);
+    worker.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshots_list_processes_without_their_threads() {
+    // sysinfo reports every Linux thread as a process unless tasks are
+    // disabled, which made each agent row show one "PID" per thread.
+    with_live_thread(|tid| {
+        let system = snapshot();
+        assert!(system.process(Pid::from_u32(std::process::id())).is_some());
+        assert!(system.process(Pid::from_u32(tid)).is_none());
+        assert!(
+            system
+                .processes()
+                .values()
+                .all(|p| p.thread_kind() != Some(sysinfo::ThreadKind::Userland))
+        );
+    });
+}
+
 #[test]
 fn exact_names_and_full_paths_never_collapse_same_name_programs() {
     assert!(recognized("Codex.exe"));

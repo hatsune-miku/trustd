@@ -117,11 +117,15 @@ exit "$result"
     }
 }
 
+fn process_kind() -> ProcessRefreshKind {
+    // sysinfo otherwise lists every Linux thread as a separate process.
+    ProcessRefreshKind::nothing()
+        .with_exe(UpdateKind::Always)
+        .without_tasks()
+}
+
 fn snapshot() -> System {
-    System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_processes(ProcessRefreshKind::nothing().with_exe(UpdateKind::Always)),
-    )
+    System::new_with_specifics(RefreshKind::nothing().with_processes(process_kind()))
 }
 
 pub(super) fn stop(paths: &MachinePaths) -> Result<()> {
@@ -151,7 +155,7 @@ pub(super) fn stop(paths: &MachinePaths) -> Result<()> {
             current.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[process.pid()]),
                 true,
-                ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+                process_kind(),
             );
             let Some(confirmed) = current.process(process.pid()) else {
                 continue;
@@ -288,6 +292,31 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(!temp.path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_scans_processes_without_their_threads() {
+        let (sent, received) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let link = fs::read_link("/proc/thread-self").unwrap();
+            let tid = link.file_name().unwrap().to_str().unwrap().parse::<u32>();
+            sent.send(tid.unwrap()).unwrap();
+            let _ = wait.recv();
+        });
+        let tid = received.recv().unwrap();
+        // One signal per process: a thread listed as its own process would
+        // make stop() signal the same installed executable once per thread.
+        let system = snapshot();
+        assert!(system.process(sysinfo::Pid::from_u32(tid)).is_none());
+        assert!(
+            system
+                .process(sysinfo::Pid::from_u32(std::process::id()))
+                .is_some()
+        );
+        drop(release);
+        worker.join().unwrap();
     }
 
     #[test]

@@ -75,11 +75,13 @@ fn recognized(name: &str) -> bool {
 
 fn snapshot() -> System {
     // Deliberately do not read process environments or command-line arguments.
+    // sysinfo otherwise lists every Linux thread as a separate process.
     System::new_with_specifics(
         RefreshKind::nothing().with_processes(
             ProcessRefreshKind::nothing()
                 .with_exe(UpdateKind::Always)
-                .with_user(UpdateKind::Always),
+                .with_user(UpdateKind::Always)
+                .without_tasks(),
         ),
     )
 }
