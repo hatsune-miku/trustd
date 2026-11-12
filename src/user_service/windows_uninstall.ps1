@@ -16,7 +16,9 @@ function Remove-LocalshelldUserTask($folder, [string]$name, [string]$sid, [int]$
 
     # Never manage another user's task just because its name resembles ours.
     $definition = $task.Definition
-    $owner = $definition.Principal.UserId
+    # COM can shorten a local account to an unresolvable bare name. The saved
+    # definition retains the SID or qualified account used for registration.
+    $owner = ([xml]$definition.XmlText).Task.Principals.Principal.UserId
     if (-not $owner.StartsWith('S-1-')) {
         $owner = ([Security.Principal.NTAccount]$owner).Translate([Security.Principal.SecurityIdentifier]).Value
     }

@@ -221,6 +221,14 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
 
 fn snapshot(state: &Inner) -> Result<Value> {
     let registration = super::update::service::registration()?;
+    // A non-elevated wizard may be unable to inspect protected system state.
+    // In that case it can still collect a password for a missing configuration.
+    let system_initialized = apply::configuration_source(
+        &state.paths,
+        registration.as_ref().map(|value| value.config.as_path()),
+    )
+    .map(|source| source.is_some())
+    .ok();
     let user = if state.user_config.try_exists()? {
         Some(Config::load(&state.user_config)?)
     } else {
@@ -236,6 +244,7 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "registered_executable": registration.as_ref().map(|value| &value.executable),
         "registered_config": registration.as_ref().map(|value| &value.config),
         "system_running": registration.as_ref().is_some_and(|value| value.was_running),
+        "system_initialized": system_initialized,
         "user_initialized": user.is_some(), "shell": shell, "shell_available": shell.is_file(),
         "elevation_available": platform::elevation_available(),
         "user_url": format!("http://localhost:{}/", user.as_ref().map_or(localshelld::config::USER_PORT, |value| value.bind.port())),

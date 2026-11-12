@@ -77,7 +77,7 @@ fn collect(
     catalog: &[agents::Agent],
 ) -> Result<Option<Options>> {
     let password = if needs_password {
-        prompts.say("设置初始主密码；已有配置的密码保持不变。")?;
+        prompts.say("设置用于补建缺失配置的主密码；安装时会优先恢复有效备份。")?;
         loop {
             let first = prompts.password("主密码：")?;
             let second = prompts.password("再次输入：")?;
@@ -217,7 +217,12 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     } else {
         "用户守护进程：桌面模式"
     })?;
-    let registered = super::super::update::service::registration()?.is_some();
+    let registration = super::super::update::service::registration()?;
+    let system_initialized = super::apply::configuration_source(
+        &state.paths,
+        registration.as_ref().map(|value| value.config.as_path()),
+    )
+    .is_ok_and(|source| source.is_some());
     terminal.say(&format!(
         "程序目录：{}\n系统配置：{}\n用户配置：{}",
         state.paths.program.display(),
@@ -226,7 +231,7 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     ))?;
     let Some(options) = collect(
         &mut terminal,
-        !registered || !state.user_config.try_exists()?,
+        !system_initialized || !state.user_config.try_exists()?,
         &state.agents,
     )?
     else {
@@ -263,7 +268,7 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
         user.bind.port(),
         user.privileged_daemon.port()
     ))?;
-    terminal.say("已有配对保持不变，首次使用需在管理页完成配对。")?;
+    terminal.say("首次安装或重新初始化后需在管理页完成配对，已有配对可继续使用。")?;
     // This optional, read-only step runs after successful service installation.
     // EOF here must not report that the already completed installation failed.
     if let Err(error) = ssh::guide(

@@ -26,6 +26,7 @@ type Info = {
   registered_executable: string | null
   registered_config: string | null
   system_running: boolean
+  system_initialized: boolean | null
   user_initialized: boolean
   shell: string
   shell_available: boolean
@@ -58,7 +59,7 @@ export function Maintenance({ token }: { token: string }) {
   const [selectedAgents, setSelectedAgents] = useState<string[]>([])
   const [replaceAgents, setReplaceAgents] = useState(false)
   const busy = sending || !!info?.job.running
-  const needsPassword = !!info && (!info.registered || !info.user_initialized)
+  const needsPassword = !!info && (info.system_initialized !== true || !info.user_initialized)
 
   async function refresh(signal?: AbortSignal) {
     try {
@@ -193,6 +194,16 @@ export function Maintenance({ token }: { token: string }) {
                     </dd>
                   </div>
                   <div className="maintenance-check">
+                    <dt className="maintenance-check-label">系统配置</dt>
+                    <dd className="maintenance-check-value">
+                      {info.system_initialized === null
+                        ? '等待系统授权后检查'
+                        : info.system_initialized
+                          ? '已找到配置或备份'
+                          : '缺失，可重新初始化'}
+                    </dd>
+                  </div>
+                  <div className="maintenance-check">
                     <dt className="maintenance-check-label">用户配置</dt>
                     <dd className="maintenance-check-value">{info.user_initialized ? '已初始化' : '待初始化'}</dd>
                   </div>
@@ -218,9 +229,11 @@ export function Maintenance({ token }: { token: string }) {
                     <dd className="maintenance-path-value">{info.user_config}</dd>
                   </div>
                 </dl>
-                {info.registered_config && info.registered_config !== info.system_config && (
-                  <p className="maintenance-note">旧位置的系统配置会迁移并备份。已有密码、配对和凭据保持不变。</p>
-                )}
+                {info.system_initialized === true &&
+                  info.registered_config &&
+                  info.registered_config !== info.system_config && (
+                    <p className="maintenance-note">旧位置的系统配置会迁移并备份。已有密码、配对和凭据保持不变。</p>
+                  )}
                 {!info.shell_available && (
                   <p className="maintenance-note">
                     请先安装{' '}
@@ -261,7 +274,9 @@ export function Maintenance({ token }: { token: string }) {
                 <h2 className="section-title">{needsPassword ? '初始化管理密码' : '修复或更新安装'}</h2>
                 {needsPassword ? (
                   <>
-                    <p className="description">此密码用于初始化尚未配置的管理端。已有配置不会重置。</p>
+                    <p className="description">
+                      提权后会优先恢复有效备份；没有备份时使用此密码补建缺失配置。已有配置使用原密码。
+                    </p>
                     <Field htmlFor="setup-password" label="主密码">
                       <TextBox
                         id="setup-password"
@@ -419,7 +434,7 @@ export function Maintenance({ token }: { token: string }) {
                       </a>
                     </div>
                     <p className="maintenance-note">
-                      首次安装：在用户管理的桌面授权中生成配对码，再到系统管理完成配对。已有配对无需重复设置。
+                      首次安装或重新初始化后，在用户管理的桌面授权中生成配对码，再到系统管理完成配对。已有配对可继续使用。
                     </p>
                     <p className="maintenance-note">
                       {info.platform === 'windows'
