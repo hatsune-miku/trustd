@@ -63,4 +63,8 @@ Desktop.ini
 # Keep Cargo.lock committed: localshelld is an application, not a library.
 !Cargo.lock
 
-ARCH.md
+# Local planning and agent notes
+/ARCH.md
+/.learnings/
+/docs/SECURITY-BACKLOG.md
+/docs/WINDOWS-DRIVER-SIGNING.md
