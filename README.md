@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 ![trustd：AI 发起请求，用户授权，程序以指定身份执行本机命令](docs/images/trustd-overview.svg)
 
 trustd (音同 trusted) 提供一种方式，让用户能简单安全地向 AI 放权：

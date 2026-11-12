@@ -4,7 +4,7 @@ use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -117,7 +117,7 @@ pub async fn authorize(
     owner(state, headers).await.map(|_| ())
 }
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/v1/admin/login", post(login))
         .route("/v1/admin/logout", post(logout))
@@ -154,6 +154,52 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/admin/pairing/remove", post(pairing_remove))
         .route("/v1/admin/agents", get(agents))
         .route("/v1/admin/agents/policy", post(agent_policy))
+        .route("/v1/admin/logs", get(logs))
+        .route_layer(axum::middleware::from_fn_with_state(state, audit_request))
+}
+
+async fn audit_request(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path().to_owned();
+    let method = request.method().to_string();
+    let response = next.run(request).await;
+    state
+        .audit(
+            "management.request",
+            json!({"path":path,"method":method,"status":response.status().as_u16()}),
+        )
+        .await;
+    response
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    kind: crate::logs::Kind,
+    before: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LogQuery>,
+) -> Result<Json<Value>, ApiError> {
+    owner(&state, &headers).await?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "log page limit must be between 1 and 100",
+        ));
+    }
+    state
+        .logs
+        .page(query.kind, query.before, limit)
+        .await
+        .map(Json)
+        .map_err(|_| ApiError::internal("could not read local log"))
 }
 
 async fn secrets(

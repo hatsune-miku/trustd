@@ -227,7 +227,9 @@ Agent 通过 `enter_interactive` 请求授权，接受或拒绝的结果不包�
 
 执行身份必填，不会自动提权或换身份重试。Windows 管理员身份需要已配对用户 daemon 和该用户可用的 linked administrator token；SYSTEM 不会冒充管理员用户。用户 daemon 拒绝以 root/管理员运行；`trustd-system` 拒绝普通管理员身份。
 
-每种身份分别保留变量、函数、目录与环境。Windows 使用 `pwsh -NoProfile -NonInteractive`，Unix 使用 `/bin/bash --noprofile --norc`。命令交给原生 shell 解析，支持多行、管道、Unicode 和通配符。
+授权入口的 `sudo` 默认为 `false`，与凭据选择独立；需要提权时设置 `sudo:true`。每种身份分别保留变量、函数、目录与环境，并加载对应用户的 shell profile。`enter_interactive.cwd` 可指定初始绝对目录，空值默认使用各身份的用户目录。命令交给原生 shell 解析，支持多行、管道、Unicode 和通配符。
+
+各 daemon 的配置目录保存 `command.log` 命令日志和 `audit.log` 审计日志，均为 JSON Lines。命令记录包含源码、身份和执行结果元数据，已知的 handle 和注入凭据值使用占位符。登录管理页后可在“日志”中查看及翻页。
 
 命令默认不限时，可显式提供正整数 `timeout_seconds`；超时只中断本次执行及其新建子进程，返回部分输出，保留会话、变量、函数、目录和环境。超时前已经发生的操作不会回滚。显式取消仍关闭整个会话。若 shell 无法响应中断并恢复协议，会返回 `session_ended_reason: "shell_unresponsive"`，不能继续复用该会话。普通命令的非零退出码不会关闭会话。
 

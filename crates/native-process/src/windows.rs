@@ -562,8 +562,10 @@ fn spawn_with_token(
         env.extend(wide(format!("{key}={value}"))?);
     }
     env.push(0);
-    let cwd = administrator
-        .map(|context| wide(&context.cwd))
+    let cwd = overrides
+        .get("LOCALSHELLD_INITIAL_CWD")
+        .or_else(|| administrator.map(|context| &context.cwd))
+        .map(wide)
         .transpose()?;
     let cmd = std::iter::once(executable)
         .chain(arguments.iter().copied())

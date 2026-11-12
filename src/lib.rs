@@ -10,6 +10,7 @@ pub mod consent;
 pub mod daemon;
 pub mod desktop;
 pub mod execution;
+pub(crate) mod logs;
 pub(crate) mod management;
 pub mod mcp;
 mod mcp_text;

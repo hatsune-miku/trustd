@@ -7,7 +7,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::{
-    execution::{PrivilegeLevel, RunOptions},
+    execution::{EnterOptions, PrivilegeLevel, RunOptions},
     mcp_text::{INVALID_TIMEOUT, SERIALIZATION_FAILED, missing_string_argument, tool_definitions},
     server::{ApiError, AppState},
 };
@@ -52,6 +52,8 @@ impl Operation {
                 "request_reason",
                 "confirm_text",
                 "secret_keys",
+                "sudo",
+                "cwd",
             ],
             // The platform-specific validator rejects the other platform's
             // identity argument with an explicit error, even if both are sent.
@@ -122,6 +124,57 @@ pub(crate) async fn execute_from(
     arguments: Value,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<Value, ApiError> {
+    let event = match operation {
+        Operation::EnterInteractive => "authorization",
+        Operation::SecretsList => "credential.search",
+        Operation::SecretsGet => "credential.read",
+        Operation::Destroy => "session.close",
+        Operation::Run => return execute_inner(state, operation, arguments, peer).await,
+    };
+    let mut record = json!({});
+    if let Some(key) = arguments.get("key").and_then(Value::as_str) {
+        record["key"] = json!(key);
+    }
+    if matches!(operation, Operation::EnterInteractive) {
+        record["agent_name"] = json!(arguments.get("agent_name").and_then(Value::as_str));
+        record["request_reason"] = json!(arguments.get("request_reason").and_then(Value::as_str));
+        record["secret_keys"] = json!(secret_keys_arg(&arguments).unwrap_or_default());
+        record["cwd"] = json!(arguments.get("cwd").and_then(Value::as_str));
+        record["sudo"] = json!(
+            arguments
+                .get("sudo")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        );
+        state.audit("authorization.requested", record.clone()).await;
+    }
+    let result = execute_inner(state, operation, arguments, peer).await;
+    record["success"] = json!(result.as_ref().is_ok_and(|value| {
+        !matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("denied" | "timed_out")
+        )
+    }));
+    record["status"] = match &result {
+        Ok(value) => value
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| json!("completed")),
+        Err(error) => json!(error.status_code()),
+    };
+    if let Ok(value) = &result {
+        record["sudo_available"] = value.get("sudo_available").cloned().unwrap_or(Value::Null);
+    }
+    state.audit(event, record).await;
+    result
+}
+
+async fn execute_inner(
+    state: &AppState,
+    operation: Operation,
+    arguments: Value,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Value, ApiError> {
     let object = arguments
         .as_object()
         .ok_or_else(|| ApiError::bad_request("arguments must be a JSON object"))?;
@@ -158,6 +211,7 @@ pub(crate) async fn execute_from(
                     string_arg(&arguments, "agent_name")?,
                     string_arg(&arguments, "request_reason")?,
                     &secret_keys_arg(&arguments)?,
+                    enter_options_arg(&arguments)?,
                     state.caller_identity(peer).await,
                 )
                 .await
@@ -226,6 +280,20 @@ pub(crate) fn secret_keys_arg(arguments: &Value) -> Result<Vec<String>, ApiError
         )
     })?;
     crate::secrets::normalize_keys(&keys)
+}
+
+pub(crate) fn enter_options_arg(arguments: &Value) -> Result<EnterOptions, ApiError> {
+    let sudo = match arguments.get("sudo") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(ApiError::bad_request("sudo must be a boolean")),
+    };
+    let cwd = match arguments.get("cwd") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => return Err(ApiError::bad_request("cwd must be a string or null")),
+    };
+    EnterOptions { sudo, cwd }.validate()
 }
 
 pub(crate) fn privilege_arg(arguments: &Value) -> Result<PrivilegeLevel, ApiError> {

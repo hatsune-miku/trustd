@@ -11,6 +11,10 @@ async fn enter_identified(state: &AppState, reason: &str, keys: &[String]) -> se
             "agent",
             reason,
             keys,
+            EnterOptions {
+                sudo: true,
+                cwd: None,
+            },
             Some(crate::agents::tests::current_identity()),
         )
         .await
@@ -266,6 +270,52 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
         .await
         .unwrap();
     let attached = user.attach_remote(&entered.handle).await.unwrap();
+    let credential_token = root.auth.lock().await.issue_token(None).unwrap().0;
+    let directory = tempfile::tempdir().unwrap();
+    let credentials_only = root
+        .enter_with_options(
+            &credential_token,
+            &["TEST_SHARED_SECRET".into()],
+            EnterOptions {
+                sudo: false,
+                cwd: Some(directory.path().to_string_lossy().into_owned()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!credentials_only.sudo_available);
+    assert!(
+        root.sessions.lock().await.by_handle[&credentials_only.handle]
+            .shell
+            .identity()
+            .is_null()
+    );
+    let local = user.attach_remote(&credentials_only.handle).await.unwrap();
+    assert!(!local.sudo_available);
+    for (state, handle) in [(&root, &credentials_only.handle), (&user, &local.handle)] {
+        assert_eq!(
+            state
+                .run(handle, "echo forbidden", true, None)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        let command = if cfg!(windows) {
+            "[Console]::Write($env:TEST_SHARED_SECRET)"
+        } else {
+            "printf '%s' \"$TEST_SHARED_SECRET\""
+        };
+        let result = state.run(handle, command, false, None).await.unwrap();
+        assert_eq!(result.stdout, "rotated-after-enter");
+        assert_eq!(
+            std::fs::canonicalize(result.cwd.unwrap()).unwrap(),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+    root.destroy_session(&credentials_only.handle)
+        .await
+        .unwrap();
     for (state, handle) in [(&root, &entered.handle), (&user, &attached.handle)] {
         assert_eq!(
             state

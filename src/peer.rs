@@ -25,6 +25,10 @@ pub(crate) struct Entered {
     pub identities: std::collections::BTreeMap<String, Value>,
     #[serde(default)]
     pub secret_keys: Vec<String>,
+    #[serde(default)]
+    pub sudo_available: bool,
+    #[serde(default)]
+    pub initial_cwd: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +38,10 @@ pub(crate) struct Inspection {
     pub identities: std::collections::BTreeMap<String, Value>,
     #[serde(default)]
     pub secret_keys: Vec<String>,
+    #[serde(default)]
+    pub sudo_available: bool,
+    #[serde(default)]
+    pub initial_cwd: Option<String>,
 }
 
 impl Peer {

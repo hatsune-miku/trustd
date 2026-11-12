@@ -47,6 +47,30 @@ pub struct RunOptions {
     pub timeout_seconds: Option<u64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterOptions {
+    #[serde(default)]
+    pub sudo: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+impl EnterOptions {
+    pub(crate) fn validate(mut self) -> Result<Self, crate::server::ApiError> {
+        self.cwd = self.cwd.filter(|value| !value.is_empty());
+        if self
+            .cwd
+            .as_ref()
+            .is_some_and(|value| value.contains('\0') || !std::path::Path::new(value).is_absolute())
+        {
+            return Err(crate::server::ApiError::bad_request(
+                "cwd must be an absolute path, empty, or null",
+            ));
+        }
+        Ok(self)
+    }
+}
+
 pub fn current_identity() -> std::io::Result<Value> {
     #[cfg(windows)]
     {

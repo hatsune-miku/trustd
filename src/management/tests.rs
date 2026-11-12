@@ -20,6 +20,54 @@ fn stored_state(directory: &std::path::Path) -> AppState {
 }
 
 #[tokio::test]
+async fn logs_require_management_login_and_preserve_command_results_without_bearers_or_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = stored_state(directory.path());
+    let token = state.auth.lock().await.issue_token(None).unwrap().0;
+    const VALUE: &str = "fixture-log-credential-value";
+    state.put_secret("TEST_LOG_SECRET", VALUE).await.unwrap();
+    let entered = state
+        .enter_with_secrets(&token, &["TEST_LOG_SECRET".into()])
+        .await
+        .unwrap();
+    state
+        .run(&entered.handle, &format!("echo {VALUE}"), true, None)
+        .await
+        .unwrap();
+    let app = router(state.clone());
+    for session in [None, Some(token.as_str())] {
+        assert_eq!(
+            call(&app, "/v1/admin/logs?kind=command", None, session)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let session = login(&app, "test").await;
+    let (status, page) = call(&app, "/v1/admin/logs?kind=command", None, Some(&session)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["entries"][0]["event"], "command.finished");
+    assert_eq!(page["entries"][0]["success"], true);
+    assert_eq!(
+        page["entries"][0]["command"],
+        "echo [credential:TEST_LOG_SECRET]"
+    );
+    assert!(page["entries"][0]["identity"]["user"].is_string());
+    for name in ["command.log", "audit.log"] {
+        let text = std::fs::read_to_string(directory.path().join(name)).unwrap();
+        for value in [
+            VALUE,
+            token.as_str(),
+            entered.handle.as_str(),
+            session.as_str(),
+        ] {
+            assert!(!text.contains(value), "sensitive value in {name}");
+        }
+    }
+    state.shutdown().await;
+}
+
+#[tokio::test]
 async fn telegram_settings_accept_human_management_sessions_not_execution_tokens() {
     let directory = tempfile::tempdir().unwrap();
     let state = stored_state(directory.path());

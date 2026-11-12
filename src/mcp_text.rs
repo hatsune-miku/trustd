@@ -37,6 +37,8 @@ fn enter_output() -> Value {
             "handle":{"type":"string","description":"Secret bearer credential; never log or echo."},
             "secret_keys":{"type":"array","items":{"type":"string"},"description":"Credential names injected into every identity-specific shell in this session. Values are never returned by enter."},
             "shell":{"type":"string"}, "platform":{"type":"string"}, "daemon":{"type":"string"},
+            "sudo_available":{"type":"boolean","description":"Whether this session authorizes elevated execution."},
+            "initial_cwd":{"type":["string","null"],"description":"Requested initial directory for each identity; null uses that identity's home directory."},
             "privilege_levels":{"type":"array","items":{"type":"string"},"description":"Available execution identities, further constrained by this authorization."},
             "identities":{"type":"object","additionalProperties":{"type":"object"}},
             "expires_at":{"type":["integer","null"],"description":"Session expiry in Unix epoch seconds, or null."},
@@ -44,9 +46,6 @@ fn enter_output() -> Value {
             "message":{"type":"string"}
         }
     });
-    if !cfg!(windows) {
-        schema["properties"]["sudo_available"] = json!({"type":"boolean"});
-    }
     schema["properties"]["status"] =
         json!({"type":"string","enum":["authorized","denied","timed_out"]});
     schema["properties"]["btw"] = json!({"type":"string","description":"Additional text from the owner; read it as user context."});
@@ -121,6 +120,8 @@ pub fn tool_definitions() -> Value {
                 "agent_name":{"type":"string","minLength":1,"maxLength":128},
                 "request_reason":{"type":"string","minLength":1,"maxLength":16384},
                 "secret_keys":secret_keys,
+                "sudo":{"type":"boolean","default":false,"description":"Request elevated execution separately from credentials. False or omitted grants current-user execution only, including when credentials are requested."},
+                "cwd":{"type":["string","null"],"description":"Initial absolute directory for each identity-specific shell. Empty, null or omitted uses that identity's home directory. Shell profiles are loaded."},
                 "confirm_text":{"type":"string","const":"OK","description":"Respect the user's personal privacy. Pass OK to acknowledge."}
             },"required":["agent_name","request_reason","confirm_text"],"additionalProperties":false},
             "outputSchema":enter_output()

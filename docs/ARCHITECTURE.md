@@ -32,9 +32,9 @@ Agent 宿主通过 stdio 连接接入进程，接入进程使用 loopback HTTP A
 
 MCP 入口推荐用户 daemon，工具名为 `secrets_list`、`secrets_get`、`enter_interactive`、`run`、`destroy`。Windows `run.privilege_level` 必填，三选一：`current-user`、`as-administrator`、`nt-authority/system`；Linux/macOS 保持必填 boolean `sudo`。普通用户执行路由至用户 daemon，高权限执行须持有系统授权。每种身份拥有独立的 shell 状态，不复制已有 shell 的变量或目录，不自动回退。
 
-Windows 的管理员后端使用配对用户进程的 linked elevated token，校验进程创建时间、SID、登录 session 及令牌属性，保证管理员与当前用户是同一个账户；不以 SYSTEM 修改环境变量冒充。通过配对加密桥取得用户环境和 cwd，保留用户 USERPROFILE、真实 HKCU 和用户 PATH。为重定向管道继承，在 broker 的非交互 session 内运行，不保证交互桌面或映射网络驱动器。PowerShell 仍使用 `-NoProfile`，不自动执行 profile 脚本。无 linked token 或 OS 权限不足时明确失败。SYSTEM 选项只允许真实 LocalSystem。
+Windows 的管理员后端使用配对用户进程的 linked elevated token，校验进程创建时间、SID、登录 session 及令牌属性，保证管理员与当前用户是同一个账户；不以 SYSTEM 修改环境变量冒充。通过配对加密桥取得用户环境和 cwd，保留用户 USERPROFILE、真实 HKCU 和用户 PATH。为重定向管道继承，在 broker 的非交互 session 内运行，不保证交互桌面或映射网络驱动器。PowerShell 在持久 runspace 中按标准顺序加载 profile 脚本。无 linked token 或 OS 权限不足时明确失败。SYSTEM 选项只允许真实 LocalSystem。
 
-未配对的用户 daemon 可独立授权普通命令。已配对的用户入口先向系统端请求授权，再创建独立 handle 和内存映射，只保留上游 handle；不会读取或转交 Master Password/TOTP。控制请求限制 5 秒，长轮询限制 20 秒，禁止代理和重定向，目标限定为 loopback SocketAddr，响应读取有大小上限。命令转发不默认限时、不重试。
+用户 daemon 可独立授权普通命令和凭据。已配对的用户入口仅在申请提权时先向系统端请求授权，再创建独立 handle 和内存映射，只保留上游 handle；不会读取或转交 Master Password/TOTP。控制请求限制 5 秒，长轮询限制 20 秒，禁止代理和重定向，目标限定为 loopback SocketAddr，响应读取有大小上限。命令转发不默认限时、不重试。
 
 上游的 validate/watch 接口验证 handle，不依赖执行锁；watch 至多挂起 15 秒，撤销或 shell 结束可提前唤醒。用户 daemon 在每次普通执行前验证上游会话，另持续 watch 授权生命周期，失联、撤销、到期或关闭时取消本地 shell。任何一端 shell 结束时整个双权限 handle 失效；用户主动销毁或关闭也请求销毁上游会话。此机制提供跨进程取消，不能保证机器/网络失效时即时收到通知；通信超时后失败关闭。
 
@@ -59,7 +59,9 @@ Windows 使用模型无关的原生无模式对话框，`IsDialogMessageW` 负�
 
 ### 命令执行
 
-不自行解析或重写用户命令。Windows 启动 `pwsh -NoProfile -NonInteractive -EncodedCommand` bootstrap，命令通过 UTF-8→Base64 编码传输，由 `[ScriptBlock]::Create` 原生解析并在当前作用域执行。Unix 启动 `/bin/bash --noprofile --norc -c` bootstrap，移除 `BASH_ENV` 等启动变量；命令按字节编码传输（可打印 ASCII 直传、其余转义为八进制），由 Bash 内建 `printf -v` 无外部依赖地还原，再在父 shell 中 `eval`，不使用丢失状态的命令替换或子 shell。因变量无法承载 NUL，含 NUL 的命令在入口即被拒绝，不会静默截断。
+`enter_interactive.sudo` 独立于 `secret_keys`，默认只授予当前用户执行；提权命令需要 `sudo:true` 授权。各身份 shell 加载其用户 profile，随后进入请求的初始 `cwd`，空值使用各身份的用户目录。
+
+不自行解析或重写用户命令。Windows 启动 `pwsh -NoProfile -NonInteractive -EncodedCommand` bootstrap，命令通过 UTF-8→Base64 编码传输，由 `[ScriptBlock]::Create` 原生解析并在当前作用域执行。Unix 启动 `/bin/bash --login -i -c` bootstrap，移除 `BASH_ENV` 等启动变量；命令按字节编码传输（可打印 ASCII 直传、其余转义为八进制），由 Bash 内建 `printf -v` 无外部依赖地还原，再在父 shell 中 `eval`，不使用丢失状态的命令替换或子 shell。因变量无法承载 NUL，含 NUL 的命令在入口即被拒绝，不会静默截断。
 
 Bash bootstrap 用 `builtin read`/`printf`/`eval` 读取协议，命令即便重定义同名函数也不影响读循环。协议输入 fd 3、stdout 帧 fd 4、stderr 帧 fd 5 与命令输入分离；命令内的 `exec >…` 不会静音后续命令。单次 `stdin` 保存在私有临时文件中供命令读取到 EOF，允许 UTF-8 字节中的 NUL；完成或中断后清理。PowerShell 保存独立的控制 reader，执行期间同时切换 Win32 标准输入 handle 与 `Console.In`，完成后恢复。
 
@@ -108,4 +110,4 @@ HTTP/MCP 使用本机 loopback，配置验证限制 bind 和 daemon 间通信目
 - 输出是分别限额的 stdout/stderr 聚合响应，支持单次 stdin + EOF，不提供实时流、PTY 或后续输入。命令可运行至完成，客户端有独立超时；长任务管理由 harness 负责，不新增任务系统。
 - 各平台服务注册分别指向固定路径的专用 daemon；维护向导从临时目录运行，停止安装目录内的旧实例，再替换并启动完整套件。macOS 使用 `/Library/LaunchDaemons/dev.localshelld.plist`，`bootstrap system` 安装，`bootout` 卸载；配置和 seal key 保留。
 - Windows 使用 Job Object 清理进程树，Unix 清理可追踪后代和原始进程组。主动彻底脱离的 Unix daemon 不在回收保证内，这不是容器或作业调度器。刻意改写 `__localshelld_` 内部变量只会破坏自身会话，不构成额外提权。
-- 日志不记录命令和凭据，用户的任务内容保留在会话中。
+- 各 daemon 的配置目录保存 `command.log` 与 `audit.log`，格式为 JSON Lines。命令日志记录源码、执行身份与结果元数据，已知 handle 和注入凭据值使用占位符；审计日志记录授权、会话生命周期和管理操作。日志查看需要管理登录。

@@ -51,15 +51,19 @@ HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对
   "agent_name": "Example App",
   "request_reason": "执行用户要求的本机检查。",
   "confirm_text": "OK",
-  "secret_keys": []
+  "secret_keys": [],
+  "sudo": false,
+  "cwd": null
 }
 ```
 
 请求进入同一套授权流程。名字、原因、凭据选择和权限范围与 MCP 完全相同；`confirm_text` 只是隐私确认，不代表用户已批准执行。
 
+`sudo` 在所有平台表示本次是否申请提权，默认 `false`，与 `secret_keys` 独立。仅申请凭据时使用 `sudo:false`；管理员、SYSTEM 或 root 命令需要先以 `sudo:true` 获得授权。`cwd` 是各身份 shell 的初始绝对目录，空字符串、null 或省略时使用该身份的用户目录。会话创建后，凭据、提权范围和初始目录固定。
+
 客户端调用超时应大于 600 秒。接受、拒绝和超时都返回 HTTP 200，必须检查 `status`：
 
-- `authorized`：包含 `status`、`btw`、`handle`、`secret_keys`、`shell`、`platform`、`daemon`、`privilege_levels`、`identities`、`expires_at`、`expires_at_iso` 和 `message`。Linux/macOS 另有 `sudo_available`。
+- `authorized`：包含 `status`、`btw`、`handle`、`secret_keys`、`sudo_available`、`initial_cwd`、`shell`、`platform`、`daemon`、`privilege_levels`、`identities`、`expires_at`、`expires_at_iso` 和 `message`。
 - `denied`：`status`、`btw`，不包含 handle。
 - `timed_out`：`status`、`timeout_ms:600000`、`btw`，不包含 handle。忽略或关闭弹窗仍等待原来的截止时间。
 
@@ -67,7 +71,7 @@ HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对
 
 ### 执行
 
-`POST /v1/commands/run` 的 Windows 请求：
+`POST /v1/commands/run` 的 Windows 提权请求，需先以 `sudo:true` 完成授权：
 
 ```json
 {
@@ -87,7 +91,7 @@ Windows `privilege_level` 必填，且仅允许：
 | `as-administrator` | 已配对当前用户的 linked elevated token；保留 USERPROFILE、HKCU 和用户 PATH |
 | `nt-authority/system` | 必须确实由 LocalSystem 执行，不能用普通管理员账户冒充 |
 
-`as-administrator` 不是修改 SYSTEM 环境变量：校验配对用户进程的创建时间、SID、登录 session 和令牌，再使用同一用户的管理员令牌。无 linked token、未配对或所需 OS 权限不足时失败，不换账户执行。管理员 shell 在 broker 的非交互 session 内运行；不提供交互桌面或映射网络驱动器保证。`-NoProfile` 仍然有效：操作系统用户 profile/HKCU 保留，但不自动运行 PowerShell profile 脚本。
+`as-administrator` 不是修改 SYSTEM 环境变量：校验配对用户进程的创建时间、SID、登录 session 和令牌，再使用同一用户的管理员令牌。无 linked token、未配对或所需 OS 权限不足时失败，不换账户执行。管理员 shell 在 broker 的非交互 session 内运行；不提供交互桌面或映射网络驱动器保证。PowerShell 的持久 runspace 按标准顺序加载各级 profile，Bash 加载交互式登录配置；每个执行身份使用自己的 profile，并在加载后进入 `cwd` 指定的目录或该身份的用户目录。
 
 Linux/macOS 保持原有 boolean `sudo`，不接受 `privilege_level`：
 
@@ -293,4 +297,10 @@ agent_name 是 1–128 字符的自报名，不得有控制字符；request_reas
 
 客户端应给授权留出超过 600 秒的调用时间。stdio 适配器为授权请求保留 615 秒传输时间，其余控制请求仍为 75 秒。授权通道不可用或通信失败时明确报错。最多同时等待 8 个请求。名称只是自报显示信息，不能用于认证。
 
-配对用户入口由系统端建立授权会话；未配对用户入口仅允许当前用户权限。会话授权默认 24 小时，可在签发端管理页面撤销。handle 是 bearer 凭据，可能保存在客户端调用历史中，不应再次回显、写日志或放入 URL。
+配对用户入口在申请提权时由系统端建立授权会话；仅申请当前用户执行和凭据时由用户端建立会话。未配对用户入口仅允许当前用户权限。会话授权默认 24 小时，可在签发端管理页面撤销。handle 是 bearer 凭据，可能保存在客户端调用历史中，不应再次回显、写日志或放入 URL。
+
+## 命令与审计日志
+
+各 daemon 的配置目录中保存 JSON Lines 格式的 `command.log` 和 `audit.log`。命令记录包含开始与完成事件、独立的记录 ID、会话 ID、命令源码、请求的执行身份、实际身份、退出码、耗时、目录和执行状态。已知的会话 handle 和注入凭据值以占位符记录。审计记录包含授权申请与结果、会话创建和关闭、授权撤销、凭据查询与读取，以及管理接口的操作路径和状态。
+
+管理页的“日志”提供两类日志的查看与翻页。对应接口为 `GET /v1/admin/logs?kind=command` 或 `kind=audit`，使用管理登录的 Bearer session。响应为 `{"entries":[],"next_before":null}`，记录按新到旧排列。`limit` 默认为 50，范围为 1–100；将 `next_before` 作为下一次的 `before` 参数可读取更早记录。

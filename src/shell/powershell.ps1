@@ -62,7 +62,7 @@ public sealed class LocalshelldHost : PSHost {
     public override void NotifyBeginApplication() { }
     public override void NotifyEndApplication() { }
 
-    public static void Run(PSHost host, string location, string wrapper) {
+    public static void Run(PSHost host, string location, string wrapper, PSObject profile) {
         using var lines = new BlockingCollection<string>(16);
         var reader = Console.In;
         var thread = new Thread(() => {
@@ -75,6 +75,17 @@ public sealed class LocalshelldHost : PSHost {
         thread.Start();
         using var runspace = RunspaceFactory.CreateRunspace(new LocalshelldHost(host));
         runspace.Open();
+        runspace.SessionStateProxy.SetVariable("PROFILE", profile);
+        using (var startup = PowerShell.Create()) {
+            startup.Runspace = runspace;
+            startup.AddScript(@"
+foreach ($path in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) {
+    if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) { . $path }
+}
+", false);
+            foreach (var output in startup.Invoke()) Console.Out.WriteLine(output.ToString());
+            foreach (var error in startup.Streams.Error) Console.Error.WriteLine(error.ToString());
+        }
         runspace.SessionStateProxy.Path.SetLocation(location);
         foreach (var line in lines.GetConsumingEnumerable()) {
             // A late interruption must never affect the following command.
@@ -140,4 +151,4 @@ $__localshelld_wrapper = @'
         if ($null -ne $__localshelld_input) { $__localshelld_input.Dispose() }
     }
 '@
-[LocalshelldHost]::Run($Host, (Get-Location).Path, $__localshelld_wrapper)
+[LocalshelldHost]::Run($Host, (Get-Location).Path, $__localshelld_wrapper, [psobject]$PROFILE)
