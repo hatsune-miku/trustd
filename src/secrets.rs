@@ -107,7 +107,10 @@ impl AppState {
             .await;
         }
         self.change_vault(crate::sync::Change::Put(key, value))
-            .await
+            .await?;
+        self.audit("credential.stored", serde_json::json!({"key":key}))
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn remove_secret(&self, key: &str) -> Result<(), ApiError> {
@@ -122,7 +125,10 @@ impl AppState {
             )
             .await;
         }
-        self.change_vault(crate::sync::Change::Remove(key)).await
+        self.change_vault(crate::sync::Change::Remove(key)).await?;
+        self.audit("credential.removed", serde_json::json!({"key":key}))
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn resolve_secrets(&self, keys: &[String]) -> Result<Environment, ApiError> {

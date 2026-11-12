@@ -1,6 +1,8 @@
 # Keep LF line endings: this Bash 3.2-compatible bootstrap is embedded verbatim.
 # fd 3 is protocol input; fd 4 and fd 5 are private stdout/stderr frame channels.
 exec 3<&0 4>&1 5>&2
+builtin cd -- "$LOCALSHELLD_INITIAL_CWD" || exit
+builtin unset LOCALSHELLD_INITIAL_CWD
 trap '' USR1
 # `builtin` bypasses any read/printf/eval a command may later define as a function.
 while IFS='|' builtin read -r __localshelld_marker __localshelld_encoded __localshelld_input_encoded <&3; do

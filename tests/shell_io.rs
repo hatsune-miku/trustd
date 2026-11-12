@@ -10,6 +10,90 @@ async fn shell() -> Shell {
 }
 
 #[tokio::test]
+async fn initial_directory_is_explicit_or_defaults_to_the_execution_users_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let requested = directory.path().join("initial directory with spaces");
+    std::fs::create_dir(&requested).unwrap();
+    let shell = Shell::spawn_with_directory(
+        localshelld::shell::ShellKind::native().executable(),
+        8192,
+        &Default::default(),
+        Some(requested.to_str().unwrap()),
+    )
+    .await
+    .unwrap();
+    let result = shell.execute("echo ready", Some(10)).await.unwrap();
+    assert_eq!(
+        std::fs::canonicalize(result.cwd.unwrap()).unwrap(),
+        requested.canonicalize().unwrap()
+    );
+    shell.terminate().await;
+    let default = self::shell().await;
+    let result = default.execute("echo ready", Some(10)).await.unwrap();
+    assert_eq!(
+        std::fs::canonicalize(result.cwd.unwrap()).unwrap(),
+        directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .canonicalize()
+            .unwrap()
+    );
+    default.terminate().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_profiles_initialize_the_persistent_command_runspace() {
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("profile.ps1");
+    std::fs::write(
+        &profile,
+        "function Read-ProfileFixture { 'profile-loaded' }; $ProfileFixture = 'persistent'",
+    )
+    .unwrap();
+    let path = profile.to_string_lossy().replace('\'', "''");
+    let source = format!(
+        "$PROFILE = [pscustomobject]@{{AllUsersAllHosts='';AllUsersCurrentHost='';CurrentUserAllHosts='';CurrentUserCurrentHost='{path}'}}\n{}",
+        include_str!("../src/shell/powershell.ps1")
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        source
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let mut child = localshelld::process::background_command("pwsh");
+    child
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = tokio::process::Command::from(child).spawn().unwrap();
+    let command =
+        base64::engine::general_purpose::STANDARD.encode("Read-ProfileFixture; $ProfileFixture");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("profile-test|{command}|\n").as_bytes())
+        .await
+        .unwrap();
+    let output = child.wait_with_output().await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("profile-loaded") && stdout.contains("persistent"),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
 async fn input_eof_streams_and_state_are_separate() {
     let shell = shell().await;
     let command = script(

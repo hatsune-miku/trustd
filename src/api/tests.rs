@@ -574,6 +574,53 @@ async fn plaintext_reads_share_scoped_authorization_and_snapshots_across_transpo
 }
 
 #[tokio::test]
+async fn credential_only_authorization_runs_without_the_paired_privileged_daemon() {
+    let (state, calls) = consent_state(Choice::Accept, false);
+    state
+        .put_secret("TEST_API_SECRET", "fixture-private")
+        .await
+        .unwrap();
+    let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.settings.lock().await.saved.pairing = Some(crate::settings::Pairing {
+        key: crate::bridge::generate_key(),
+        peer: unavailable.local_addr().unwrap(),
+    });
+    drop(unavailable);
+    let directory = tempfile::tempdir().unwrap();
+    let app = router(state.clone());
+    let mut args = consent_arguments();
+    args["secret_keys"] = json!(["TEST_API_SECRET"]);
+    args["cwd"] = json!(directory.path());
+    let (status, entered) = http(&app, Operation::EnterInteractive, args).await;
+    assert_eq!(status, StatusCode::OK, "{entered}");
+    assert_eq!(entered["status"], "authorized");
+    assert_eq!(entered["sudo_available"], false);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let handle = entered["handle"].as_str().unwrap();
+    let command = if cfg!(windows) {
+        "[Console]::Write($env:TEST_API_SECRET)"
+    } else {
+        "printf '%s' \"$TEST_API_SECRET\""
+    };
+    let (status, result) = http(&app, Operation::Run, run_arguments(handle, command)).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["stdout"], "fixture-private");
+    assert_eq!(
+        std::fs::canonicalize(result["cwd"].as_str().unwrap()).unwrap(),
+        directory.path().canonicalize().unwrap()
+    );
+    assert_eq!(
+        state
+            .run(handle, "echo forbidden", true, None)
+            .await
+            .unwrap_err()
+            .status_code(),
+        StatusCode::FORBIDDEN.as_u16()
+    );
+    state.shutdown().await;
+}
+
+#[tokio::test]
 async fn http_interactive_approval_uses_the_same_owner_decision_and_secret_selection() {
     let (state, calls) = consent_state(Choice::Accept, true);
     state
@@ -632,6 +679,10 @@ async fn http_interactive_approval_uses_the_same_owner_decision_and_secret_selec
 #[tokio::test]
 async fn http_denial_is_neutral_and_self_reported_names_do_not_create_policy() {
     let (state, calls) = consent_state(Choice::Deny, true);
+    let directory = tempfile::tempdir().unwrap();
+    let state = state
+        .with_storage(directory.path().join("config.toml"))
+        .unwrap();
     let app = router(state.clone());
     let (status, result) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     assert_eq!(status, StatusCode::OK);
@@ -641,6 +692,23 @@ async fn http_denial_is_neutral_and_self_reported_names_do_not_create_policy() {
     assert_eq!(remembered, rpc["result"]["structuredContent"]);
     assert!(remembered.get("automatic").is_none());
     assert_eq!(calls.load(Ordering::Relaxed), 3);
+    let page = state
+        .logs
+        .page(crate::logs::Kind::Audit, None, 100)
+        .await
+        .unwrap();
+    let authorizations: Vec<_> = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["event"] == "authorization")
+        .collect();
+    assert_eq!(authorizations.len(), 3);
+    assert!(
+        authorizations
+            .iter()
+            .all(|entry| entry["success"] == false && entry["status"] == "denied")
+    );
     state.shutdown().await;
 }
 
@@ -856,4 +924,23 @@ async fn http_destroy_cancels_an_inflight_run_and_invalidates_its_handle() {
         StatusCode::UNAUTHORIZED
     );
     state.shutdown().await;
+}
+#[test]
+fn session_options_default_to_credentials_without_elevation_and_validate_cwd() {
+    let options =
+        super::enter_options_arg(&serde_json::json!({"secret_keys":["GITHUB_TOKEN"]})).unwrap();
+    assert!(!options.sudo);
+    assert!(options.cwd.is_none());
+    for value in [
+        serde_json::json!({"sudo":"true"}),
+        serde_json::json!({"cwd":42}),
+        serde_json::json!({"cwd":"relative/path"}),
+    ] {
+        assert!(super::enter_options_arg(&value).is_err());
+    }
+    assert!(
+        super::enter_options_arg(&serde_json::json!({"sudo":true,"cwd":""}))
+            .unwrap()
+            .sudo
+    );
 }

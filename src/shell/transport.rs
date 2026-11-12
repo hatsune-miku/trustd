@@ -83,22 +83,34 @@ impl Process {
         max_output_bytes: usize,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> Result<Self, ShellError> {
+        Self::spawn_with_directory(kind, executable, max_output_bytes, environment, None)
+    }
+    pub fn spawn_with_directory(
+        kind: ShellKind,
+        executable: &str,
+        max_output_bytes: usize,
+        environment: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&str>,
+    ) -> Result<Self, ShellError> {
         localshelld_sync_protocol::validate_injection_credentials(environment)
             .map_err(ShellError::Rejected)?;
         #[cfg(windows)]
         if kind == ShellKind::PowerShell {
-            return Self::spawn_windows(executable, max_output_bytes, None, environment);
+            return Self::spawn_windows(executable, max_output_bytes, None, environment, cwd);
         }
         let mut command = Command::from(crate::process::background_command(executable));
-        command.args(["--noprofile", "--norc", "-c", include_str!("bash.sh")]);
+        command.args(["--login", "-i", "-c", include_str!("bash.sh")]);
         for name in ["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH"] {
             command.env_remove(name);
         }
         #[cfg(unix)]
         command.process_group(0);
+        let directory = initial_directory(cwd, None)?;
         let mut child = command
+            .current_dir(&directory)
             .envs(environment)
             .env("LOCALSHELLD_SESSION", "1")
+            .env("LOCALSHELLD_INITIAL_CWD", &directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -123,10 +135,17 @@ impl Process {
         max_output_bytes: usize,
         context: &localshelld_native_process::UserContext,
         environment: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&str>,
     ) -> Result<Self, ShellError> {
         localshelld_sync_protocol::validate_injection_credentials(environment)
             .map_err(ShellError::Rejected)?;
-        Self::spawn_windows(executable, max_output_bytes, Some(context), environment)
+        Self::spawn_windows(
+            executable,
+            max_output_bytes,
+            Some(context),
+            environment,
+            cwd,
+        )
     }
     #[cfg(windows)]
     fn spawn_windows(
@@ -134,7 +153,23 @@ impl Process {
         max_output_bytes: usize,
         context: Option<&localshelld_native_process::UserContext>,
         environment: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&str>,
     ) -> Result<Self, ShellError> {
+        let directory = initial_directory(
+            cwd,
+            context.and_then(|context| {
+                context
+                    .environment
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("USERPROFILE"))
+                    .map(|(_, value)| value.as_str())
+            }),
+        )?;
+        let mut overrides = crate::secrets::Environment(environment.clone());
+        overrides.0.insert(
+            "LOCALSHELLD_INITIAL_CWD".into(),
+            directory.to_string_lossy().into_owned(),
+        );
         let bytes: Vec<u8> = include_str!("powershell.ps1")
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -150,7 +185,7 @@ impl Process {
                 &encoded,
             ],
             context,
-            environment,
+            &overrides.0,
         )
         .map_err(ShellError::Start)?;
         let identity = serde_json::to_value(&spawned.child.identity)
@@ -374,6 +409,26 @@ impl Process {
         }
         let _ = self.child.wait().await;
     }
+}
+
+fn initial_directory(
+    cwd: Option<&str>,
+    home: Option<&str>,
+) -> Result<std::path::PathBuf, ShellError> {
+    let directory = cwd
+        .filter(|value| !value.is_empty())
+        .or(home)
+        .map(std::path::PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()))
+        .ok_or_else(|| {
+            ShellError::Start(std::io::Error::other(
+                "cannot determine the execution user's home directory",
+            ))
+        })?;
+    if !directory.is_absolute() {
+        return Err(ShellError::Rejected("initial cwd must be an absolute path"));
+    }
+    Ok(directory)
 }
 
 struct Stream {

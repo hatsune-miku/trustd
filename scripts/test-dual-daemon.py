@@ -142,9 +142,10 @@ class Agent:
     def call(self, name, arguments=None):
         return self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
 
-    def enter(self):
+    def enter(self, sudo=False):
         response = self.call("enter_interactive", {"agent_name": "untrusted display name",
-                                                   "request_reason": "CI identity check", "confirm_text": "OK"})
+                                                   "request_reason": "CI identity check", "confirm_text": "OK",
+                                                   "sudo": sudo})
         assert "error" not in response, response
         result = response["result"]["structuredContent"]
         assert result["status"] == "authorized", response
@@ -220,7 +221,7 @@ def main():
                 previous = {r["id"] for r in request(root_url, "/v1/admin/sessions/list", {}, root_session)}
                 client = Agent(binary, temp / label, endpoint, base, session)
                 clients.append(client)
-                assert client.enter()["sudo_available"]
+                assert client.enter(sudo=True)["sudo_available"]
                 listing = request(user_url, "/v1/admin/agents", session=user_session)["agents"]
                 assert next(a for a in listing if a["id"] == client.agent_id)["policy"] == "ask"
                 for sudo, uid in [(False, os.geteuid()), (True, 0)]:

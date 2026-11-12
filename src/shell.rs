@@ -96,12 +96,22 @@ impl Shell {
         max_output_bytes: usize,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> Result<Self, ShellError> {
-        Self::from_process(Process::spawn(
+        Self::spawn_with_directory(executable, max_output_bytes, environment, None).await
+    }
+    pub async fn spawn_with_directory(
+        executable: &str,
+        max_output_bytes: usize,
+        environment: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&str>,
+    ) -> Result<Self, ShellError> {
+        Self::from_process(Process::spawn_with_directory(
             ShellKind::native(),
             executable,
             max_output_bytes,
             environment,
+            cwd,
         )?)
+        .await
     }
     async fn spawn_kind(
         kind: ShellKind,
@@ -109,7 +119,7 @@ impl Shell {
         max_output_bytes: usize,
     ) -> Result<Self, ShellError> {
         let process = Process::spawn(kind, executable, max_output_bytes, &Default::default())?;
-        Self::from_process(process)
+        Self::from_process(process).await
     }
     #[cfg(windows)]
     pub async fn spawn_administrator(
@@ -132,18 +142,45 @@ impl Shell {
         context: &localshelld_native_process::UserContext,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> Result<Self, ShellError> {
+        Self::spawn_administrator_with_directory(
+            executable,
+            max_output_bytes,
+            context,
+            environment,
+            None,
+        )
+        .await
+    }
+    #[cfg(windows)]
+    pub async fn spawn_administrator_with_directory(
+        executable: &str,
+        max_output_bytes: usize,
+        context: &localshelld_native_process::UserContext,
+        environment: &std::collections::BTreeMap<String, String>,
+        cwd: Option<&str>,
+    ) -> Result<Self, ShellError> {
         Self::from_process(Process::spawn_administrator(
             executable,
             max_output_bytes,
             context,
             environment,
+            cwd,
         )?)
+        .await
     }
-    fn from_process(mut process: Process) -> Result<Self, ShellError> {
+    async fn from_process(mut process: Process) -> Result<Self, ShellError> {
         let identity = process.identity.clone();
         let (requests, mut receiver) = mpsc::channel::<Request>(16);
         let (cancel, mut cancelled) = watch::channel(false);
         let (done, finished) = watch::channel(false);
+        // Finish profile initialization before exposing the shell. Startup
+        // messages belong to initialization rather than the first command.
+        let initialized = process
+            .execute("", &RunOptions::default(), &mut cancelled)
+            .await?;
+        if initialized.session_ended {
+            return Err(ShellError::Ended);
+        }
         tokio::spawn(async move {
             loop {
                 let request = tokio::select! {
@@ -178,6 +215,21 @@ impl Shell {
             finished,
             identity,
         })
+    }
+    pub(crate) fn authorization_only() -> Self {
+        let (requests, _receiver) = mpsc::channel(1);
+        let (cancel, mut cancelled) = watch::channel(false);
+        let (done, finished) = watch::channel(false);
+        tokio::spawn(async move {
+            let _ = cancelled.changed().await;
+            let _ = done.send(true);
+        });
+        Self {
+            requests,
+            cancel,
+            finished,
+            identity: serde_json::Value::Null,
+        }
     }
     pub fn identity(&self) -> &serde_json::Value {
         &self.identity
@@ -330,6 +382,7 @@ mod tests {
         for (kind, path) in backends() {
             let shell =
                 Shell::from_process(Process::spawn(kind, &path, 64 * 1024, &environment).unwrap())
+                    .await
                     .unwrap();
             let result = run(
                 &shell,
@@ -357,7 +410,18 @@ mod tests {
     #[tokio::test]
     async fn native_syntax_unicode_pipelines_wildcards_and_state() {
         for (kind, path) in backends() {
-            let shell = Shell::spawn_kind(kind, &path, 1024 * 1024).await.unwrap();
+            let shell = Shell::from_process(
+                Process::spawn_with_directory(
+                    kind,
+                    &path,
+                    1024 * 1024,
+                    &Default::default(),
+                    Some(env!("CARGO_MANIFEST_DIR")),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
             let script = source(
                 kind,
                 "$values = 1..5\n$values | Where-Object { $_ -gt 3 } | ForEach-Object { \"值=$_\" }; Get-ChildItem -Name Cargo.*",
@@ -461,7 +525,18 @@ mod tests {
     #[tokio::test]
     async fn explicit_timeout_preserves_session_and_state_without_a_server_maximum() {
         for (kind, path) in backends() {
-            let shell = Shell::spawn_kind(kind, &path, 1024).await.unwrap();
+            let shell = Shell::from_process(
+                Process::spawn_with_directory(
+                    kind,
+                    &path,
+                    1024,
+                    &Default::default(),
+                    Some(env!("CARGO_MANIFEST_DIR")),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
             assert!(
                 shell
                     .execute("echo above-old-limit", Some(3600))

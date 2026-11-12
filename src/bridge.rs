@@ -36,6 +36,8 @@ pub enum Request {
         request_reason: String,
         #[serde(default)]
         secret_keys: Vec<String>,
+        #[serde(default)]
+        options: crate::execution::EnterOptions,
         agent: Option<crate::agents::Identity>,
     },
     AgentsList,
@@ -302,6 +304,7 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
                 agent_name,
                 request_reason,
                 secret_keys,
+                options,
                 agent,
             },
         ) => {
@@ -309,6 +312,7 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
                 &agent_name,
                 &request_reason,
                 &secret_keys,
+                options,
                 agent,
             ))
             .await

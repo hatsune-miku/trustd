@@ -15,7 +15,7 @@ const identity = process.platform === 'win32' ? 'privilege_level' : 'sudo'
 const properties = {
   secrets_list: ['query'],
   secrets_get: ['key'],
-  enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'confirm_text'],
+  enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'sudo', 'cwd', 'confirm_text'],
   run: ['command', 'stdin', 'timeout_seconds', identity],
   destroy: [],
 }

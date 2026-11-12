@@ -403,25 +403,30 @@ impl AppState {
                 // Persist consumption before releasing the lock or creating any session.
                 settings.save(next).await?;
             }
-            match policy {
-                Policy::Trust | Policy::Once => {
-                    return Ok(Decision {
-                        choice: Choice::Accept,
-                        remember: false,
-                        btw: String::new(),
-                    });
-                }
-                Policy::Deny => {
-                    return Ok(Decision {
-                        choice: Choice::Deny,
-                        remember: false,
-                        btw: String::new(),
-                    });
-                }
-                Policy::Ask => {}
+            let choice = match policy {
+                Policy::Trust | Policy::Once => Some(Choice::Accept),
+                Policy::Deny => Some(Choice::Deny),
+                Policy::Ask => None,
+            };
+            if let Some(choice) = choice {
+                drop(settings);
+                self.audit(
+                    "authorization.decision",
+                    serde_json::json!({"request_id":prompt.id,
+                    "agent_path":agent.path,"source":"policy","policy":policy,"choice":choice}),
+                )
+                .await;
+                return Ok(Decision {
+                    choice,
+                    remember: false,
+                    btw: String::new(),
+                });
             }
         }
+        let request_id = prompt.id.clone();
         let decision = self.request_consent(prompt).await?;
+        self.audit("authorization.decision", serde_json::json!({"request_id":request_id,
+            "agent_path":agent.as_ref().map(|agent| &agent.path),"source":"interactive","choice":decision.choice})).await;
         // The checkbox means long-term trust, never a name-based remembered denial.
         if decision.choice == Choice::Accept
             && decision.remember

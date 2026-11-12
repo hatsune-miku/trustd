@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-labelledby="title description">
+  <title id="title">trustd: Delegate authority to AI simply and safely.</title>
+  <desc id="description">AI makes requests through MCP, the user authorizes or revokes them, and trustd holds sessions and executes local commands with the specified identity and approved credentials.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="#245aa8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="1198" height="478" rx="22" fill="#f3f6fa" stroke="#d8e0ea"/>
+  <g font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="64" y="89" fill="#1b2b3f" font-size="58" font-weight="650" letter-spacing="-2">trustd</text>
+    <text x="64" y="131" fill="#53657b" font-size="23">Delegate authority to AI simply and safely.</text>
+    <text x="1136" y="71" text-anchor="end" fill="#53657b" font-size="17">Windows / macOS / Linux</text>
+
+    <rect x="460" y="167" width="280" height="52" rx="26" fill="#e2ebf7"/>
+    <text x="600" y="200" text-anchor="middle" fill="#245aa8" font-size="20">User authorizes / revokes</text>
+    <path d="M 600 224 V 256" fill="none" stroke="#245aa8" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <rect x="64" y="266" width="250" height="118" rx="12" fill="#fff" stroke="#c3cedb"/>
+    <text x="189" y="315" text-anchor="middle" fill="#1b2b3f" font-size="29" font-weight="600">AI Agent</text>
+    <text x="189" y="350" text-anchor="middle" fill="#53657b" font-size="15">Describe task · Request access</text>
+
+    <path d="M 333 325 H 454" fill="none" stroke="#245aa8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="394" y="306" text-anchor="middle" fill="#53657b" font-size="17">MCP</text>
+
+    <rect x="475" y="266" width="250" height="118" rx="12" fill="#245aa8"/>
+    <text x="600" y="316" text-anchor="middle" fill="#fff" font-size="34" font-weight="600">trustd</text>
+    <text x="600" y="350" text-anchor="middle" fill="#e4edfa" font-size="15">Hold authorizations and sessions</text>
+
+    <path d="M 746 325 H 867" fill="none" stroke="#245aa8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="807" y="306" text-anchor="middle" fill="#53657b" font-size="17">Execute</text>
+
+    <rect x="886" y="266" width="250" height="118" rx="12" fill="#fff" stroke="#c3cedb"/>
+    <text x="1011" y="315" text-anchor="middle" fill="#1b2b3f" font-size="29" font-weight="600">Local commands</text>
+    <text x="1011" y="350" text-anchor="middle" fill="#53657b" font-size="14">Specify identity · Inject credentials</text>
+
+    <text x="64" y="440" fill="#53657b" font-size="16">Codex · Claude · Cursor · …</text>
+    <text x="1136" y="440" text-anchor="end" fill="#53657b" font-size="16">Credentials are used in the approved execution environment</text>
+  </g>
+</svg>

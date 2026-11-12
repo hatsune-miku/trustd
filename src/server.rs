@@ -19,7 +19,7 @@ use crate::{
         CONSENT_TIMEOUT, CONSENT_TIMEOUT_MS, Choice, ConsentBroker, Decision, Prompt,
         validate_request,
     },
-    execution::{PrivilegeLevel, RunOptions},
+    execution::{EnterOptions, PrivilegeLevel, RunOptions},
     mcp,
     peer::Peer,
     settings::{Pairing, Settings},
@@ -41,10 +41,13 @@ pub struct AppState {
     pub(crate) sync: Arc<Mutex<crate::sync::Runtime>>,
     pub(crate) agents: Arc<Mutex<crate::agents::Registry>>,
     interactive_permits: Arc<tokio::sync::Semaphore>,
+    pub(crate) logs: Arc<crate::logs::Logs>,
 }
 
 struct Session {
+    id: String,
     token_id: String,
+    options: EnterOptions,
     expires_at: Option<i64>,
     shell: Arc<Shell>,
     environment: Arc<crate::secrets::Environment>,
@@ -60,8 +63,12 @@ impl Session {
                 .is_none_or(|expiry| Utc::now().timestamp() < expiry)
     }
 
-    fn metadata(&self) -> (Option<i64>, Vec<String>) {
-        (self.expires_at, self.environment.keys())
+    fn metadata(&self) -> (Option<i64>, Vec<String>, EnterOptions) {
+        (
+            self.expires_at,
+            self.environment.keys(),
+            self.options.clone(),
+        )
     }
     fn cancel(&self) {
         self.shell.cancel();
@@ -103,18 +110,14 @@ pub struct EnterResult {
     pub shell: ShellKind,
     pub platform: &'static str,
     pub daemon: DaemonMode,
-    #[serde(skip_serializing_if = "is_windows")]
     pub sudo_available: bool,
+    pub initial_cwd: Option<String>,
     pub privilege_levels: Vec<String>,
     pub identities: std::collections::BTreeMap<String, serde_json::Value>,
     pub expires_at: Option<i64>,
     pub expires_at_iso: Option<String>,
     pub message: String,
 }
-fn is_windows(_: &bool) -> bool {
-    cfg!(windows)
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct ApiError {
@@ -224,6 +227,7 @@ impl AppState {
             sync: Arc::new(Mutex::new(crate::sync::Runtime::default())),
             agents: Arc::new(Mutex::new(crate::agents::Registry::default())),
             interactive_permits: Arc::new(tokio::sync::Semaphore::new(crate::consent::MAX_PENDING)),
+            logs: Arc::new(crate::logs::Logs::default()),
             mode: DaemonMode::Privileged,
             peer: None,
             config: Arc::new(config),
@@ -233,6 +237,7 @@ impl AppState {
     }
 
     pub fn with_storage(mut self, path: std::path::PathBuf) -> anyhow::Result<Self> {
+        self.logs = Arc::new(crate::logs::Logs::new(&path));
         self.settings = Arc::new(Mutex::new(Settings::load(path, (*self.config).clone())?));
         Ok(self)
     }
@@ -263,8 +268,17 @@ impl AppState {
         request_reason: &str,
         secret_keys: &[String],
     ) -> Result<serde_json::Value, ApiError> {
-        self.enter_interactive_for_agent(agent_name, request_reason, secret_keys, None)
-            .await
+        self.enter_interactive_for_agent(
+            agent_name,
+            request_reason,
+            secret_keys,
+            EnterOptions {
+                sudo: true,
+                cwd: None,
+            },
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn enter_interactive_for_agent(
@@ -272,17 +286,22 @@ impl AppState {
         agent_name: &str,
         request_reason: &str,
         secret_keys: &[String],
+        options: EnterOptions,
         agent: Option<crate::agents::Identity>,
     ) -> Result<serde_json::Value, ApiError> {
         use serde_json::json;
         validate_request(agent_name, request_reason)?;
+        let options = options.validate()?;
         let secret_keys = crate::secrets::normalize_keys(secret_keys)?;
         let _permit = self
             .interactive_permits
             .try_acquire()
             .map_err(|_| ApiError::unavailable("too many pending authorization requests"))?;
         let deadline = tokio::time::Instant::now() + CONSENT_TIMEOUT;
-        if self.mode == DaemonMode::User && self.settings.lock().await.saved.pairing.is_some() {
+        if self.mode == DaemonMode::User
+            && options.sudo
+            && self.settings.lock().await.saved.pairing.is_some()
+        {
             let pairing = self.pairing().await?;
             let mut result: serde_json::Value = bridge::call(
                 &pairing,
@@ -291,6 +310,7 @@ impl AppState {
                     agent_name: agent_name.into(),
                     request_reason: request_reason.into(),
                     secret_keys,
+                    options,
                     agent,
                 },
                 Some(CONSENT_TIMEOUT + Duration::from_secs(1)),
@@ -327,7 +347,7 @@ impl AppState {
                 agent_path: agent.as_ref().map(|a| a.path.clone()),
                 request_reason: request_reason.into(),
                 secret_keys: secret_keys.clone(),
-                scope: if self.mode == DaemonMode::Privileged {
+                scope: if self.mode == DaemonMode::Privileged && options.sudo {
                     if cfg!(windows) {
                         "当前用户、该用户管理员及 SYSTEM 命令"
                     } else {
@@ -380,7 +400,7 @@ impl AppState {
             .await
             .issue_token(Some(DEFAULT_TOKEN_TTL_SECONDS))?
             .0;
-        let entered = match self.enter_with_secrets(&token, &secret_keys).await {
+        let entered = match self.enter_with_options(&token, &secret_keys, options).await {
             Ok(entered) => entered,
             Err(error) => {
                 let _ = self.revoke_token(&token).await;
@@ -418,9 +438,30 @@ impl AppState {
         token: &str,
         secret_keys: &[String],
     ) -> Result<EnterResult, ApiError> {
+        self.enter_with_options(
+            token,
+            secret_keys,
+            EnterOptions {
+                sudo: true,
+                cwd: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn enter_with_options(
+        &self,
+        token: &str,
+        secret_keys: &[String],
+        options: EnterOptions,
+    ) -> Result<EnterResult, ApiError> {
+        let options = options.validate()?;
         let secret_keys = crate::secrets::normalize_keys(secret_keys)?;
         self.auth.lock().await.verify_token(token)?;
-        let identities = self.execution_identities().await;
+        let mut identities = self.execution_identities().await;
+        if !options.sudo {
+            identities.retain(|level, _| level == "current-user");
+        }
         let mut environment = None;
         loop {
             // Keep authorization and insertion atomic with respect to token revocation.
@@ -437,6 +478,11 @@ impl AppState {
                     .is_some_and(|session| !session.shell.is_finished())
                 {
                     let existing_keys = sessions.by_handle[&handle].environment.keys();
+                    if sessions.by_handle[&handle].options != options {
+                        return Err(ApiError::bad_request(
+                            "the live session has different elevation or directory options; destroy it before requesting another session",
+                        ));
+                    }
                     if !secret_keys.is_empty() && secret_keys != existing_keys {
                         return Err(ApiError::bad_request(
                             "the live session has different secret keys; destroy it before entering with a different selection",
@@ -449,7 +495,8 @@ impl AppState {
                         shell: ShellKind::native(),
                         platform: std::env::consts::OS,
                         daemon: self.mode,
-                        sudo_available: self.mode == DaemonMode::Privileged,
+                        sudo_available: self.mode == DaemonMode::Privileged && options.sudo,
+                        initial_cwd: options.cwd.clone(),
                         privilege_levels: identities.keys().cloned().collect(),
                         identities,
                         expires_at: authorization.expires_at,
@@ -459,7 +506,7 @@ impl AppState {
                 }
                 remove_session(&mut sessions, &handle);
             }
-            let Some(environment) = environment.take() else {
+            let Some(snapshot) = environment.take() else {
                 // Do not hold authorization/session locks across encrypted IPC.
                 // A live session keeps its snapshot even after vault rotation/deletion.
                 drop(sessions);
@@ -467,28 +514,68 @@ impl AppState {
                 environment = Some(Arc::new(self.resolve_secrets(&secret_keys).await?));
                 continue;
             };
-            let shell = Shell::spawn_with_environment(
-                &self.config.shell,
-                self.config.max_output_bytes,
-                &environment.0,
-            )
-            .await?;
+            drop(sessions);
+            drop(auth);
+            let shell = if self.mode == DaemonMode::Privileged && !options.sudo {
+                Shell::authorization_only()
+            } else {
+                Shell::spawn_with_directory(
+                    &self.config.shell,
+                    self.config.max_output_bytes,
+                    &snapshot.0,
+                    options.cwd.as_deref(),
+                )
+                .await?
+            };
+            let auth = self.auth.lock().await;
+            let authorization = match auth.verify_token(token) {
+                Ok(authorization) => authorization,
+                Err(error) => {
+                    drop(auth);
+                    shell.terminate().await;
+                    return Err(error.into());
+                }
+            };
+            let mut sessions = self.sessions.lock().await;
+            if sessions.shutting_down || sessions.by_token.contains_key(&authorization.id) {
+                let shutting_down = sessions.shutting_down;
+                drop(sessions);
+                drop(auth);
+                shell.terminate().await;
+                if shutting_down {
+                    return Err(ApiError::internal("server is shutting down"));
+                }
+                environment = Some(snapshot);
+                continue;
+            }
             let handle = strong_handle();
             sessions
                 .by_token
                 .insert(authorization.id.clone(), handle.clone());
+            let session_id = uuid::Uuid::new_v4().to_string();
             sessions.by_handle.insert(
                 handle.clone(),
                 Session {
+                    id: session_id.clone(),
                     token_id: authorization.id,
+                    options: options.clone(),
                     expires_at: authorization.expires_at,
                     shell: Arc::new(shell),
-                    environment,
+                    environment: snapshot,
                     remote_handle: None,
                     #[cfg(windows)]
                     administrator: Arc::new(tokio::sync::OnceCell::new()),
                 },
             );
+            drop(sessions);
+            drop(auth);
+            self.audit(
+                "session.created",
+                serde_json::json!({"session_id":session_id,
+                "sudo":options.sudo,"secret_keys":secret_keys,"initial_cwd":options.cwd,
+                "expires_at":authorization.expires_at}),
+            )
+            .await;
             return Ok(EnterResult {
                 handle,
                 reused: false,
@@ -496,7 +583,8 @@ impl AppState {
                 shell: ShellKind::native(),
                 platform: std::env::consts::OS,
                 daemon: self.mode,
-                sudo_available: self.mode == DaemonMode::Privileged,
+                sudo_available: self.mode == DaemonMode::Privileged && options.sudo,
+                initial_cwd: options.cwd,
                 privilege_levels: identities.keys().cloned().collect(),
                 identities,
                 expires_at: authorization.expires_at,
@@ -519,6 +607,8 @@ impl AppState {
             expires_at: inspected.expires_at,
             identities: inspected.identities,
             secret_keys: inspected.secret_keys,
+            sudo_available: inspected.sudo_available,
+            initial_cwd: inspected.initial_cwd,
         })
         .await
     }
@@ -550,9 +640,31 @@ impl AppState {
         };
         let key = format!("privileged:{}", entered.handle);
         let mut identities = entered.identities;
+        if !entered.sudo_available {
+            identities.retain(|level, _| level == "current-user");
+        }
         if let Ok(identity) = crate::execution::current_identity() {
             identities.insert("current-user".into(), identity);
         }
+        let needs_shell = !self.sessions.lock().await.by_token.contains_key(&key);
+        let prepared = if needs_shell {
+            match Shell::spawn_with_directory(
+                &self.config.shell,
+                self.config.max_output_bytes,
+                &environment.0,
+                entered.initial_cwd.as_deref(),
+            )
+            .await
+            {
+                Ok(shell) => Some(Arc::new(shell)),
+                Err(error) => {
+                    let _ = peer.destroy(&entered.handle).await;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
         let mut sessions = self.sessions.lock().await;
         if sessions.shutting_down {
             drop(sessions);
@@ -574,26 +686,19 @@ impl AppState {
         let handle = if let Some(handle) = existing {
             handle
         } else {
-            let shell = match Shell::spawn_with_environment(
-                &self.config.shell,
-                self.config.max_output_bytes,
-                &environment.0,
-            )
-            .await
-            {
-                Ok(shell) => Arc::new(shell),
-                Err(error) => {
-                    drop(sessions);
-                    let _ = peer.destroy(&entered.handle).await;
-                    return Err(error.into());
-                }
-            };
+            let shell = prepared
+                .ok_or_else(|| ApiError::unavailable("session closed while attaching its shell"))?;
             let handle = strong_handle();
             sessions.by_token.insert(key.clone(), handle.clone());
             sessions.by_handle.insert(
                 handle.clone(),
                 Session {
+                    id: uuid::Uuid::new_v4().to_string(),
                     token_id: key,
+                    options: EnterOptions {
+                        sudo: entered.sudo_available,
+                        cwd: entered.initial_cwd.clone(),
+                    },
                     expires_at: entered.expires_at,
                     shell: Arc::clone(&shell),
                     environment,
@@ -622,9 +727,18 @@ impl AppState {
             });
             handle
         };
+        let session_id = sessions.by_handle[&handle].id.clone();
+        drop(sessions);
+        self.audit(
+            "session.attached",
+            serde_json::json!({"session_id":session_id,
+            "sudo":entered.sudo_available,"secret_keys":entered.secret_keys,
+            "initial_cwd":entered.initial_cwd}),
+        )
+        .await;
         Ok(EnterResult {
             handle, reused, secret_keys: entered.secret_keys, shell: ShellKind::native(), platform: std::env::consts::OS,
-            daemon: self.mode, sudo_available: true, expires_at: entered.expires_at,
+            daemon: self.mode, sudo_available: entered.sudo_available, initial_cwd: entered.initial_cwd, expires_at: entered.expires_at,
             privilege_levels: identities.keys().cloned().collect(), identities,
             expires_at_iso: expiry_iso(entered.expires_at),
             message: "Each execution identity has separate persistent shell state. Select the identity explicitly for every command.".into(),
@@ -724,9 +838,34 @@ impl AppState {
         let handle = handle.to_owned();
         let command = command.to_owned();
         tokio::spawn(async move {
-            state
+            let context = state.sessions.lock().await.by_handle.get(&handle)
+                .map(|session| (session.id.clone(), session.environment.clone()));
+            let environment = context.as_ref().map(|(_, environment)| environment.as_ref());
+            let logged_command = crate::logs::redact(&command, &handle, environment);
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut entry = serde_json::json!({"id":id,"session_id":context.as_ref().map(|value| &value.0),
+                "command":logged_command,"privilege_level":privilege_level,"daemon":state.mode});
+            state.logs.record(crate::logs::Kind::Command, "command.started", entry.clone()).await;
+            let result = state
                 .run_command_inner(&handle, &command, privilege_level, options)
-                .await
+                .await;
+            match &result {
+                Ok(result) => {
+                    entry["success"] = serde_json::json!(result.success);
+                    entry["exit_code"] = serde_json::json!(result.exit_code);
+                    entry["duration_ms"] = serde_json::json!(result.duration_ms);
+                    entry["timed_out"] = serde_json::json!(result.timed_out);
+                    entry["cwd"] = serde_json::json!(result.cwd);
+                    entry["identity"] = result.identity.clone();
+                }
+                Err(error) => {
+                    entry["success"] = serde_json::json!(false);
+                    entry["status"] = serde_json::json!(error.status_code());
+                    entry["error"] = serde_json::json!(crate::logs::redact(&error.to_string(), &handle, environment));
+                }
+            }
+            state.logs.record(crate::logs::Kind::Command, "command.finished", entry).await;
+            result
         })
         .await
         .map_err(|_| ApiError::internal("command execution worker failed"))?
@@ -758,6 +897,23 @@ impl AppState {
         }
         if command.contains('\0') {
             return Err(ApiError::bad_request("command must not contain NUL bytes"));
+        }
+        if privilege_level.is_privileged() {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .by_handle
+                .get(handle)
+                .ok_or(AuthError::InvalidCredential)?;
+            if !session.is_live() {
+                drop(sessions);
+                let _ = self.destroy_session(handle).await;
+                return Err(AuthError::Expired.into());
+            }
+            if !session.options.sudo {
+                return Err(ApiError::forbidden(
+                    "this session does not authorize elevation; request a new session with sudo true",
+                ));
+            }
         }
         if self.mode == DaemonMode::Privileged && privilege_level == PrivilegeLevel::CurrentUser {
             self.validate_session(handle, false).await?;
@@ -868,17 +1024,23 @@ impl AppState {
     }
 
     pub async fn destroy_session(&self, handle: &str) -> Result<(), ApiError> {
-        let (shell, remote) = {
+        let (shell, remote, id) = {
             let mut sessions = self.sessions.lock().await;
+            let id = sessions
+                .by_handle
+                .get(handle)
+                .map(|session| session.id.clone());
             let remote = sessions
                 .by_handle
                 .get(handle)
                 .and_then(|s| s.remote_handle.clone());
             let shell = remove_session(&mut sessions, handle)
                 .ok_or_else(|| ApiError::from(AuthError::InvalidCredential))?;
-            (shell, remote)
+            (shell, remote, id)
         };
         shell.terminate().await;
+        self.audit("session.destroyed", serde_json::json!({"session_id":id}))
+            .await;
         if let (Some(peer), Some(remote)) = (&self.peer, remote) {
             // Removal is idempotent: the monitor may already have closed it.
             if let Err(error) = peer.destroy(&remote).await
@@ -888,6 +1050,13 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn audit(&self, event: &str, mut data: serde_json::Value) {
+        data["daemon"] = serde_json::json!(self.mode);
+        self.logs
+            .record(crate::logs::Kind::Audit, event, data)
+            .await;
     }
 
     pub(crate) async fn execution_identities(
@@ -957,23 +1126,30 @@ impl AppState {
         handle: &str,
         parent: &Arc<Shell>,
     ) -> Result<Arc<Shell>, ApiError> {
-        let (cell, environment) = self
+        let (cell, environment, cwd) = self
             .sessions
             .lock()
             .await
             .by_handle
             .get(handle)
-            .map(|session| (session.administrator.clone(), session.environment.clone()))
+            .map(|session| {
+                (
+                    session.administrator.clone(),
+                    session.environment.clone(),
+                    session.options.cwd.clone(),
+                )
+            })
             .ok_or(AuthError::InvalidCredential)?;
         let shell: &Arc<Shell> = cell
             .get_or_try_init(|| async {
                 let context = self.paired_user_context().await?;
                 let shell = Arc::new(
-                    Shell::spawn_administrator_with_environment(
+                    Shell::spawn_administrator_with_directory(
                         &self.config.shell,
                         self.config.max_output_bytes,
                         &context,
                         &environment.0,
+                        cwd.as_deref(),
                     )
                     .await
                     .map_err(|error| {
@@ -1004,6 +1180,11 @@ impl AppState {
             authorization.id
         };
         self.destroy_sessions_for_token(&token_id).await;
+        self.audit(
+            "authorization.revoked",
+            serde_json::json!({"authorization_id":token_id}),
+        )
+        .await;
         Ok(())
     }
 
@@ -1138,7 +1319,7 @@ struct AdminRevokeBody {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .merge(crate::management::routes())
+        .merge(crate::management::routes(state.clone()))
         .merge(crate::api::routes())
         .route("/", get(crate::assets::serve))
         .route("/health", get(health))
@@ -1223,7 +1404,7 @@ async fn validate(
     Json(body): Json<HandleBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.validate_session(&body.handle, false).await?;
-    let (expires_at, secret_keys) = state
+    let (expires_at, secret_keys, options) = state
         .sessions
         .lock()
         .await
@@ -1231,8 +1412,14 @@ async fn validate(
         .get(&body.handle)
         .ok_or(AuthError::InvalidCredential)?
         .metadata();
+    let mut identities = state.execution_identities().await;
+    if !options.sudo {
+        identities.retain(|level, _| level == "current-user");
+    }
     Ok(Json(
-        serde_json::json!({"valid": true, "expires_at": expires_at, "secret_keys":secret_keys, "identities":state.execution_identities().await}),
+        serde_json::json!({"valid": true, "expires_at": expires_at, "secret_keys":secret_keys,
+        "sudo_available":state.mode == DaemonMode::Privileged && options.sudo,
+        "initial_cwd":options.cwd,"identities":identities}),
     ))
 }
 

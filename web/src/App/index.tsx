@@ -6,6 +6,7 @@ import { Agents } from './components/Agents'
 import { Credentials } from './components/Credentials'
 import { DesktopSettings } from './components/DesktopSettings'
 import { Login } from './components/Login'
+import { Logs } from './components/Logs'
 import { Secrets } from './components/Secrets'
 import { Sessions } from './components/Sessions'
 
@@ -76,6 +77,7 @@ export function App() {
               {[
                 ['agents', 'Agent 授权'],
                 ['sessions', '已授权会话'],
+                ['logs', '日志'],
                 ['secrets', '凭据'],
                 ['credentials', '验证方式'],
                 ['desktop', '桌面授权'],
@@ -95,6 +97,7 @@ export function App() {
             <main className="workspace-content">
               {section === 'agents' && <Agents session={login.session} />}
               {section === 'sessions' && <Sessions session={login.session} />}
+              {section === 'logs' && <Logs session={login.session} />}
               {section === 'secrets' && <Secrets session={login.session} />}
               {section === 'credentials' && (
                 <Credentials session={login.session} onPasswordChanged={() => setLogin(null)} />

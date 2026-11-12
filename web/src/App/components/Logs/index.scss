@@ -1,0 +1,65 @@
+.logs-view {
+  min-width: 0;
+
+  .logs-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .logs-kinds {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .logs-entries {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .logs-entry {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid #d8e0ea;
+    border-radius: 8px;
+
+    .logs-entry-heading {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      font-size: 13px;
+    }
+
+    .logs-entry-time {
+      color: #53657b;
+    }
+
+    .logs-entry-event,
+    .logs-entry-result {
+      overflow-wrap: anywhere;
+    }
+
+    .logs-command,
+    .logs-data {
+      max-width: 100%;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .logs-details {
+      margin-top: 12px;
+    }
+
+    .logs-details-summary {
+      cursor: pointer;
+      font-size: 13px;
+    }
+  }
+}
