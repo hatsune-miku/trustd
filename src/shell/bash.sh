@@ -1,4 +1,7 @@
 # Keep LF line endings: this Bash 3.2-compatible bootstrap is embedded verbatim.
+# Profiles run in an interactive shell. Disable terminal job control afterwards
+# so background jobs stay in the process group that the daemon owns and reaps.
+builtin set +m
 # fd 3 is protocol input; fd 4 and fd 5 are private stdout/stderr frame channels.
 exec 3<&0 4>&1 5>&2
 builtin cd -- "$LOCALSHELLD_INITIAL_CWD" || exit
