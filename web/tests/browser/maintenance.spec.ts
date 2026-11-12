@@ -1,6 +1,6 @@
 import { type Page, expect, test } from '@playwright/test'
 
-async function setup(page: Page, registered = true) {
+async function setup(page: Page, registered = true, systemInitialized: boolean | null = registered) {
   const info = {
     version: '0.1.0',
     platform: 'windows',
@@ -11,6 +11,7 @@ async function setup(page: Page, registered = true) {
     registered_executable: registered ? 'D:\\bin\\localshelld.exe' : null,
     registered_config: registered ? 'D:\\old\\config.toml' : null,
     system_running: registered,
+    system_initialized: systemInitialized,
     user_initialized: registered,
     shell: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
     shell_available: true,
@@ -91,6 +92,20 @@ test('initialization keeps plaintext input, validates confirmation and accepts e
   await expect(page.getByRole('heading', { name: '安装完成' })).toBeVisible()
   expect(installs).toEqual([{ password: '', agents: [], replace_agents: false }])
 })
+
+for (const systemInitialized of [false, null]) {
+  test(`registered service with unavailable system configuration requests initialization (${systemInitialized})`, async ({
+    page,
+  }) => {
+    const installs = await setup(page, true, systemInitialized)
+    await page.getByRole('button', { name: '下一步' }).click()
+    await page.getByLabel('主密码', { exact: true }).fill('repair-password')
+    await page.getByLabel('确认主密码', { exact: true }).fill('repair-password')
+    await page.getByRole('button', { name: '安装并修复' }).click()
+    await expect(page.getByRole('heading', { name: '安装完成' })).toBeVisible()
+    expect(installs).toEqual([{ password: 'repair-password', agents: [], replace_agents: false }])
+  })
+}
 
 test('a direct page without the launch capability cannot offer installation', async ({ page }) => {
   await page.goto('/maintenance.html')

@@ -9,6 +9,11 @@ function New-FakeFolder([string]$mode = '') {
         Definition=[pscustomobject]@{Principal=[pscustomobject]@{UserId='S-1-5-21-123'; RunLevel=0; LogonType=3}; Actions=$actions}
         EnableValue=$true; Running=$true; Stopped=$false; Mode=$mode
     }
+    $task.Definition | Add-Member ScriptProperty XmlText {
+        $owner = $this.Principal.UserId
+        if ($this.Principal.XmlUserId) { $owner = $this.Principal.XmlUserId }
+        return "<Task><Principals><Principal><UserId>$owner</UserId></Principal></Principals></Task>"
+    }
     $task | Add-Member ScriptProperty Enabled { $this.EnableValue } {
         param($value)
         if ($this.Mode -eq 'disable-denied') { throw [Runtime.InteropServices.COMException]::new('拒绝访问', -2147024891) }
@@ -56,6 +61,19 @@ foreach ($running in @($true, $false)) {
     if (-not $folder.Deleted -or $task.Enabled -or $task.Running -or $task.Stopped -ne $running) { throw 'incorrect lifecycle' }
     if ((Remove-LocalshelldUserTask $folder 'fixture' 'S-1-5-21-123') -ne 'missing') { throw 'repeat removal failed' }
 }
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn uses_saved_task_sid_when_com_returns_an_unresolvable_short_account_name() {
+    mock_script(
+        r#"
+$folder = New-FakeFolder
+$folder.Task.Definition.Principal.UserId = 'unresolvable-fixture-account'
+$folder.Task.Definition.Principal | Add-Member NoteProperty XmlUserId 'S-1-5-21-123'
+if ((Remove-LocalshelldUserTask $folder 'fixture' 'S-1-5-21-123') -ne 'removed') { throw 'saved SID was ignored' }
 "#,
     )
     .unwrap();

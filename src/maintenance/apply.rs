@@ -108,17 +108,9 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         "system-level shell is missing: {}",
         shell.display()
     );
-    let source = previous
-        .as_ref()
-        .map(|value| value.config.clone())
-        .filter(|value| !same_file(value, &paths.config));
-    if let Some(source) = &source {
-        regular(source)?;
-        ensure!(
-            !paths.config.try_exists()?,
-            "both an old service configuration and a standard configuration exist; reconcile them before migration"
-        );
-    }
+    let source =
+        configuration_source(paths, previous.as_ref().map(|value| value.config.as_path()))?
+            .filter(|value| !same_file(value, &paths.config));
     let existing_config = source.as_deref().unwrap_or(&paths.config);
     if existing_config.try_exists()? {
         let config = Config::load(existing_config)?;
@@ -129,7 +121,8 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
     } else {
         ensure!(
             plan.password_hash.is_some(),
-            "a Master Password is required for first-time initialization"
+            "system configuration is missing at {}; provide an initialization Master Password in the maintenance wizard",
+            paths.config.display()
         );
     }
     prepare_directory(&paths.program, true)?;
@@ -288,6 +281,78 @@ fn same_file(left: &Path, right: &Path) -> bool {
     left == right || matches!((left.canonicalize(), right.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
+pub(super) fn configuration_source(
+    paths: &MachinePaths,
+    registered: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    let source = registered
+        .filter(|value| !same_file(value, &paths.config))
+        .map(|value| {
+            value
+                .try_exists()
+                .map(|exists| exists.then(|| value.to_owned()))
+        })
+        .transpose()?
+        .flatten();
+    let installed = paths.config.try_exists()?;
+    ensure!(
+        source.is_none() || !installed,
+        "both an old service configuration and a standard configuration exist; reconcile them before migration"
+    );
+    if let Some(source) = source {
+        regular(&source)?;
+        return Ok(Some(source));
+    }
+    if installed {
+        regular(&paths.config)?;
+        return Ok(Some(paths.config.clone()));
+    }
+
+    // Previous installers retained administrator-owned snapshots here. Only a
+    // complete configuration/key pair can recover the missing system state.
+    let backups = paths.data.join("backups");
+    if !backups.try_exists()? {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&backups)?;
+    ensure!(
+        metadata.is_dir() && !linked(&metadata),
+        "invalid configuration backup directory"
+    );
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(backups)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok()
+            && metadata.is_dir()
+            && !linked(&metadata)
+        {
+            candidates.push((metadata.modified()?, entry.path().join("config.toml")));
+        }
+    }
+    candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, candidate) in candidates {
+        let valid = (|| -> Result<()> {
+            use base64::Engine;
+            regular(&candidate)?;
+            Config::load(&candidate)?;
+            let key = read_state(&config::seal_key_path(&candidate))?;
+            let key =
+                Zeroizing::new(base64::engine::general_purpose::STANDARD.decode(key.trim_ascii())?);
+            ensure!(key.len() == 32, "invalid backup seal key");
+            let authorization = candidate.with_extension("authorization.json");
+            if authorization.try_exists()? {
+                serde_json::from_slice::<serde_json::Value>(&read_state(&authorization)?)?;
+            }
+            Ok(())
+        })();
+        if valid.is_ok() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
 fn backup_configuration(config: &Path, backup: &Path) -> Result<()> {
     for (source, name) in
         state_files(config)
@@ -311,15 +376,21 @@ fn migrate_configuration(source: &Path, target: &Path) -> Result<()> {
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    for path in state_files(target) {
-        ensure!(
-            !path.try_exists()?,
-            "migration target already exists: {}",
-            path.display()
-        );
+    for (path, value) in state_files(target).iter().zip(&values) {
+        if path.try_exists()? {
+            ensure!(
+                value.as_ref().map(|value| value.as_slice()) == Some(read_state(path)?.as_slice()),
+                "migration target contains different state: {}",
+                path.display()
+            );
+        }
     }
-    for (target, value) in state_files(target).iter().zip(&values) {
-        if let Some(value) = value {
+    // Commit the configuration last. A retry can finish an interrupted restore
+    // using the same key instead of treating a partial copy as an installation.
+    for (target, value) in state_files(target).iter().zip(&values).rev() {
+        if let Some(value) = value
+            && !target.try_exists()?
+        {
             private_write(target, value)?;
         }
     }
@@ -338,7 +409,8 @@ fn read_state(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 fn regular(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("could not inspect file {}", path.display()))?;
     ensure!(
         metadata.is_file() && !linked(&metadata),
         "expected a regular non-linked file: {}",
@@ -447,6 +519,122 @@ fn maintenance_lock(path: &Path) -> Result<fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_paths(root: &Path) -> MachinePaths {
+        MachinePaths {
+            program: root.join("program"),
+            data: root.join("data"),
+            config: root.join("data/system/config.toml"),
+        }
+    }
+
+    #[test]
+    fn missing_registered_configuration_can_be_initialized_or_restored_from_a_complete_backup() {
+        use base64::Engine;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = fixture_paths(directory.path());
+        let registered = paths.config.with_file_name("missing.toml");
+        assert!(
+            configuration_source(&paths, Some(&registered))
+                .unwrap()
+                .is_none()
+        );
+        #[cfg(windows)]
+        {
+            let registered = PathBuf::from(format!(
+                r"\\?\{}",
+                paths.config.to_string_lossy().replace('/', "\\")
+            ));
+            assert!(
+                configuration_source(&paths, Some(&registered))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let backup = paths
+            .data
+            .join("backups")
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        fs::create_dir_all(&backup).unwrap();
+        let saved = backup.join("config.toml");
+        let config = Config {
+            password_hash: "saved-verifier".into(),
+            ..Config::default()
+        };
+        fs::write(&saved, toml::to_string(&config).unwrap()).unwrap();
+        assert!(
+            configuration_source(&paths, Some(&registered))
+                .unwrap()
+                .is_none()
+        );
+        fs::write(backup.join("seal.key"), "invalid key").unwrap();
+        assert!(
+            configuration_source(&paths, Some(&registered))
+                .unwrap()
+                .is_none()
+        );
+        fs::write(
+            backup.join("seal.key"),
+            base64::engine::general_purpose::STANDARD.encode([7; 32]),
+        )
+        .unwrap();
+        assert_eq!(
+            configuration_source(&paths, Some(&registered)).unwrap(),
+            Some(saved)
+        );
+        assert!(!paths.config.exists());
+    }
+
+    #[test]
+    fn existing_configuration_takes_priority_and_conflicting_migrations_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = fixture_paths(directory.path());
+        fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
+        fs::write(&paths.config, b"current configuration").unwrap();
+        let missing = directory.path().join("missing/config.toml");
+        assert_eq!(
+            configuration_source(&paths, Some(&missing)).unwrap(),
+            Some(paths.config.clone())
+        );
+        assert_eq!(
+            configuration_source(&paths, Some(&paths.config)).unwrap(),
+            Some(paths.config.clone())
+        );
+        let legacy = directory.path().join("legacy.toml");
+        fs::write(&legacy, b"legacy configuration").unwrap();
+        assert!(configuration_source(&paths, Some(&legacy)).is_err());
+        fs::remove_file(&paths.config).unwrap();
+        assert_eq!(
+            configuration_source(&paths, Some(&legacy)).unwrap(),
+            Some(legacy)
+        );
+    }
+
+    #[test]
+    fn backup_restore_preserves_matching_state_and_rejects_conflicts_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("saved.toml");
+        let target = directory.path().join("current.toml");
+        for (saved, current) in state_files(&source).iter().zip(state_files(&target)) {
+            fs::write(saved, b"preserved state").unwrap();
+            fs::write(current, b"preserved state").unwrap();
+        }
+        migrate_configuration(&source, &target).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::write(
+            target.with_extension("authorization.json"),
+            b"different authorization",
+        )
+        .unwrap();
+        assert!(migrate_configuration(&source, &target).is_err());
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read(target.with_extension("authorization.json")).unwrap(),
+            b"different authorization"
+        );
+    }
+
     #[test]
     fn migration_verification_allows_only_shell_normalization() {
         let directory = tempfile::tempdir().unwrap();

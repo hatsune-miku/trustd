@@ -439,8 +439,10 @@ function Get-UserSid([string]$value) {
     return ([Security.Principal.NTAccount]$value).Translate([Security.Principal.SecurityIdentifier]).Value
 }
 function Confirm-UserTask($actual, $expected) {
-    if ((Get-UserSid $actual.Principal.UserId) -ne (Get-UserSid $expected.Principal.UserId) -or $actual.Principal.RunLevel -ne 0 -or $actual.Principal.LogonType -ne 3 -or $actual.Actions.Count -ne 1 -or $actual.Actions.Item(1).Path -ne $expected.Actions.Item(1).Path -or $actual.Actions.Item(1).Arguments -cne $expected.Actions.Item(1).Arguments) { throw 'Existing user task has different identity, privileges, or paths; registration was preserved.' }
-    if (-not $actual.Settings.Enabled -or $actual.Triggers.Count -ne 1 -or $actual.Triggers.Item(1).Type -ne $expected.Triggers.Item(1).Type -or -not $actual.Triggers.Item(1).Enabled -or (Get-UserSid $actual.Triggers.Item(1).UserId) -ne (Get-UserSid $expected.Triggers.Item(1).UserId)) { throw 'Existing user task is not enabled for the intended user login; registration was preserved.' }
+    $actualXml = [xml]$actual.XmlText
+    $expectedXml = [xml]$expected.XmlText
+    if ((Get-UserSid $actualXml.Task.Principals.Principal.UserId) -ne (Get-UserSid $expectedXml.Task.Principals.Principal.UserId) -or $actual.Principal.RunLevel -ne 0 -or $actual.Principal.LogonType -ne 3 -or $actual.Actions.Count -ne 1 -or $actual.Actions.Item(1).Path -ne $expected.Actions.Item(1).Path -or $actual.Actions.Item(1).Arguments -cne $expected.Actions.Item(1).Arguments) { throw 'Existing user task has different identity, privileges, or paths; registration was preserved.' }
+    if (-not $actual.Settings.Enabled -or $actual.Triggers.Count -ne 1 -or $actual.Triggers.Item(1).Type -ne $expected.Triggers.Item(1).Type -or -not $actual.Triggers.Item(1).Enabled -or (Get-UserSid $actualXml.Task.Triggers.LogonTrigger.UserId) -ne (Get-UserSid $expectedXml.Task.Triggers.LogonTrigger.UserId)) { throw 'Existing user task is not enabled for the intended user login; registration was preserved.' }
 }
 "#
 }
