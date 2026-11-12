@@ -20,9 +20,12 @@ class BashSession:
         self.temp = tempfile.TemporaryDirectory(prefix="trustd-shell-")
         self.directory = Path(self.temp.name)
         self.child = subprocess.Popen(
-            [BASH, "--noprofile", "--norc", "-c", (ROOT / "src/shell/bash.sh").read_text()],
+            # Emulate job control enabled by an interactive login/profile even
+            # on hosts where Bash disables it automatically without a terminal.
+            [BASH, "--noprofile", "--norc", "-c", "set -m\n" + (ROOT / "src/shell/bash.sh").read_text()],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, cwd=self.directory,
+            env={**os.environ, "LOCALSHELLD_INITIAL_CWD": str(self.directory)},
         )
 
     def start(self, command, stdin=b""):
@@ -90,6 +93,17 @@ class BashInterruptTests(unittest.TestCase):
 
     def tearDown(self):
         self.shell.close()
+
+    def test_background_job_stays_in_the_daemon_owned_process_group(self):
+        result = self.shell.finish(self.shell.start("sleep 300 & printf '%s' \"$!\""))
+        pid = int(result["stdout"][0])
+        try:
+            self.assertEqual(os.getpgid(pid), os.getpgid(self.shell.child.pid))
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def test_timeout_preserves_pid_state_and_skips_remaining_source(self):
         initial_pid = self.shell.child.pid
