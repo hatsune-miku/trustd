@@ -47,6 +47,10 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
+      - name: Prepare Windows OpenSSL debug symbols
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/prepare-windows-openssl.ps1
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --all-targets --no-default-features
       - name: Validate MCP tool schemas with the official TypeScript SDK
