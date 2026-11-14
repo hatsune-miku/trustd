@@ -1,5 +1,4 @@
 #requires -Version 7.0
-param([switch]$Release)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -9,7 +8,6 @@ try {
     # Build libraries without linking an executable. Selecting the root library
     # also reports OpenSSL's actual dependency rlib, rather than a top-level copy.
     $cargoArgs = @('build', '--locked', '--lib', '--no-default-features', '--message-format=json-render-diagnostics')
-    if ($Release) { $cargoArgs += '--release' }
     $messages = @(& cargo @cargoArgs | ForEach-Object { $_ | ConvertFrom-Json })
     if ($LASTEXITCODE -ne 0) { throw "Building OpenSSL failed with exit code $LASTEXITCODE" }
 
@@ -31,7 +29,7 @@ try {
     foreach ($library in $libraries) {
         Copy-Item -LiteralPath $pdb -Destination (Join-Path (Split-Path -Parent $library) 'ossl_static.pdb')
     }
-    Write-Host "Prepared OpenSSL debug symbols for $(if ($Release) { 'release' } else { 'debug' }) linking."
+    Write-Host 'Prepared OpenSSL debug symbols for debug linking.'
 } finally {
     Pop-Location
 }
