@@ -89,7 +89,7 @@ export function Maintenance({ token }: { token: string }) {
   useEffect(() => {
     if (info?.job.running || info?.job.error) setStep(2)
     if (info?.job.completed) setStep(info.job.completed === 'powershell' ? 0 : 3)
-  }, [info?.job.stage])
+  }, [info?.job.stage, info?.job.running, info?.job.error, info?.job.completed])
 
   async function begin(operation: 'install' | 'uninstall') {
     setSending(true)

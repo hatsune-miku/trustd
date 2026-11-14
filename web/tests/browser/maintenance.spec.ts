@@ -96,6 +96,10 @@ test('PowerShell installation asks consent, returns to checks and guides MSIX re
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/maintenance-powershell.png', fullPage: true })
+  await page.getByRole('button', { name: '下一步' }).click()
+  await page.getByRole('button', { name: '开始安装' }).click()
+  await expect(page.getByRole('heading', { name: '安装完成' })).toBeVisible()
+  expect(installs).toEqual([{ consent: true }, { password: '', agents: [], replace_agents: false }])
 })
 
 test('PowerShell authorization failure allows a fresh attempt without enabling trustd installation', async ({
