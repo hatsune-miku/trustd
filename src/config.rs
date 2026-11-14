@@ -116,6 +116,30 @@ impl Config {
     }
 }
 
+/// Bare names must not select a per-user MSIX execution alias from PATH.
+#[cfg(windows)]
+pub(crate) fn windows_shell_path(executable: &str) -> Result<PathBuf> {
+    let path =
+        if executable.eq_ignore_ascii_case("pwsh") || executable.eq_ignore_ascii_case("pwsh.exe") {
+            localshelld_native_process::program_files_directory()?.join("PowerShell/7/pwsh.exe")
+        } else {
+            PathBuf::from(executable)
+        };
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if [&path, &resolved].iter().any(|path| {
+        path.components().any(|part| {
+            part.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("WindowsApps")
+        })
+    }) {
+        bail!(
+            "trustd does not support MSIX PowerShell; install system-wide PowerShell from the maintenance wizard"
+        );
+    }
+    Ok(path)
+}
+
 pub fn default_config_path() -> Result<PathBuf> {
     Ok(crate::paths::MachinePaths::resolve()?.config)
 }
@@ -229,6 +253,31 @@ fn restrict_windows_acl(path: &Path, directory: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn powershell_uses_system_installation_and_rejects_msix_paths() {
+        use super::windows_shell_path;
+        let expected = localshelld_native_process::program_files_directory()
+            .unwrap()
+            .join("PowerShell/7/pwsh.exe");
+        assert_eq!(windows_shell_path("pwsh").unwrap(), expected);
+        assert_eq!(windows_shell_path("PWSH.EXE").unwrap(), expected);
+        for path in [
+            r"C:\Users\Example\AppData\Local\Microsoft\WindowsApps\pwsh.exe",
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell_example\pwsh.exe",
+        ] {
+            assert!(
+                windows_shell_path(path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("MSIX")
+            );
+        }
+        assert_eq!(
+            windows_shell_path(r"D:\PowerShell\7\pwsh.exe").unwrap(),
+            std::path::PathBuf::from(r"D:\PowerShell\7\pwsh.exe")
+        );
+    }
     use super::*;
 
     #[test]

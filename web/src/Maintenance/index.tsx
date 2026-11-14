@@ -2,6 +2,8 @@ import { type FormEvent, useEffect, useState } from 'react'
 
 import { Button, CakeProvider, Field, TextBox } from '@a1knla/cakeui'
 
+import { PowerShellSetup } from './components/PowerShellSetup'
+
 import { Feedback } from '../Feedback'
 import { api } from '../api'
 
@@ -13,7 +15,7 @@ type Job = {
   running: boolean
   stage: string
   error: string | null
-  completed: 'install' | 'uninstall' | null
+  completed: 'install' | 'uninstall' | 'powershell' | null
   agents: AgentResult[]
 }
 type Info = {
@@ -30,6 +32,7 @@ type Info = {
   user_initialized: boolean
   shell: string
   shell_available: boolean
+  powershell_msix: string[] | null
   elevation_available: boolean
   user_url: string
   system_url: string
@@ -41,6 +44,7 @@ const steps = ['检查安装', '安装选项', '安装服务', '完成']
 const platforms: Record<string, string> = { windows: 'Windows', macos: 'macOS', linux: 'Linux' }
 const stages: Record<string, string> = {
   preparing: '准备安装文件',
+  powershell: '下载 PowerShell 并等待系统授权',
   elevation: '等待系统授权并安装服务',
   user_service: '启动用户服务并验证安装',
   agents: '配置 AI agent',
@@ -84,7 +88,7 @@ export function Maintenance({ token }: { token: string }) {
 
   useEffect(() => {
     if (info?.job.running || info?.job.error) setStep(2)
-    if (info?.job.completed) setStep(3)
+    if (info?.job.completed) setStep(info.job.completed === 'powershell' ? 0 : 3)
   }, [info?.job.stage])
 
   async function begin(operation: 'install' | 'uninstall') {
@@ -120,6 +124,21 @@ export function Maintenance({ token }: { token: string }) {
 
   function uninstall() {
     if (window.confirm('停止并移除系统服务和当前用户的自启动？程序、配置和凭据会保留。')) void begin('uninstall')
+  }
+
+  async function installPowerShell() {
+    if (!window.confirm('使用 PowerShell 官方脚本下载并安装系统级 MSI 版本？安装时需要管理员授权。')) return
+    setSending(true)
+    setError('')
+    try {
+      await api('/setup/v1/powershell', { consent: true }, token)
+      setStep(2)
+      await refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法开始安装 PowerShell。')
+    } finally {
+      setSending(false)
+    }
   }
 
   async function finish() {
@@ -234,19 +253,16 @@ export function Maintenance({ token }: { token: string }) {
                   info.registered_config !== info.system_config && (
                     <p className="maintenance-note">旧位置的系统配置会迁移并备份。已有密码、配对和凭据保持不变。</p>
                   )}
-                {!info.shell_available && (
-                  <p className="maintenance-note">
-                    请先安装{' '}
-                    <a
-                      className="content-link"
-                      href="https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      PowerShell 7 的系统级版本
-                    </a>
-                    ，再刷新检查。
-                  </p>
+                {info.platform === 'windows' && (
+                  <PowerShellSetup
+                    available={info.shell_available}
+                    msix={info.powershell_msix}
+                    busy={busy}
+                    onInstall={() => void installPowerShell()}
+                  />
+                )}
+                {!info.shell_available && info.platform !== 'windows' && (
+                  <Feedback message={`未找到 ${info.shell}，请安装 Bash 后刷新检查。`} error />
                 )}
                 {!info.elevation_available && (
                   <Feedback message="缺少系统提权工具。Linux 请先安装 polkit/pkexec。" error />
@@ -384,7 +400,7 @@ export function Maintenance({ token }: { token: string }) {
                     </footer>
                   </>
                 )}
-                {busy && <p className="maintenance-note">请在系统授权窗口中确认。完成后会检查两个服务的运行状态。</p>}
+                {busy && <p className="maintenance-note">请在系统授权窗口中确认。</p>}
               </>
             ) : (
               <>

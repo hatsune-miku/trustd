@@ -155,6 +155,8 @@ impl Process {
         environment: &std::collections::BTreeMap<String, String>,
         cwd: Option<&str>,
     ) -> Result<Self, ShellError> {
+        let executable = crate::config::windows_shell_path(executable)
+            .map_err(|error| ShellError::Start(std::io::Error::other(error.to_string())))?;
         let directory = initial_directory(
             cwd,
             context.and_then(|context| {
@@ -176,7 +178,7 @@ impl Process {
             .collect();
         let encoded = STANDARD.encode(bytes);
         let spawned = localshelld_native_process::spawn_with_environment(
-            executable,
+            &executable.to_string_lossy(),
             &[
                 "-NoLogo",
                 "-NoProfile",

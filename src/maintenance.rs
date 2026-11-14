@@ -3,6 +3,8 @@
 mod agents;
 mod apply;
 mod platform;
+#[cfg(windows)]
+pub(crate) mod powershell;
 mod programs;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod terminal;
@@ -161,7 +163,10 @@ fn prepare(authority: String, mode: Option<bool>) -> Result<App> {
 }
 
 fn router(state: App) -> Router {
-    Router::new()
+    let router = Router::new();
+    #[cfg(windows)]
+    let router = router.route("/setup/v1/powershell", post(powershell::install));
+    router
         .route("/setup/v1/status", get(status))
         .route("/setup/v1/install", post(install))
         .route("/setup/v1/uninstall", post(uninstall))
@@ -245,6 +250,7 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "registered_config": registration.as_ref().map(|value| &value.config),
         "system_running": registration.as_ref().is_some_and(|value| value.was_running),
         "system_initialized": system_initialized,
+        "powershell_msix": powershell_msix(),
         "user_initialized": user.is_some(), "shell": shell, "shell_available": shell.is_file(),
         "elevation_available": platform::elevation_available(),
         "user_url": format!("http://localhost:{}/", user.as_ref().map_or(localshelld::config::USER_PORT, |value| value.bind.port())),
@@ -252,6 +258,17 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "job": job,
         "agents": state.agents,
     }))
+}
+
+fn powershell_msix() -> Option<Vec<String>> {
+    #[cfg(windows)]
+    {
+        powershell::msix_packages()
+    }
+    #[cfg(not(windows))]
+    {
+        Some(vec![])
+    }
 }
 
 async fn status(State(state): State<App>) -> Result<Json<Value>, ApiError> {
@@ -415,6 +432,10 @@ fn execute(
         let mut config = Config::load(&state.user_config)?;
         if operation == Operation::Install {
             config.user_headless = Some(state.user_headless);
+            #[cfg(windows)]
+            {
+                config.shell = shell.to_string_lossy().into_owned();
+            }
             config.save(&state.user_config)?;
         }
         Some(config)
