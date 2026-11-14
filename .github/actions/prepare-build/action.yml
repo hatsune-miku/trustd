@@ -27,6 +27,11 @@ runs:
         }
         'C:\Strawberry\perl\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         'C:\Strawberry\c\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        # Git Bash prepends its own Perl even after GITHUB_PATH is applied.
+        # OpenSSL must use native Strawberry Perl in both PowerShell and Bash.
+        & 'C:\Strawberry\perl\bin\perl.exe' -MIPC::Cmd -MLocale::Maketext::Simple -e 'exit($^O eq "MSWin32" ? 0 : 1)'
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        'OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         if (-not (Get-Command nasm -ErrorAction SilentlyContinue) -and -not (Test-Path 'C:\Strawberry\c\bin\nasm.exe')) {
           choco install nasm --no-progress -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
