@@ -28,6 +28,7 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
           echo "LOCALSHELLD_RELEASE_TAG=v${version}-rc.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
         with:
           components: rustfmt, clippy
       - name: Cache Rust dependencies and build artifacts
@@ -37,8 +38,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock', '.github/actions/prepare-build/action.yml') }}
           restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-v2-${{ steps.toolchain.outputs.cachekey }}-
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Verify PowerShell
         if: runner.os == 'Windows'
