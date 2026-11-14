@@ -9,6 +9,15 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    // Release binaries without debug info must not ask MSVC to read native
+    // PDBs after LTO repacks static libraries into its temporary directory.
+    // Keep symbol generation intact when release debugging is requested.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && std::env::var("PROFILE").as_deref() == Ok("release")
+        && std::env::var("DEBUG").as_deref() == Ok("false")
+    {
+        println!("cargo:rustc-link-arg=/DEBUG:NONE");
+    }
     println!("cargo:rerun-if-changed=web/dist");
     assert!(
         std::path::Path::new("web/dist/index.html").is_file(),
