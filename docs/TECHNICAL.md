@@ -53,7 +53,7 @@ Windows 用户服务始终以同一账号的普通权限运行。内置 Administ
 
 前置条件：
 
-- Windows 10/11：系统级 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，即 Program Files 下的 `PowerShell/7/pwsh.exe`。桌面授权使用原生 Win32 控件，不依赖 WebView2。
+- Windows 10/11 / Windows Server：系统级 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell)，即 Program Files 下的 `PowerShell/7/pwsh.exe`。缺失时，维护向导征得同意后调用 [PowerShell 官方安装脚本](https://github.com/PowerShell/PowerShell/blob/master/tools/install-powershell.ps1)，由脚本选择当前可用的 MSI 版本，不固定版本号。下载保留当前用户的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 和 Windows 系统代理设置；仅运行 MSI 时请求管理员授权。trustd 不兼容 MSIX 版，也不通过用户的 `WindowsApps` 执行别名启动 shell。系统级版本就绪后，向导会检测当前用户的 MSIX 包并提供卸载命令。桌面授权使用原生 Win32 控件，不依赖 WebView2。
 - Linux：`/bin/bash`、`procps`（`ps`，用于子进程清理）、systemd 及当前用户的 systemd 服务管理器；网页向导提权使用 `pkexec`，终端向导使用 `/usr/bin/sudo`。仅 `trustd-user` 需要 GTK 3 / WebKitGTK 4.1 运行库；其余四个程序不链接 GTK、WebKitGTK、Tao 或 Wry。无头模式仍使用系统 C / OpenSSL 等基础运行库，并非静态 musl 程序。
 - macOS：系统 `/bin/bash` 与 launchd，兼容 Bash 3.2；预编译包提供 Apple Silicon。桌面授权使用原生 AppKit 控件，不依赖 WebView / WebKit，也不常驻 Dock。
 

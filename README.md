@@ -25,6 +25,8 @@ trustd (音同 trusted) 提供一种方式，让用户能简单安全地向 AI �
 irm https://github.com/hatsune-miku/trustd/releases/latest/download/install.ps1 | iex
 ```
 
+trustd 不兼容 MSIX 版 PowerShell。若未找到系统级 PowerShell 7，维护向导会在征得同意后，使用 PowerShell 官方脚本安装当前提供的 MSI 版本，不固定版本号。下载沿用本机代理设置，安装需要管理员授权。系统级版本就绪后，若检测到 MSIX 版，向导会提供卸载指引。
+
 ### macOS / 带图形界面的 Linux
 
 ```sh

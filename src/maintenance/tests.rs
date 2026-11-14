@@ -175,6 +175,54 @@ fn plan_never_accepts_arbitrary_programs_or_installation_targets() {
     }
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_install_requires_launch_token_consent_and_idle_wizard() {
+    for (token, body, busy, expected) in [
+        ("", r#"{"consent":true}"#, false, StatusCode::UNAUTHORIZED),
+        (
+            "fixture-token",
+            r#"{"consent":false}"#,
+            false,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "fixture-token",
+            r#"{}"#,
+            false,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "fixture-token",
+            r#"{"consent":true,"url":"https://evil.example"}"#,
+            false,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "fixture-token",
+            r#"{"consent":true}"#,
+            true,
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let state = fixture();
+        state.busy.store(busy, Ordering::SeqCst);
+        let response = router(state.clone())
+            .oneshot(
+                Request::post("/setup/v1/powershell")
+                    .header("host", "127.0.0.1:31991")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(state.busy.load(Ordering::SeqCst), busy);
+    }
+}
+
 #[tokio::test]
 async fn unknown_agent_is_rejected_before_installation_starts() {
     let state = fixture();

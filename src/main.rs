@@ -58,6 +58,10 @@ enum CommandKind {
     /// Internal, one-shot installer. Never exposed by either daemon.
     #[command(hide = true)]
     MaintenanceApply { plan: PathBuf, digest: String },
+    /// Download for the official PowerShell installer in the invoking user's context.
+    #[cfg(windows)]
+    #[command(name = "maintenance-powershell-download", hide = true)]
+    MaintenancePowerShellDownload { url: String, output: PathBuf },
     /// Configure cloud-hosted Telegram from stdin; connect cloud and stop this daemon first.
     ConfigureTelegram {
         #[arg(long)]
@@ -152,6 +156,11 @@ fn main() -> Result<()> {
 
 async fn run_command(command: CommandKind) -> Result<()> {
     match command {
+        #[cfg(windows)]
+        CommandKind::MaintenancePowerShellDownload { url, output } => {
+            tokio::task::spawn_blocking(move || maintenance::powershell::download(&url, &output))
+                .await?
+        }
         CommandKind::ConfigureTelegram {
             user,
             config,

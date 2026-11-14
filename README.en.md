@@ -19,6 +19,8 @@ trustd (pronounced like trusted) provides a way for users to delegate authority 
 irm https://github.com/hatsune-miku/trustd/releases/latest/download/install.ps1 | iex
 ```
 
+trustd does not support MSIX installations of PowerShell. If system-wide PowerShell 7 is missing, the maintenance wizard asks for your consent before using the official PowerShell script to install the currently available MSI release, without pinning a version. Downloads use your local proxy settings, and installation requires administrator authorization. Once the system-wide version is ready, the wizard provides removal instructions if it detects an MSIX version.
+
 ### macOS / Linux with a graphical interface
 
 ```sh
