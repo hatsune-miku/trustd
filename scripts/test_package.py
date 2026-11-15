@@ -40,8 +40,9 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="trustd-package-") as temp:
             directory = Path(temp)
             shutil.copytree(ROOT / "scripts/package", directory / "scripts/package")
+            shutil.copytree(ROOT / "docs", directory / "docs")
             shutil.copyfile(ROOT / "scripts/package-release.sh", directory / "scripts/package-release.sh")
-            for file in ("README.md", "LICENSE-MIT", "install.ps1", "install.sh"):
+            for file in ("README.md", "README.en.md", "LICENSE-MIT", "install.ps1", "install.sh"):
                 shutil.copyfile(ROOT / file, directory / file)
             platforms = {
                 "windows-x86_64": ("trustd-system.exe", "INSTALL.cmd"),
@@ -72,7 +73,8 @@ class PackageTests(unittest.TestCase):
                         names = archive.getnames()
                         self.assertTrue(archive.getmember(f"{prefix}/{launcher}").mode & 0o111)
                         self.assertNotIn(b"\r", archive.extractfile(f"{prefix}/{launcher}").read())
-                for name in [*programs[platform], launcher, "START-HERE.txt", "README.md", "LICENSE-MIT"]:
+                for name in [*programs[platform], launcher, "START-HERE.txt", "README.md", "README.en.md", "LICENSE-MIT",
+                             "docs/REMOTE.md", "docs/images/trustd-overview.svg", "docs/images/trustd-overview.en.svg"]:
                     self.assertIn(f"{prefix}/{name}", names)
             checksums = (directory / "assets/SHA256SUMS").read_text()
             self.assertEqual(len(checksums.splitlines()), 3)

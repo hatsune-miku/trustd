@@ -24,7 +24,8 @@ for platform in windows-x86_64 linux-x86_64 macos-aarch64; do
     cp "$source/$role$suffix" "packages/$package/"
     if [[ -z "$suffix" ]]; then chmod +x "packages/$package/$role"; fi
   done
-  cp README.md LICENSE-MIT "packages/$package/"
+  cp README.md README.en.md LICENSE-MIT "packages/$package/"
+  cp -R docs "packages/$package/"
   cp scripts/package/START-HERE.txt "packages/$package/"
   if [[ "$platform" == windows-* ]]; then
     cp scripts/package/INSTALL.cmd "packages/$package/"
