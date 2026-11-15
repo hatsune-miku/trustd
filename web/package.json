@@ -1,7 +1,7 @@
 {
   "name": "trustd-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "packageManager": "pnpm@10.14.0",
   "scripts": {
@@ -10,7 +10,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:mcp": "cargo build --manifest-path ../Cargo.toml --bin trustd-stdio && node --test tests/mcp/stdio.test.mjs",
+    "test:mcp": "cargo build --manifest-path ../Cargo.toml --bin trustd-stdio --bin trustd-agent-stdio && node --test tests/mcp/stdio.test.mjs",
     "test:e2e": "cargo build --manifest-path ../Cargo.toml -p localshelld-sync-server && playwright test"
   },
   "dependencies": {

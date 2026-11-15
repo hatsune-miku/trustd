@@ -8,4 +8,5 @@ case "${RUNNER_OS:-$(uname -s)}" in
   *) privileged=trustd-root ;;
 esac
 cargo build --locked --release --no-default-features \
-  --bin trustd --bin trustd-user-headless --bin trustd-stdio --bin "$privileged"
+  --bin trustd --bin trustd-user-headless --bin trustd-stdio --bin trustd-agent-stdio --bin "$privileged"
+cargo build --locked --release -p trustd-remote --bin trustd-relay

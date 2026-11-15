@@ -8,7 +8,7 @@ pub const INVALID_TIMEOUT: &str =
 
 pub fn server_instructions() -> String {
     format!(
-        "{SERVER_INSTRUCTIONS} This server uses {} on {}; use that shell's syntax. Commands have no default execution timeout. An execution timeout interrupts only that command and preserves the persistent shell and authorization session. Client timeout or HTTP disconnection alone does not stop commands. Explicit cancellation destroys the session. Do not use exit in commands: it exits the persistent shell and invalidates the session. No background-task or interactive-terminal API is provided. Session handles are credentials; do not repeat them in prose or logs. {}",
+        "{SERVER_INSTRUCTIONS} This server uses {} on {}; use that shell's syntax. Commands have no default execution timeout. An execution timeout interrupts only that command and preserves the persistent shell and authorization session. Client timeout or HTTP disconnection alone does not stop commands. Explicit cancellation destroys the session. Do not use exit in commands: it exits the persistent shell and invalidates the session. The remote API provides durable jobs; local run has no background-task or interactive-terminal API. Session handles are credentials; do not repeat them in prose or logs. {}",
         crate::shell::ShellKind::native().name(),
         std::env::consts::OS,
         identity_description()
@@ -136,6 +136,18 @@ pub fn tool_definitions() -> Value {
             "description":"Invalidate the handle and terminate all of its identity-specific shells and process trees.",
             "inputSchema":{"type":"object","properties":{"handle":{"type":"string"}},"required":["handle"],"additionalProperties":false},
             "outputSchema":{"type":"object","properties":{"destroyed":{"type":"boolean"}},"required":["destroyed"]}
+        },
+        {
+            "name":"remote_hosts","title":"List paired remote hosts",
+            "description":"Requires local authorization. List paired device IDs and labels; both ends connect outward to a relay.",
+            "inputSchema":{"type":"object","properties":{"handle":{"type":"string"}},"required":["handle"],"additionalProperties":false},
+            "outputSchema":{"type":"object","properties":{"connected":{"type":"boolean"},"hosts":{"type":"array","items":{"type":"object"}}},"required":["connected","hosts"]}
+        },
+        {
+            "name":"remote","title":"Use a paired remote host",
+            "description":"Requires local authorization. Call host_info for target platform and operation schemas, then session_open. Session references are routing IDs, not bearer credentials. Use job_start with a stable idempotency_key for durable work and job_get/job_output to observe it. Disconnecting or closing this adapter does not cancel remote jobs. Never retry run or agent_send after an ambiguous failure. Identities and cwd refer to the target. agent_start/resume manage trustd-owned Codex conversations. Answer approval requests in the management UI.",
+            "inputSchema":{"type":"object","properties":{"handle":{"type":"string"},"target":{"type":"string"},"operation":{"type":"string"},"arguments":{"type":"object"}},"required":["handle","target","operation"],"additionalProperties":false},
+            "outputSchema":{"type":"object","properties":{},"additionalProperties":true}
         }
     ])
 }

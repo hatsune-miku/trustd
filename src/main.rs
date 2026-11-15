@@ -38,6 +38,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CommandKind {
+    /// Configure remote connections and device grants while the user daemon is stopped.
+    Remote {
+        #[command(subcommand)]
+        command: localshelld::remote::SetupCommand,
+    },
     /// Start installation and maintenance (terminal wizard on headless Linux).
     #[command(alias = "setup")]
     Maintenance {
@@ -141,8 +146,11 @@ fn main() -> Result<()> {
         localshelld_native_process::detach_owned_console()
             .context("failed to detach the user daemon's standalone console")?;
     }
-    if matches!(&command, CommandKind::Maintenance { .. }) && maintenance::relocate()? {
-        return Ok(());
+    if matches!(&command, CommandKind::Maintenance { .. }) {
+        update::complete_legacy_bundle()?;
+        if maintenance::relocate()? {
+            return Ok(());
+        }
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -253,6 +261,7 @@ async fn run_command(command: CommandKind) -> Result<()> {
         CommandKind::MaintenanceApply { plan, digest } => {
             tokio::task::spawn_blocking(move || maintenance::apply(&plan, &digest)).await?
         }
+        CommandKind::Remote { command } => localshelld::remote::configure_local(command),
         CommandKind::Init {
             user,
             config,

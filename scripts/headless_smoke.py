@@ -14,7 +14,7 @@ import urllib.request
 def main():
     assert sys.platform == "linux", "Linux headless bundle only"
     bundle = Path(sys.argv[1]).resolve()
-    for role in ("trustd", "trustd-root", "trustd-user-headless", "trustd-stdio"):
+    for role in ("trustd", "trustd-root", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio", "trustd-relay"):
         binary = bundle / role
         libraries = subprocess.run(["ldd", str(binary)], check=True, capture_output=True, text=True).stdout
         assert "not found" not in libraries, libraries

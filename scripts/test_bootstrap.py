@@ -40,7 +40,7 @@ class BootstrapTests(unittest.TestCase):
                     (base / "release.json").write_text(json.dumps({"tag_name": "v0.1.0-test"}), encoding="utf-8")
                     asset = f"trustd-{platform}.tar.gz"
                     with tarfile.open(base / asset, "w:gz") as archive:
-                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-user-headless", "trustd-stdio"):
+                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio", "trustd-relay"):
                             if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             content = b'#!/bin/sh\nprintf "%s\\n" "$@" > "$TRUSTD_FIXTURE/launched"\n[ "$TRUSTD_FIXTURE_MODE" != wizard ]\n'
@@ -91,7 +91,7 @@ cp "$TRUSTD_FIXTURE/$file" "$output"
                     sentinel.write_text("unrelated", encoding="utf-8")
                     asset = "trustd-windows-x86_64.zip"
                     with zipfile.ZipFile(base / asset, "w") as archive:
-                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-user-headless", "trustd-stdio"):
+                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio", "trustd-relay"):
                             if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             archive.writestr(f"trustd-windows-x86_64/{role}.exe", b"never executed")
@@ -122,6 +122,7 @@ function Start-Process {
                                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
                                             env={**{key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}, "TEMP": str(tmp), "TMP": str(tmp),
                                                  "TRUSTD_FIXTURE": str(base), "TRUSTD_FIXTURE_MODE": mode,
+                                                 "PROCESSOR_ARCHITECTURE": "AMD64", "PROCESSOR_ARCHITEW6432": "AMD64",
                                                  "TRUSTD_BOOTSTRAP_SOURCE": str(ROOT / "install.ps1")})
                     self.assertEqual(result.returncode == 0, mode == "success", result.stderr)
                     self.assertEqual((base / "launched").exists(), mode in ("success", "wizard"))

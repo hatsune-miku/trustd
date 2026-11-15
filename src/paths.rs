@@ -68,7 +68,12 @@ impl MachinePaths {
         };
         matches!(
             name,
-            "trustd" | "trustd-user" | "trustd-user-headless" | "trustd-stdio"
+            "trustd"
+                | "trustd-user"
+                | "trustd-user-headless"
+                | "trustd-stdio"
+                | "trustd-agent-stdio"
+                | "trustd-relay"
         ) || name
             == if cfg!(windows) {
                 "trustd-system"
@@ -108,6 +113,14 @@ mod tests {
         let paths = MachinePaths::resolve().unwrap();
         let name = paths.executable().file_name().unwrap().to_owned();
         assert!(paths.owns_program(&paths.executable()));
+        for role in ["trustd-agent-stdio", "trustd-relay"] {
+            let name = if cfg!(windows) {
+                format!("{role}.exe")
+            } else {
+                role.into()
+            };
+            assert!(paths.owns_program(&paths.program.join(name)));
+        }
         assert!(
             paths.owns_program(
                 &paths

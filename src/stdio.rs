@@ -246,7 +246,7 @@ impl Adapter {
                 Ok(result)
             }
             "destroy" => self.close().await,
-            "run" | "secrets_get" => {
+            "run" | "secrets_get" | "remote" | "remote_hosts" => {
                 let handle = {
                     let _transition = self.lifecycle.lock().await;
                     ensure!(
@@ -261,13 +261,14 @@ impl Adapter {
                 };
                 args["handle"] = json!(handle.as_str());
                 let request = self.request(
-                    if name == "run" {
-                        "/v1/commands/run"
-                    } else {
-                        "/v1/secrets/get"
+                    match name {
+                        "run" => "/v1/commands/run",
+                        "remote" => "/v2/remote/invoke",
+                        "remote_hosts" => "/v2/remote/hosts",
+                        _ => "/v1/secrets/get",
                     },
                     Some(args),
-                    name == "run",
+                    matches!(name, "run" | "remote"),
                 );
                 let result = tokio::select! {
                     result = request => result,

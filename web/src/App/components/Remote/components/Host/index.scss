@@ -1,0 +1,33 @@
+.remote-host {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 22px;
+  .remote-host-title {
+    margin: 0;
+    font-size: 20px;
+  }
+  .remote-task {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .remote-task-command {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 90px;
+    overflow: auto;
+  }
+  .remote-question {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+}

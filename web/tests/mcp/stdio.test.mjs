@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -18,6 +21,8 @@ const properties = {
   enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'sudo', 'cwd', 'confirm_text'],
   run: ['command', 'stdin', 'timeout_seconds', identity],
   destroy: [],
+  remote_hosts: [],
+  remote: ['target', 'operation', 'arguments'],
 }
 const required = {
   secrets_list: ['query'],
@@ -25,7 +30,43 @@ const required = {
   enter_interactive: ['agent_name', 'request_reason', 'confirm_text'],
   run: ['command', identity],
   destroy: [],
+  remote_hosts: [],
+  remote: ['target', 'operation'],
 }
+
+test('delegated Codex adapter exposes scoped tools without its capability or session reference', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trustd-agent-schema-'))
+  const token = path.join(directory, 'capability')
+  await fs.writeFile(token, 'fixture-private-capability', { mode: 0o600 })
+  const transport = new StdioClientTransport({
+    command: path.join(path.dirname(command), `trustd-agent-stdio${process.platform === 'win32' ? '.exe' : ''}`),
+    args: ['--endpoint', '127.0.0.1:1', '--token-file', token],
+    stderr: 'pipe',
+  })
+  const client = new Client({ name: 'trustd-agent-schema-test', version: '1' })
+  transport.stderr?.resume()
+  try {
+    await client.connect(transport)
+    const { tools } = await client.listTools()
+    assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
+    assert.deepEqual(
+      tools.map((tool) => tool.name),
+      ['run', 'job_start', 'job_get', 'job_list', 'job_cancel', 'job_output', 'file_stat', 'file_read', 'file_write']
+    )
+    assert.equal(JSON.stringify(tools).includes('fixture-private-capability'), false)
+    for (const tool of tools) {
+      assert.equal(Object.hasOwn(tool.inputSchema.properties, 'session_ref'), false)
+      assert.equal(tool.inputSchema.additionalProperties, false)
+      if (tool.inputSchema.required) assert.ok(tool.inputSchema.required.length > 0)
+    }
+  } finally {
+    await client.close()
+    await transport.close()
+    assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()))
+    assert.ok(path.basename(directory).startsWith('trustd-agent-schema-'))
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('official SDK lists a single authorization entry with no policy disclosures', async () => {
   // Listing tools needs no daemon, real token, authorization or shell execution.
@@ -43,7 +84,7 @@ test('official SDK lists a single authorization entry with no policy disclosures
     assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
     assert.deepEqual(
       tools.map((tool) => tool.name),
-      ['secrets_list', 'secrets_get', 'enter_interactive', 'run', 'destroy']
+      ['secrets_list', 'secrets_get', 'enter_interactive', 'run', 'destroy', 'remote_hosts', 'remote']
     )
     for (const removed of ['preauthor', 'pre-author', 'remember', 'automatic', 'reused']) {
       assert.equal(JSON.stringify(tools).includes(removed), false)

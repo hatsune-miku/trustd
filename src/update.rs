@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 const REPOSITORY: &str = "hatsune-miku/trustd";
 const API: &str = "https://api.github.com/repos/hatsune-miku/trustd";
 const MAX_DOWNLOAD: u64 = 128 * 1024 * 1024;
-// Five role-specific programs may jointly exceed the old single-executable
+// Role-specific programs may jointly exceed the old single-executable
 // limit. Keep per-program/download limits and bound total expanded tar bytes.
-const MAX_EXPANDED_BUNDLE: u64 = 5 * MAX_DOWNLOAD + 1024 * 1024;
+const MAX_EXPANDED_BUNDLE: u64 = 7 * MAX_DOWNLOAD + 1024 * 1024;
 const MAX_JSON: u64 = 4 * 1024 * 1024;
 
 /// Reuse the same managed-registration checks for an idempotent installation.
@@ -412,6 +412,73 @@ pub(super) fn probe(binary: &Path, role: &str) -> Result<String> {
         .context("unexpected binary version response")?;
     version(value)?;
     Ok(value.to_owned())
+}
+
+/// v0.1 updaters unpack only the five original programs. Their verified v0.2
+/// maintenance executable completes that bundle before opening the installer.
+pub(crate) fn complete_legacy_bundle() -> Result<()> {
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let directory = executable.parent().context("missing bundle directory")?;
+    if !needs_extension_roles(directory) || localshelld::VERSION.ends_with("-dev") {
+        return Ok(());
+    }
+    let client = client()?;
+    let release = find_release(
+        &client,
+        &Options {
+            check: false,
+            download_only: true,
+            prerelease: false,
+            tag: Some(format!("v{}", localshelld::VERSION)),
+            allow_downgrade: false,
+        },
+    )?;
+    let platform = platform()?;
+    let (index, name) = asset_for(&release, platform)?;
+    let asset = &release.assets[index];
+    let expected = expected_hash(&client, &release, asset)?;
+    let stage = tempfile::Builder::new()
+        .prefix("trustd-complete-")
+        .tempdir()?;
+    let archive = stage.path().join("download");
+    println!("Completing the verified release bundle for this update...");
+    copy_bounded(asset_response(&client, asset)?, &archive)?;
+    ensure!(
+        hash_file(&archive)? == expected,
+        "release checksum mismatch; bundle was not changed"
+    );
+    let programs = stage.path().join("programs");
+    fs::create_dir(&programs)?;
+    unpack(&archive, &name, platform, &programs)?;
+    complete_from_verified_bundle(directory, &programs)
+}
+
+fn needs_extension_roles(directory: &Path) -> bool {
+    let extensions = [
+        super::bundle::filename("trustd-agent-stdio"),
+        super::bundle::filename("trustd-relay"),
+    ];
+    extensions.iter().any(|name| !directory.join(name).exists())
+        && super::bundle::names(cfg!(windows))
+            .iter()
+            .filter(|name| !extensions.contains(name))
+            .all(|name| directory.join(name).is_file())
+}
+
+fn complete_from_verified_bundle(directory: &Path, verified: &Path) -> Result<()> {
+    let manifest = super::bundle::Manifest::read(verified)?;
+    for (name, expected) in &manifest.0 {
+        let existing = directory.join(name);
+        if existing.try_exists()? {
+            service::validate_target(&existing)?;
+            ensure!(
+                hash_file(&existing)? == *expected,
+                "existing program does not match the verified release: {name}"
+            );
+        }
+    }
+    manifest.copy(verified, directory)?;
+    manifest.verify(directory)
 }
 
 pub fn run(options: Options) -> Result<()> {

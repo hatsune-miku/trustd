@@ -254,7 +254,9 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
             "secrets_get",
             "enter_interactive",
             "run",
-            "destroy"
+            "destroy",
+            "remote_hosts",
+            "remote"
         ]
     );
     let (_, rpc) = super::tests::request(&app, "/mcp", json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"localshelld_enter_with_preauthorized_credential", "arguments":{"token":token, "confirm_text":"OK"}}})).await;

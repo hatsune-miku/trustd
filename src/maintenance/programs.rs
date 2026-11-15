@@ -101,7 +101,7 @@ shift
 "$@"
 result=$?
 if [ ! -L "$stage" ]; then
-    for name in trustd trustd-user trustd-user-headless trustd-root trustd-stdio; do
+    for name in trustd trustd-user trustd-user-headless trustd-root trustd-stdio trustd-agent-stdio trustd-relay; do
         /bin/rm -f -- "$stage/$name"
     done
     /bin/rmdir -- "$stage" 2>/dev/null || :

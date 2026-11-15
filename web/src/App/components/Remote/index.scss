@@ -1,0 +1,90 @@
+.remote-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  .remote-heading,
+  .remote-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .remote-heading {
+    justify-content: space-between;
+  }
+  .remote-connection {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .remote-setup {
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+  .remote-setup .form-stack {
+    margin: 18px 0;
+  }
+  .remote-peers {
+    display: flex;
+    flex-direction: column;
+  }
+  .remote-peer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .remote-peer-identity {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+  .remote-peer-id {
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .remote-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .remote-checkbox {
+    width: 16px;
+    height: 16px;
+  }
+  .remote-output {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 420px;
+    overflow: auto;
+    background: var(--panel, #f6f7f9);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    font-size: 13px;
+  }
+  .remote-textarea {
+    width: 100%;
+    min-height: 100px;
+    resize: vertical;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font: inherit;
+    background: transparent;
+    color: inherit;
+    box-sizing: border-box;
+  }
+  .remote-select {
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font: inherit;
+    max-width: 100%;
+  }
+}

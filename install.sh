@@ -44,7 +44,7 @@ fi
 [ "$trustd_actual" = "$trustd_expected" ] || { printf '%s\n' 'Release checksum verification failed.' >&2; exit 1; }
 tar -xzf "$trustd_tmp/$trustd_archive" -C "$trustd_tmp"
 trustd_bundle="$trustd_tmp/trustd-$trustd_platform"
-for trustd_role in trustd trustd-root trustd-user trustd-user-headless trustd-stdio; do
+for trustd_role in trustd trustd-root trustd-user trustd-user-headless trustd-stdio trustd-agent-stdio trustd-relay; do
   [ -f "$trustd_bundle/$trustd_role" ] || { printf '%s\n' 'The release package is incomplete.' >&2; exit 1; }
   chmod +x "$trustd_bundle/$trustd_role"
 done

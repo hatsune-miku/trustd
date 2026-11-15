@@ -12,6 +12,7 @@ macOS 和 Linux 请以普通登录用户启动。
 在“安装选项”中选择要接入的 AI agent；安装后重启对应客户端。
 
 trustd-user、trustd-user-headless、trustd-system / trustd-root、trustd-stdio 是配套程序，无需逐个运行。
+trustd-agent-stdio 用于远端 Codex 对话；trustd-relay 是独立中转服务。配置方法见仓库 docs/REMOTE.md。
 请保持它们与安装入口在同一个目录，不要单独拖出安装入口。
 
 macOS 程序安装到 /Library/trustd，维护入口位于 ~/Applications/trustd.app。

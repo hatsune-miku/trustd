@@ -138,6 +138,7 @@ where
     }
     state.start_sync_worker().await;
     state.start_agent_worker().await;
+    state.start_remote_worker().await?;
     axum::serve(
         listener,
         router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),

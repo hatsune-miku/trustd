@@ -40,6 +40,11 @@ pub enum Request {
         options: crate::execution::EnterOptions,
         agent: Option<crate::agents::Identity>,
     },
+    RemoteEnter {
+        peer_id: String,
+        secret_keys: Vec<String>,
+        options: crate::execution::EnterOptions,
+    },
     AgentsList,
     AgentPolicy {
         change: localshelld_telegram::agents::Change,
@@ -316,6 +321,19 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
                 agent,
             ))
             .await
+        }
+        (
+            DaemonMode::Privileged,
+            Request::RemoteEnter {
+                peer_id,
+                secret_keys,
+                options,
+            },
+        ) => {
+            let result =
+                Box::pin(state.enter_remote_granted(&peer_id, &secret_keys, options)).await?;
+            serde_json::to_value(result)
+                .map_err(|_| ApiError::internal("remote grant serialization failed"))
         }
         (DaemonMode::User, Request::AgentsList) => Ok(json!(Box::pin(state.agent_list()).await?)),
         (DaemonMode::User, Request::AgentPolicy { change }) => {

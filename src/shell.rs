@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
 
-mod transport;
+pub(crate) mod transport;
 use crate::execution::RunOptions;
 use transport::Process;
 

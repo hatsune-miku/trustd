@@ -42,6 +42,7 @@ pub struct AppState {
     pub(crate) agents: Arc<Mutex<crate::agents::Registry>>,
     interactive_permits: Arc<tokio::sync::Semaphore>,
     pub(crate) logs: Arc<crate::logs::Logs>,
+    pub(crate) remote: Arc<crate::remote::Runtime>,
 }
 
 struct Session {
@@ -52,6 +53,7 @@ struct Session {
     shell: Arc<Shell>,
     environment: Arc<crate::secrets::Environment>,
     remote_handle: Option<String>,
+    remote_peer: Option<String>,
     #[cfg(windows)]
     administrator: Arc<tokio::sync::OnceCell<Arc<Shell>>>,
 }
@@ -228,6 +230,7 @@ impl AppState {
             agents: Arc::new(Mutex::new(crate::agents::Registry::default())),
             interactive_permits: Arc::new(tokio::sync::Semaphore::new(crate::consent::MAX_PENDING)),
             logs: Arc::new(crate::logs::Logs::default()),
+            remote: Arc::new(crate::remote::Runtime::default()),
             mode: DaemonMode::Privileged,
             peer: None,
             config: Arc::new(config),
@@ -237,6 +240,7 @@ impl AppState {
     }
 
     pub fn with_storage(mut self, path: std::path::PathBuf) -> anyhow::Result<Self> {
+        self.remote = Arc::new(crate::remote::Runtime::load(&path)?);
         self.logs = Arc::new(crate::logs::Logs::new(&path));
         self.settings = Arc::new(Mutex::new(Settings::load(path, (*self.config).clone())?));
         Ok(self)
@@ -563,6 +567,7 @@ impl AppState {
                     shell: Arc::new(shell),
                     environment: snapshot,
                     remote_handle: None,
+                    remote_peer: None,
                     #[cfg(windows)]
                     administrator: Arc::new(tokio::sync::OnceCell::new()),
                 },
@@ -703,6 +708,7 @@ impl AppState {
                     shell: Arc::clone(&shell),
                     environment,
                     remote_handle: Some(entered.handle.clone()),
+                    remote_peer: None,
                     #[cfg(windows)]
                     administrator: Arc::new(tokio::sync::OnceCell::new()),
                 },
@@ -791,11 +797,17 @@ impl AppState {
             .ok_or_else(|| ApiError::forbidden("secret key is not authorized for this session"))
     }
 
+    pub(crate) async fn set_remote_session_peer(&self, handle: &str, peer: &str) {
+        if let Some(session) = self.sessions.lock().await.by_handle.get_mut(handle) {
+            session.remote_peer = Some(peer.into());
+        }
+    }
+
     pub(crate) async fn session_environment(
         &self,
         handle: &str,
     ) -> Result<crate::secrets::Environment, ApiError> {
-        self.validate_session(handle, false).await?;
+        self.validate_authorized_session(handle).await?;
         self.sessions
             .lock()
             .await
@@ -803,6 +815,34 @@ impl AppState {
             .get(handle)
             .map(|session| (*session.environment).clone())
             .ok_or_else(|| AuthError::InvalidCredential.into())
+    }
+
+    pub(crate) async fn validate_authorized_session(&self, handle: &str) -> Result<(), ApiError> {
+        let (live, remote) = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .by_handle
+                .get(handle)
+                .ok_or(AuthError::InvalidCredential)?;
+            (session.is_live(), session.remote_handle.clone())
+        };
+        if !live {
+            let _ = self.destroy_session(handle).await;
+            return Err(AuthError::Expired.into());
+        }
+        if let Some(remote) = remote {
+            let result = self
+                .peer
+                .as_ref()
+                .expect("remote session has a peer")
+                .validate(&remote, false)
+                .await;
+            if let Err(error) = result {
+                let _ = self.destroy_session(handle).await;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     #[cfg(any(test, not(windows)))]
@@ -839,12 +879,12 @@ impl AppState {
         let command = command.to_owned();
         tokio::spawn(async move {
             let context = state.sessions.lock().await.by_handle.get(&handle)
-                .map(|session| (session.id.clone(), session.environment.clone()));
-            let environment = context.as_ref().map(|(_, environment)| environment.as_ref());
+                .map(|session| (session.id.clone(), session.environment.clone(), session.remote_peer.clone()));
+            let environment = context.as_ref().map(|(_, environment, _)| environment.as_ref());
             let logged_command = crate::logs::redact(&command, &handle, environment);
             let id = uuid::Uuid::new_v4().to_string();
             let mut entry = serde_json::json!({"id":id,"session_id":context.as_ref().map(|value| &value.0),
-                "command":logged_command,"privilege_level":privilege_level,"daemon":state.mode});
+                "command":logged_command,"privilege_level":privilege_level,"daemon":state.mode,"peer":context.as_ref().and_then(|value| value.2.as_deref())});
             state.logs.record(crate::logs::Kind::Command, "command.started", entry.clone()).await;
             let result = state
                 .run_command_inner(&handle, &command, privilege_level, options)
@@ -1208,6 +1248,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) {
+        self.stop_remote_worker().await;
         self.stop_sync_worker().await;
         self.stop_agent_worker().await;
         let sessions = {
@@ -1231,7 +1272,7 @@ impl AppState {
         }
     }
 
-    async fn validate_session(&self, handle: &str, watch: bool) -> Result<(), ApiError> {
+    pub(crate) async fn validate_session(&self, handle: &str, watch: bool) -> Result<(), ApiError> {
         if self.mode != DaemonMode::Privileged {
             return Err(ApiError::forbidden(
                 "session validation is only served by the privileged daemon",
@@ -1321,6 +1362,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(crate::management::routes(state.clone()))
         .merge(crate::api::routes())
+        .merge(crate::remote::routes())
         .route("/", get(crate::assets::serve))
         .route("/health", get(health))
         // AEAD/base64 expands a valid public JSON request beyond 2 MiB.

@@ -31,6 +31,8 @@ pub fn names(windows: bool) -> Vec<String> {
             "trustd-root"
         },
         "trustd-stdio",
+        "trustd-agent-stdio",
+        "trustd-relay",
     ]
     .into_iter()
     .map(|name| {
@@ -267,7 +269,10 @@ mod tests {
         manifest.replace(source.path(), target.path()).unwrap();
         manifest.replace(source.path(), target.path()).unwrap();
         manifest.verify(target.path()).unwrap();
-        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 5);
+        assert_eq!(
+            fs::read_dir(target.path()).unwrap().count(),
+            names(cfg!(windows)).len()
+        );
     }
 
     #[test]

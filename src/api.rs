@@ -21,6 +21,8 @@ pub(crate) enum Operation {
     EnterInteractive,
     Run,
     Destroy,
+    RemoteHosts,
+    Remote,
 }
 
 impl Operation {
@@ -31,6 +33,8 @@ impl Operation {
             "enter_interactive" | "localshelld_enter_interactive" => Self::EnterInteractive,
             "run" | "localshelld_run" => Self::Run,
             "destroy" | "localshelld_destroy_session" => Self::Destroy,
+            "remote_hosts" => Self::RemoteHosts,
+            "remote" => Self::Remote,
             _ => return None,
         })
     }
@@ -41,6 +45,8 @@ impl Operation {
             Self::EnterInteractive => "/v1/sessions/enter/interactive",
             Self::Run => "/v1/commands/run",
             Self::Destroy => "/v1/sessions/destroy",
+            Self::RemoteHosts => "/v2/remote/hosts",
+            Self::Remote => "/v2/remote/invoke",
         }
     }
     fn fields(self) -> &'static [&'static str] {
@@ -66,6 +72,8 @@ impl Operation {
                 "timeout_seconds",
             ],
             Self::Destroy => &["handle"],
+            Self::RemoteHosts => &["handle"],
+            Self::Remote => &["handle", "target", "operation", "arguments"],
         }
     }
 }
@@ -80,6 +88,8 @@ pub(crate) fn routes() -> Router<AppState> {
         Operation::EnterInteractive,
         Operation::Run,
         Operation::Destroy,
+        Operation::RemoteHosts,
+        Operation::Remote,
     ] {
         routes = routes.route(
             operation.path(),
@@ -130,6 +140,9 @@ pub(crate) async fn execute_from(
         Operation::SecretsGet => "credential.read",
         Operation::Destroy => "session.close",
         Operation::Run => return execute_inner(state, operation, arguments, peer).await,
+        Operation::Remote | Operation::RemoteHosts => {
+            return execute_inner(state, operation, arguments, peer).await;
+        }
     };
     let mut record = json!({});
     if let Some(key) = arguments.get("key").and_then(Value::as_str) {
@@ -188,6 +201,17 @@ async fn execute_inner(
         ));
     }
     match operation {
+        Operation::RemoteHosts | Operation::Remote => {
+            state
+                .validate_authorized_session(string_arg(&arguments, "handle")?)
+                .await?;
+            if matches!(operation, Operation::RemoteHosts) {
+                state.remote_hosts().await
+            } else {
+                state.remote_invoke(&arguments).await
+            }
+            .map_err(|e| ApiError::bad_request(e.to_string()))
+        }
         Operation::SecretsList => {
             // Validate before reading the local vault or calling its paired owner.
             let query = secret_query_arg(&arguments)?;

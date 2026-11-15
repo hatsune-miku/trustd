@@ -17,6 +17,7 @@ mod mcp_text;
 pub mod paths;
 mod peer;
 pub mod process;
+pub mod remote;
 pub(crate) mod secrets;
 pub mod server;
 pub(crate) mod settings;

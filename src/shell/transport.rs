@@ -13,7 +13,7 @@ use tokio::{
 type Reader = Box<dyn AsyncRead + Unpin + Send>;
 type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
-pub(super) enum Child {
+pub(crate) enum Child {
     Native(tokio::process::Child),
     #[cfg(windows)]
     Windows(localshelld_native_process::Child),
@@ -48,7 +48,7 @@ impl Child {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
-    async fn kill_tree(&mut self) {
+    pub(crate) async fn kill_tree(&mut self) {
         match self {
             Self::Native(child) => {
                 #[cfg(unix)]
