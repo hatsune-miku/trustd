@@ -6,7 +6,13 @@ import type { Invoke } from '../..'
 import { Feedback } from '../../../../../../../Feedback'
 import { useAction } from '../../../../../../../useAction'
 
-type Job = { id: string; command: string; status: string; result?: { exit_code: number | null }; error?: string }
+type Job = {
+  id: string
+  command: string
+  status: string
+  result?: { exit_code: number | null; stderr?: string }
+  error?: string
+}
 type Chunk = { text: string; next_offset: number }
 
 export function Jobs({
@@ -117,7 +123,7 @@ export function Jobs({
             )}
           </div>
           <pre className="remote-task-command">{job.command}</pre>
-          {job.error && <p>{job.error}</p>}
+          {(job.error || job.result?.stderr) && <pre className="remote-output">{job.error || job.result?.stderr}</pre>}
         </article>
       ))}
       {selected && (

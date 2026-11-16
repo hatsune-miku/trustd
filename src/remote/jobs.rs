@@ -338,7 +338,11 @@ fn redirect(command: &str, directory: &std::path::Path) -> String {
         .to_string_lossy()
         .replace('\'', "''");
     if cfg!(windows) {
-        format!("& {{\n{command}\n}} 1>> '{out}' 2>> '{err}'")
+        // PowerShell redirection expands wildcards even in quoted paths. Keep
+        // verbatim Windows prefixes (\\?\) and brackets in directory names literal.
+        format!(
+            "& {{\n{command}\n}} 1>> ([System.Management.Automation.WildcardPattern]::Escape('{out}')) 2>> ([System.Management.Automation.WildcardPattern]::Escape('{err}'))"
+        )
     } else {
         let quote =
             |path: &std::path::Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));

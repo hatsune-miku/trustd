@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 
-test('remote credential-only sessions, Codex approval and event pagination stay usable', async ({ page }) => {
+test('remote task errors, credential-only sessions, Codex approval and event pagination stay usable', async ({
+  page,
+}) => {
   const calls: { operation: string; arguments: Record<string, unknown> }[] = []
   let answered = false
   await page.route('**/health', async (route) => {
@@ -48,7 +50,18 @@ test('remote credential-only sessions, Codex approval and event pagination stay 
     if (body.operation === 'host_info') result = { platform: 'linux', arch: 'x86_64', version: 'test', identities: {} }
     if (body.operation === 'session_open')
       result = { session_ref: 'remote-session', privilege_levels: ['current-user'] }
-    if (body.operation === 'job_list') result = { jobs: [], next_offset: null }
+    if (body.operation === 'job_list')
+      result = {
+        jobs: [
+          {
+            id: 'failed-job',
+            command: 'calc',
+            status: 'failed',
+            result: { exit_code: 1, stderr: 'Out-File: output path could not be resolved' },
+          },
+        ],
+        next_offset: null,
+      }
     if (body.operation === 'agent_start' || body.operation === 'agent_get') result = agent
     if (body.operation === 'agent_respond') {
       answered = true
@@ -73,6 +86,7 @@ test('remote credential-only sessions, Codex approval and event pagination stay 
   await page.getByRole('button', { name: '验证身份', exact: true }).click()
   await page.getByRole('button', { name: '远端主机', exact: true }).click()
   await page.getByRole('button', { name: '连接', exact: true }).click()
+  await expect(page.locator('.remote-task')).toContainText('Out-File: output path could not be resolved')
   await page.getByLabel('初始目录').fill('/work')
   await page.locator('#remote-session-keys').fill('TEST_KEY')
   await expect(page.getByLabel('申请管理员 / root 身份')).not.toBeChecked()

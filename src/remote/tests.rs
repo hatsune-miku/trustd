@@ -2,13 +2,17 @@ use super::*;
 use crate::{auth::AuthManager, config::Config};
 
 async fn fixture() -> (tempfile::TempDir, AppState) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("trustd-remote [jobs] '")
+        .tempdir()
+        .unwrap();
     let config = Config {
         password_hash: "unused".into(),
         ..Config::default()
     };
     let mut state = AppState::new(config, AuthManager::new("unused".into(), None))
-        .with_storage(directory.path().join("config.toml"))
+        // Installed Windows paths are canonicalized and carry the \\?\ prefix.
+        .with_storage(directory.path().canonicalize().unwrap().join("config.toml"))
         .unwrap();
     state.mode = DaemonMode::User;
     state.remote.initialize().await.unwrap();
