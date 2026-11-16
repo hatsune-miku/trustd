@@ -6,15 +6,28 @@
 
 在一台可被两端访问的服务器上运行独立程序 `trustd-relay`。中转只监听 loopback，通过已有 HTTPS 反向代理提供 WebSocket 入口。默认端口是 `32129`。
 
-在各设备管理页面的「远端」中复制设备 ID、公钥。设备 ID 是公钥的 SHA-256 摘要。为每个设备分别创建中转令牌：
+在各设备管理页面的「远端」中复制设备 ID 或公钥，在中转服务器上登记：
 
 ```sh
-trustd-relay add-device --config /path/to/relay.json \
-  --device DEVICE_ID --token-file /private/path/device.token
-trustd-relay serve --config /path/to/relay.json --bind 127.0.0.1:32129
+trustd-relay add-device 'DEVICE_ID_OR_PUBLIC_KEY'
+trustd-relay serve
 ```
 
-`device.token` 是对应设备的接入凭据；配置文件仅保存令牌摘要。令牌文件应通过已有的可信方式传给该设备。在管理页面填写 HTTPS 中转地址、令牌，再添加另一台设备的公钥。双方都要添加对方公钥；在接受执行请求的一端明确授予执行权限、sudo 权限和可用凭据名称。凭据与 sudo 独立，凭据保留在执行端。
+位置参数接受 64 个十六进制字符的设备 ID，或管理页面显示的 Base64 公钥。公钥会自动换算成设备 ID，即公钥的 SHA-256 摘要；两种输入登记的是同一台设备。
+
+`--config` 可省略，默认路径为：
+
+| 平台 | 中转配置文件 |
+| --- | --- |
+| Linux | `/var/lib/trustd-relay/config.json` |
+| macOS | `/Library/Application Support/trustd-relay/config.json` |
+| Windows | `%ProgramData%\trustd-relay\config.json` |
+
+`--token-file` 可省略，默认将令牌写入配置文件同目录下的 `<设备ID>.token`，命令完成后会显示文件路径。配置文件保存各设备的令牌摘要。使用 `--config /custom/relay.json` 时，默认令牌也写入 `/custom/`；仍可用 `--token-file` 单独指定输出路径。
+
+以独立服务账号运行中转时，使用该账号登记设备，例如 Linux 上的 `sudo -u trustd-relay trustd-relay add-device 'DEVICE_ID_OR_PUBLIC_KEY'`。同一设备再次登记会生成新令牌并替换旧令牌，配置变更不需要重启中转。旧的 `--device DEVICE_ID` 写法仍兼容。
+
+将令牌文件中的完整内容填入对应设备管理页的接入令牌栏，同时填写 HTTPS 中转地址，再添加另一台设备的公钥。双方都要添加对方公钥；在接受执行请求的一端明确授予执行权限、sudo 权限和可用凭据名称。中转接入登记不代替设备之间的公钥配对。凭据与 sudo 独立，凭据保留在执行端。
 
 nginx 的示例配置，放入已经配置证书的 HTTPS server：
 
@@ -42,7 +55,7 @@ trustd remote pair --config /path/to/user/config.toml \
   --public-key PEER_PUBLIC_KEY --label workstation --allow-execution
 ```
 
-按需添加 `--sudo`、重复的 `--secret-key NAME`。撤销设备或缩减权限会终止其现有会话、任务和 Codex 进程。`trustd-relay remove-device --config ... --device ...` 则撤销中转接入，连接在下一次心跳检查后关闭。
+按需添加 `--sudo`、重复的 `--secret-key NAME`。撤销设备或缩减权限会终止其现有会话、任务和 Codex 进程。`trustd-relay remove-device 'DEVICE_ID_OR_PUBLIC_KEY'` 则撤销中转接入，连接在下一次心跳检查后关闭。
 
 ## 使用远端
 

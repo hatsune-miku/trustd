@@ -1,39 +1,95 @@
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use rand_core::{OsRng, RngCore};
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 use trustd_remote::relay::{self, Config};
 
 #[derive(Parser)]
 #[command(name="trustd-relay",version=trustd_remote::VERSION, about = "Authenticated, ciphertext-only trustd relay")]
 struct Options {
+    /// Relay registry shared by serve, add-device and remove-device.
+    #[arg(long, global = true, value_name = "PATH", default_value_os_t = default_config_path())]
+    config: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the relay behind an HTTPS reverse proxy.
     Serve {
-        #[arg(long)]
-        config: PathBuf,
         #[arg(long, default_value = "127.0.0.1:32129")]
         bind: SocketAddr,
     },
+    /// Register a device or replace its relay access token.
     AddDevice {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        device: String,
-        #[arg(long)]
-        token_file: PathBuf,
+        #[command(flatten)]
+        device: Device,
+        /// Write the generated token here. Defaults to <config directory>/<device ID>.token.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
     },
+    /// Revoke a device's relay access.
     RemoveDevice {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        device: String,
+        #[command(flatten)]
+        device: Device,
     },
+}
+
+#[derive(Args)]
+struct Device {
+    /// Device ID or base64 public key copied from the device's Remote page.
+    #[arg(value_name = "DEVICE", value_parser = device_id,
+        required_unless_present = "legacy_device", conflicts_with = "legacy_device")]
+    value: Option<String>,
+    #[arg(long = "device", hide = true, value_parser = device_id)]
+    legacy_device: Option<String>,
+}
+
+impl Device {
+    fn id(self) -> String {
+        self.value
+            .or(self.legacy_device)
+            .expect("device is required")
+    }
+}
+
+fn device_id(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(value.to_ascii_lowercase());
+    }
+    trustd_remote::node_id(value)
+        .map_err(|_| "expected a 64-character device ID or a base64 device public key".into())
+}
+
+fn default_config_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into()))
+            .join("trustd-relay")
+            .join("config.json")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Library/Application Support/trustd-relay/config.json")
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        PathBuf::from("/var/lib/trustd-relay/config.json")
+    }
+}
+
+fn default_token_file(config: &Path, device: &str) -> PathBuf {
+    config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{device}.token"))
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
@@ -70,8 +126,10 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .with_env_filter("trustd_remote=info")
         .init();
-    match Options::parse().command {
-        Command::Serve { config, bind } => {
+    let options = Options::parse();
+    let config = options.config;
+    match options.command {
+        Command::Serve { bind } => {
             ensure!(
                 bind.ip().is_loopback(),
                 "bind the relay behind an HTTPS reverse proxy on loopback"
@@ -85,15 +143,9 @@ async fn main() -> Result<()> {
                 })
                 .await?;
         }
-        Command::AddDevice {
-            config,
-            device,
-            token_file,
-        } => {
-            ensure!(
-                device.len() == 64 && device.bytes().all(|b| b.is_ascii_hexdigit()),
-                "invalid device ID"
-            );
+        Command::AddDevice { device, token_file } => {
+            let device = device.id();
+            let token_file = token_file.unwrap_or_else(|| default_token_file(&config, &device));
             let mut data = if config.exists() {
                 serde_json::from_slice::<Config>(&std::fs::read(&config)?)?
             } else {
@@ -103,14 +155,16 @@ async fn main() -> Result<()> {
             OsRng.fill_bytes(&mut token);
             let token = URL_SAFE_NO_PAD.encode(token);
             write_private(&token_file, token.as_bytes())?;
-            data.devices.insert(device, relay::token_hash(&token));
+            data.devices
+                .insert(device.clone(), relay::token_hash(&token));
             write_private(&config, &serde_json::to_vec_pretty(&data)?)?;
             println!(
-                "Device registered; access token written to {}",
+                "Device {device} registered; access token written to {}",
                 token_file.display()
             );
         }
-        Command::RemoveDevice { config, device } => {
+        Command::RemoveDevice { device } => {
+            let device = device.id();
             let mut data: Config = serde_json::from_slice(&std::fs::read(&config)?)?;
             data.devices.remove(&device);
             write_private(&config, &serde_json::to_vec_pretty(&data)?)?;
