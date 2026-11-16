@@ -104,7 +104,14 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+        // An administrator may update a registry owned by the service account.
+        // Atomic replacement must not make that registry unreadable to the relay.
+        match std::fs::metadata(path) {
+            Ok(previous) => chown(file.path(), Some(previous.uid()), Some(previous.gid()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         file.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }

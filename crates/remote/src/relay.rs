@@ -53,12 +53,14 @@ pub fn router(config: PathBuf) -> Router {
         })
 }
 
-fn authorized(path: &std::path::Path, device: &str, token: &str) -> bool {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Config>(&b).ok())
-        .and_then(|c| c.devices.get(device).cloned())
-        .is_some_and(|expected| expected == token_hash(token))
+fn authorized(path: &std::path::Path, device: &str, token: &str) -> Result<bool> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("could not read relay registry {}", path.display()))?;
+    let config: Config = serde_json::from_slice(&bytes).context("invalid relay registry")?;
+    Ok(config
+        .devices
+        .get(device)
+        .is_some_and(|expected| *expected == token_hash(token)))
 }
 
 fn announce_offline(peers: &BTreeMap<String, Connection>, device: &str) {
@@ -88,8 +90,13 @@ async fn connect(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default()
         .to_owned();
-    if !authorized(&hub.config, &device, &token) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    match authorized(&hub.config, &device, &token) {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "relay registry unavailable");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     }
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
@@ -154,7 +161,7 @@ async fn connection(hub: Hub, device: String, token: String, socket: WebSocket) 
                     }
                 }
                 _ = heartbeat.tick() => {
-                    if last_seen.elapsed() > Duration::from_secs(70) || !authorized(&hub.config, &device, &token) { break; }
+                    if last_seen.elapsed() > Duration::from_secs(70) || !authorized(&hub.config, &device, &token)? { break; }
                     sink.send(Message::Ping(Vec::new().into())).await?;
                 }
             }

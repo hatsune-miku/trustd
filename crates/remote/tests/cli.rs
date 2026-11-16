@@ -50,3 +50,30 @@ fn positional_identity_defaults_and_legacy_overrides_share_the_registry() {
     let registry: Config = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
     assert!(registry.devices.is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires root to reproduce updating a service-owned registry"]
+fn administrator_updates_preserve_registry_and_token_ownership() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(fs::metadata(directory.path()).unwrap().uid(), 0);
+    let config = directory.path().join("registry.json");
+    let id = Identity::generate().unwrap().id().unwrap();
+    let token = directory.path().join(format!("{id}.token"));
+    run(&config, &["add-device", &id]);
+    for path in [&config, &token] {
+        chown(path, Some(65534), Some(65534)).unwrap();
+    }
+
+    run(&config, &["add-device", &id]);
+    for path in [&config, &token] {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!((metadata.uid(), metadata.gid()), (65534, 65534));
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+    run(&config, &["remove-device", &id]);
+    let metadata = fs::metadata(&config).unwrap();
+    assert_eq!((metadata.uid(), metadata.gid()), (65534, 65534));
+}

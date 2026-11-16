@@ -124,21 +124,23 @@ async fn relay_rejects_missing_credentials_and_remote_cleartext() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("relay.json");
     std::fs::write(&path, b"{\"devices\":{}}").unwrap();
+    let registry = path.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, relay::router(path)).await.unwrap();
     });
-    let response = reqwest::Client::new()
+    let request = reqwest::Client::new()
         .get(format!("http://{address}/v2/relay/{}", "a".repeat(64)))
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .send()
-        .await
-        .unwrap();
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+    let response = request.try_clone().unwrap().send().await.unwrap();
     assert_eq!(response.status(), 401);
+    std::fs::remove_file(registry).unwrap();
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status(), 503);
     let node = Node::new(Identity::generate().unwrap(), BTreeMap::new());
     let handler: Handler = Arc::new(|_, _| Box::pin(async { Ok(Value::Null) }));
     let task = tokio::spawn(
