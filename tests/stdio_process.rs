@@ -115,7 +115,7 @@ async fn binary_hides_credentials_survives_partial_input_and_cleans_up_on_eof() 
     );
     send(&mut write, 2, "tools/list", json!({})).await;
     let listed = receive(&mut read).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
     send(
         &mut write,
         3,

@@ -251,7 +251,6 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
         names,
         [
             "secrets_list",
-            "secrets_get",
             "enter_interactive",
             "run",
             "destroy",

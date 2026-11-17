@@ -186,3 +186,61 @@ async fn grants_restrict_elevation_credentials_and_peer_sessions() {
     );
     state.shutdown().await;
 }
+
+#[tokio::test]
+async fn granted_credentials_reach_commands_but_are_never_returned() {
+    let (_directory, state) = fixture().await;
+    state
+        .put_secret("REMOTE_GRANTED", "remote-fixture-value")
+        .await
+        .unwrap();
+    state
+        .remote
+        .saved
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .peers
+        .get_mut("alice")
+        .unwrap()
+        .secret_keys = vec!["REMOTE_GRANTED".into()];
+    let session = state
+        .remote_open("alice", &json!({"secret_keys":["REMOTE_GRANTED"]}))
+        .await
+        .unwrap();
+    let reference = session["session_ref"].clone();
+    // There is no plaintext read operation; the value is only injected.
+    let error = state
+        .remote_dispatch(
+            "alice",
+            json!({"operation":"secrets_get","arguments":{"session_ref":reference,"key":"REMOTE_GRANTED"}}),
+        )
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("remote-fixture-value"));
+    let mut args = execution(if cfg!(windows) {
+        "[Console]::Write($env:REMOTE_GRANTED)"
+    } else {
+        "printf '%s' \"$REMOTE_GRANTED\""
+    });
+    args["session_ref"] = reference;
+    let result = state
+        .remote_dispatch("alice", json!({"operation":"run","arguments":args}))
+        .await
+        .unwrap();
+    assert_eq!(result["stdout"], "remote-fixture-value");
+    let info = state
+        .remote_dispatch("alice", json!({"operation":"host_info"}))
+        .await
+        .unwrap();
+    let operations: Vec<_> = info["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|operation| operation["name"].as_str().unwrap())
+        .collect();
+    assert!(operations.contains(&"run"));
+    assert!(!operations.contains(&"secrets_get"));
+    state.shutdown().await;
+}

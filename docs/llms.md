@@ -4,9 +4,9 @@
 
 ## Recommended agent connection: stdio
 
-Launch `trustd-stdio` as an MCP subprocess. It holds one authorized session internally and never includes a handle in tool schemas or authorization responses. The tools are `secrets_list`, `secrets_get`, `enter_interactive`, `run`, and `destroy`. `run`, `secrets_get` and `destroy` do not accept a handle. Always use the connected adapter's `tools/list`, not the HTTP schemas below.
+Launch `trustd-stdio` as an MCP subprocess. It holds one authorized session internally and never includes a handle in tool schemas or authorization responses. The tools are `secrets_list`, `enter_interactive`, `run`, and `destroy`. `run` and `destroy` do not accept a handle. Always use the connected adapter's `tools/list`, not the HTTP schemas below.
 
-One adapter process is one isolation boundary, not necessarily one chat. Close the current session before entering another. Cancellation/EOF attempts to destroy the whole session, including late authorization results; forced process termination or an unreachable daemon cannot guarantee cleanup. The adapter does not retry commands or silently replace expired authorization. Explicit plaintext `secrets_get` remains available for user-requested reads.
+One adapter process is one isolation boundary, not necessarily one chat. Close the current session before entering another. Cancellation/EOF attempts to destroy the whole session, including late authorization results; forced process termination or an unreachable daemon cannot guarantee cleanup. The adapter does not retry commands or silently replace expired authorization. No tool reads credential values.
 
 The remaining document describes direct daemon HTTP/MCP access, where a handle is required for session operations.
 
@@ -32,10 +32,6 @@ Send POST bodies as JSON with `Content-Type: application/json`. Send the operati
 Optional `secret_keys` are injected as environment variables into every identity-specific shell in the session. Use `$env:KEY` in PowerShell or `$KEY` in Bash without printing credential values. Omitting `secret_keys` or passing an empty list creates a session without selected credentials. To change the selection, destroy the current session and enter again.
 
 Authorization has an independent `sudo` flag on every platform. It defaults to false. Credentials can be requested with `sudo:false` for current-user execution only. Request `sudo:true` when elevated execution is needed, then check `sudo_available` and `privilege_levels` in the response. Windows `run` continues to require `privilege_level`; the authorization flag does not replace that argument. Optional session `cwd` is an initial absolute directory for each identity-specific shell. Empty, null or omitted uses that identity's home directory. Shell profiles are loaded before entering the initial directory. These session options are immutable until the session is destroyed.
-
-## Explicit plaintext credential reads
-
-Discouraged unless the user explicitly requests plaintext. Prefer environment injection. After entering with the desired `secret_keys`, call `POST /v1/secrets/get` (MCP: `secrets_get`) with `{"handle":"<HANDLE>","key":"AUTHORIZED_KEY"}` to receive `{"key":"AUTHORIZED_KEY","value":"..."}`. The handle must be live and the key must be in its authorized snapshot. This does not read arbitrary vault entries or newly rotated values: destroy and re-enter to refresh the snapshot. Invalid/expired/destroyed/revoked handles return 401; keys outside the authorized selection return 403. Linked sessions must still pass validation at the issuing daemon; authority failure does not permit offline reads. Responses are not cached. Listing and entering still never return values implicitly.
 
 ## Execution, errors, and cancellation
 

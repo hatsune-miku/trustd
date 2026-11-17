@@ -85,11 +85,6 @@ impl Adapter {
                         "Close this adapter's current session and terminate its process trees. Idempotent when no session is open."
                     )
                 }
-                "secrets_get" => {
-                    entry["description"] = json!(
-                        "Discouraged unless the user explicitly requests plaintext. Prefer environment injection. Read one value from this adapter's authorized secret_keys snapshot."
-                    )
-                }
                 _ => {}
             }
         }
@@ -256,7 +251,7 @@ impl Adapter {
                 Ok(result)
             }
             "destroy" => self.close().await,
-            "run" | "secrets_get" | "remote" | "remote_hosts" => {
+            "run" | "remote" | "remote_hosts" => {
                 let handle = {
                     let _transition = self.lifecycle.lock().await;
                     ensure!(
@@ -274,8 +269,7 @@ impl Adapter {
                     match name {
                         "run" => "/v1/commands/run",
                         "remote" => "/v2/remote/invoke",
-                        "remote_hosts" => "/v2/remote/hosts",
-                        _ => "/v1/secrets/get",
+                        _ => "/v2/remote/hosts",
                     },
                     Some(args),
                     matches!(name, "run" | "remote"),
@@ -357,7 +351,7 @@ impl Adapter {
                             json!({"jsonrpc":"2.0","id":id,"result":{
                                 "protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false}},
                                 "serverInfo":{"name":"trustd-stdio","version":crate::VERSION},
-                                "instructions":"trustd holds one authorization session inside this adapter process. Request only the identities and credential keys needed for the user's task. Handles and configured tokens never appear in tools. One process is one isolation boundary, not necessarily one chat. Closing stdin or cancelling a run attempts to destroy the entire session; forced process termination cannot guarantee cleanup. Explicit credential reads remain available when the user requests plaintext."
+                                "instructions":"trustd holds one authorization session inside this adapter process. Request only the identities and credential keys needed for the user's task. Handles and configured tokens never appear in tools. One process is one isolation boundary, not necessarily one chat. Closing stdin or cancelling a run attempts to destroy the entire session; forced process termination cannot guarantee cleanup. No tool reads credential values; reference the injected environment variables in commands."
                             }})
                         }
                         "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),

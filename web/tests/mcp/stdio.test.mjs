@@ -17,7 +17,6 @@ const command =
 const identity = process.platform === 'win32' ? 'privilege_level' : 'sudo'
 const properties = {
   secrets_list: ['query'],
-  secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'secret_keys', 'sudo', 'cwd', 'confirm_text'],
   run: ['command', 'stdin', 'timeout_seconds', identity],
   destroy: [],
@@ -26,7 +25,6 @@ const properties = {
 }
 const required = {
   secrets_list: ['query'],
-  secrets_get: ['key'],
   enter_interactive: ['agent_name', 'request_reason', 'confirm_text'],
   run: ['command', identity],
   destroy: [],
@@ -84,9 +82,9 @@ test('official SDK lists a single authorization entry with no policy disclosures
     assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
     assert.deepEqual(
       tools.map((tool) => tool.name),
-      ['secrets_list', 'secrets_get', 'enter_interactive', 'run', 'destroy', 'remote_hosts', 'remote']
+      ['secrets_list', 'enter_interactive', 'run', 'destroy', 'remote_hosts', 'remote']
     )
-    for (const removed of ['preauthor', 'pre-author', 'remember', 'automatic', 'reused']) {
+    for (const removed of ['preauthor', 'pre-author', 'remember', 'automatic', 'reused', 'secrets_get', 'plaintext']) {
       assert.equal(JSON.stringify(tools).includes(removed), false)
     }
     for (const tool of tools) {

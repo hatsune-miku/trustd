@@ -17,7 +17,6 @@ mod llms;
 #[derive(Clone, Copy)]
 pub(crate) enum Operation {
     SecretsList,
-    SecretsGet,
     EnterInteractive,
     Run,
     Destroy,
@@ -29,7 +28,6 @@ impl Operation {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "secrets_list" => Self::SecretsList,
-            "secrets_get" => Self::SecretsGet,
             "enter_interactive" | "localshelld_enter_interactive" => Self::EnterInteractive,
             "run" | "localshelld_run" => Self::Run,
             "destroy" | "localshelld_destroy_session" => Self::Destroy,
@@ -41,7 +39,6 @@ impl Operation {
     fn path(self) -> &'static str {
         match self {
             Self::SecretsList => "/v1/secrets/keys",
-            Self::SecretsGet => "/v1/secrets/get",
             Self::EnterInteractive => "/v1/sessions/enter/interactive",
             Self::Run => "/v1/commands/run",
             Self::Destroy => "/v1/sessions/destroy",
@@ -52,7 +49,6 @@ impl Operation {
     fn fields(self) -> &'static [&'static str] {
         match self {
             Self::SecretsList => &["query"],
-            Self::SecretsGet => &["handle", "key"],
             Self::EnterInteractive => &[
                 "agent_name",
                 "request_reason",
@@ -84,7 +80,6 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/v1/capabilities", get(capabilities));
     for operation in [
         Operation::SecretsList,
-        Operation::SecretsGet,
         Operation::EnterInteractive,
         Operation::Run,
         Operation::Destroy,
@@ -137,7 +132,6 @@ pub(crate) async fn execute_from(
     let event = match operation {
         Operation::EnterInteractive => "authorization",
         Operation::SecretsList => "credential.search",
-        Operation::SecretsGet => "credential.read",
         Operation::Destroy => "session.close",
         Operation::Run => return execute_inner(state, operation, arguments, peer).await,
         Operation::Remote | Operation::RemoteHosts => {
@@ -145,9 +139,6 @@ pub(crate) async fn execute_from(
         }
     };
     let mut record = json!({});
-    if let Some(key) = arguments.get("key").and_then(Value::as_str) {
-        record["key"] = json!(key);
-    }
     if matches!(operation, Operation::EnterInteractive) {
         record["agent_name"] = json!(arguments.get("agent_name").and_then(Value::as_str));
         record["request_reason"] = json!(arguments.get("request_reason").and_then(Value::as_str));
@@ -222,11 +213,6 @@ async fn execute_inner(
                 .filter(|key| key.to_ascii_lowercase().contains(&query))
                 .collect();
             Ok(json!({"keys":keys}))
-        }
-        Operation::SecretsGet => {
-            let handle = string_arg(&arguments, "handle")?;
-            let key = string_arg(&arguments, "key")?;
-            Ok(json!({"key":key,"value":state.secret_value(handle, key).await?}))
         }
         Operation::EnterInteractive => {
             confirmation(&arguments)?;

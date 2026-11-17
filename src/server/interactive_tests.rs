@@ -330,20 +330,14 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
         .await
         .unwrap();
     for (state, handle) in [(&root, &entered.handle), (&user, &attached.handle)] {
+        let environment = state.sessions.lock().await.by_handle[handle]
+            .environment
+            .clone();
+        // Only the authorized selection is snapshotted, never the whole vault.
+        assert_eq!(environment.keys(), vec!["TEST_SHARED_SECRET".to_string()]);
         assert_eq!(
-            state
-                .secret_value(handle, "TEST_SHARED_SECRET")
-                .await
-                .unwrap(),
+            environment.0["TEST_SHARED_SECRET"],
             "fixture-shared-snapshot"
-        );
-        assert_eq!(
-            state
-                .secret_value(handle, "TEST_SECOND_SECRET")
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::FORBIDDEN
         );
     }
     for sudo in [true, false] {
@@ -398,21 +392,16 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
     );
     root.revoke_token(&token).await.unwrap();
     assert!(
-        root.secret_value(&entered.handle, "TEST_SHARED_SECRET")
-            .await
-            .is_err()
-    );
-    assert!(
-        user.secret_value(&attached.handle, "TEST_SHARED_SECRET")
-            .await
-            .is_err()
-    );
-    assert!(
         root.run(&entered.handle, "echo never", false, None)
             .await
             .is_err()
     );
-    // A user-side snapshot must not remain readable if its authority is unreachable.
+    assert!(
+        user.run(&attached.handle, "echo never", false, None)
+            .await
+            .is_err()
+    );
+    // A user-side session must not keep executing if its authority is unreachable.
     let next_token = root.auth.lock().await.issue_token(None).unwrap().0;
     let next_remote = root
         .enter_with_secrets(&next_token, &["TEST_SHARED_SECRET".into()])
@@ -427,7 +416,7 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
         Some(crate::peer::Peer::new(unavailable_address, user.config.max_output_bytes).unwrap());
     assert_eq!(
         disconnected
-            .secret_value(&next.handle, "TEST_SHARED_SECRET")
+            .run(&next.handle, "echo never", false, None)
             .await
             .unwrap_err()
             .status,

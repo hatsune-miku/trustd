@@ -1,5 +1,5 @@
 //! Credential storage, injection snapshots and encrypted daemon-to-daemon access.
-//! Explicit plaintext reads are scoped to a live session's authorized snapshot.
+//! Execution APIs never return credential values; sessions only receive injection snapshots.
 use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};

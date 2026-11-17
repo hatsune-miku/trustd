@@ -248,34 +248,37 @@ mod tests {
     fn exposes_all_required_tools_and_privacy_guidance() {
         let definitions = tool_definitions();
         let text = definitions.to_string();
-        for tool in [
-            "secrets_list",
-            "secrets_get",
-            "enter_interactive",
-            "run",
-            "destroy",
-        ] {
-            assert!(text.contains(tool));
-        }
-        assert!(server_instructions().contains("user-authorized shell access"));
-        assert!(server_instructions().contains(crate::shell::ShellKind::native().name()));
-        assert!(text.contains("Respect the user's personal privacy."));
-        for removed in ["preauthor", "pre-author", "reused", "automatic", "remember"] {
-            assert!(!text.contains(removed), "{removed}");
-        }
-        let plaintext = definitions
+        let names: Vec<_> = definitions
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == "secrets_get")
-            .unwrap();
-        assert!(plaintext["description"].as_str().unwrap().contains(
-            "Discouraged unless the user explicitly requests plaintext. Prefer environment injection."
-        ));
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
         assert_eq!(
-            plaintext["inputSchema"]["required"],
-            json!(["handle", "key"])
+            names,
+            [
+                "secrets_list",
+                "enter_interactive",
+                "run",
+                "destroy",
+                "remote_hosts",
+                "remote"
+            ]
         );
+        assert!(server_instructions().contains("user-authorized shell access"));
+        assert!(server_instructions().contains(crate::shell::ShellKind::native().name()));
+        assert!(text.contains("Respect the user's personal privacy."));
+        for removed in [
+            "preauthor",
+            "pre-author",
+            "reused",
+            "automatic",
+            "remember",
+            "secrets_get",
+            "plaintext",
+        ] {
+            assert!(!text.contains(removed), "{removed}");
+        }
     }
 
     #[test]
@@ -297,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn secret_listing_and_enter_never_return_values_implicitly() {
+    async fn no_tool_returns_credential_values() {
         let mut auth = crate::auth::AuthManager::new("unused".into(), None);
         let token = auth.issue_token(None).unwrap().0;
         let state = AppState::user(
@@ -359,23 +362,16 @@ mod tests {
             json!(["JENKINS_CI_TOKEN"])
         );
         assert!(!entered.to_string().contains("fixture-secret-123"));
-        let revealed = call_tool(
+        // A live handle authorized for the key still has no plaintext read tool.
+        let error = call_tool(
             &state,
             json!({"name":"secrets_get","arguments":{
                 "handle":entered["structuredContent"]["handle"],"key":"JENKINS_CI_TOKEN"
             }}),
         )
         .await
-        .unwrap();
-        assert_eq!(
-            revealed["structuredContent"],
-            json!({"key":"JENKINS_CI_TOKEN","value":"fixture-secret-123"})
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(revealed["content"][0]["text"].as_str().unwrap())
-                .unwrap(),
-            revealed["structuredContent"]
-        );
+        .unwrap_err();
+        assert!(!error.to_string().contains("fixture-secret-123"));
         state.shutdown().await;
     }
 

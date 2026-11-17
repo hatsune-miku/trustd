@@ -123,16 +123,6 @@ pub fn tool_definitions() -> Value {
             "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}
         },
         {
-            "name":"secrets_get", "title":"Read an authorized credential value",
-            "description":"Discouraged unless the user explicitly requests plaintext. Prefer environment injection. Returns one value from the handle's authorized secret_keys snapshot; requires a live session.",
-            "inputSchema":{"type":"object","properties":{
-                "handle":{"type":"string","description":"Secret handle returned by enter_interactive."},
-                "key":{"type":"string","pattern":"^[A-Z_][A-Z0-9_]{0,127}$","description":"A key included in this session's authorized secret_keys."}
-            },"required":["handle","key"],"additionalProperties":false},
-            "outputSchema":{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"],"additionalProperties":false},
-            "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}
-        },
-        {
             "name":"enter_interactive", "title":format!("Request authorized access to {shell}"),
             "description":format!("Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. Waits for authorization, denial or a fixed {} ms deadline; allow more than {} seconds at the client. Read status and the owner's btw note. Use the returned session handle for subsequent calls.", crate::consent::CONSENT_TIMEOUT_MS, crate::consent::CONSENT_TIMEOUT.as_secs()),
             "inputSchema":{"type":"object","properties":{

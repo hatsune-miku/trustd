@@ -349,30 +349,24 @@ impl AppState {
                 self.remote.sessions.lock().await.remove(id);
                 Ok(json!({"closed":true}))
             }
-            "run" | "secrets_get" => {
+            "run" => {
                 let session = self
                     .remote
                     .session(owner, string(&args, "session_ref")?)
                     .await?;
-                if operation == "secrets_get" {
-                    Ok(
-                        json!({"value":self.secret_value(&session.handle, string(&args,"key")?).await?}),
+                let level = crate::api::privilege_arg(&args)?;
+                let result = self
+                    .run_command(
+                        &session.handle,
+                        string(&args, "command")?,
+                        level,
+                        RunOptions {
+                            stdin: args["stdin"].as_str().unwrap_or_default().into(),
+                            timeout_seconds: timeout(&args)?,
+                        },
                     )
-                } else {
-                    let level = crate::api::privilege_arg(&args)?;
-                    let result = self
-                        .run_command(
-                            &session.handle,
-                            string(&args, "command")?,
-                            level,
-                            RunOptions {
-                                stdin: args["stdin"].as_str().unwrap_or_default().into(),
-                                timeout_seconds: timeout(&args)?,
-                            },
-                        )
-                        .await?;
-                    Ok(serde_json::to_value(result)?)
-                }
+                    .await?;
+                Ok(serde_json::to_value(result)?)
             }
             "job_start" => self.remote_job_start(owner, &args).await,
             "job_get" | "job_list" | "job_cancel" | "job_output" => {

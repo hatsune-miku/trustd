@@ -20,7 +20,7 @@ Windows 使用 PowerShell 7 (`pwsh`)，Linux/macOS 使用 `/bin/bash`（兼容 m
 
 ### stdio 边界
 
-Agent 宿主通过 stdio 连接接入进程，接入进程使用 loopback HTTP API 调用 daemon。handle 存在接入进程内存中，stdio 输入 schema 和授权输出移除此字段；工具参数中的手工 handle/token 被拒绝。显式 `secrets_get` 仍返回用户要求的明文，任意命令输出不自动脱敏。
+Agent 宿主通过 stdio 连接接入进程，接入进程使用 loopback HTTP API 调用 daemon。handle 存在接入进程内存中，stdio 输入 schema 和授权输出移除此字段；工具参数中的手工 handle/token 被拒绝。不提供凭据明文读取工具，任意命令输出不自动脱敏。
 
 一个进程一个会话，没有按代理名称或“最近授权”寻找会话的全局状态。生命周期变更串行，长命令不持有生命周期锁，销毁/取消可以并发终止执行。每个请求独立记录取消信号；取消授权不会简单丢弃 HTTP 响应，而会接收迟到的 handle 后清理。EOF 后拒绝新授权并尝试销毁；强杀、断电与 daemon 不可达不保证清理，用户仍可撤销签发端记录。
 
@@ -30,7 +30,7 @@ Agent 宿主通过 stdio 连接接入进程，接入进程使用 loopback HTTP A
 
 两个 daemon 使用独立可执行文件：Windows `trustd-system` 必须为 LocalSystem，Unix `trustd-root` 必须为 root；`trustd-user` 必须为非提权登录用户。不存在 `--allow-unelevated` 绕过参数。默认端口分别为 32119 和 32120，配置目录、Master/TOTP 和签发令牌相互独立。
 
-MCP 入口推荐用户 daemon，工具名为 `secrets_list`、`secrets_get`、`enter_interactive`、`run`、`destroy`。Windows `run.privilege_level` 必填，三选一：`current-user`、`as-administrator`、`nt-authority/system`；Linux/macOS 保持必填 boolean `sudo`。普通用户执行路由至用户 daemon，高权限执行须持有系统授权。每种身份拥有独立的 shell 状态，不复制已有 shell 的变量或目录，不自动回退。
+MCP 入口推荐用户 daemon，工具名为 `secrets_list`、`enter_interactive`、`run`、`destroy`。Windows `run.privilege_level` 必填，三选一：`current-user`、`as-administrator`、`nt-authority/system`；Linux/macOS 保持必填 boolean `sudo`。普通用户执行路由至用户 daemon，高权限执行须持有系统授权。每种身份拥有独立的 shell 状态，不复制已有 shell 的变量或目录，不自动回退。
 
 Windows 的管理员后端使用配对用户进程的 linked elevated token，校验进程创建时间、SID、登录 session 及令牌属性，保证管理员与当前用户是同一个账户；不以 SYSTEM 修改环境变量冒充。通过配对加密桥取得用户环境和 cwd，保留用户 USERPROFILE、真实 HKCU 和用户 PATH。为重定向管道继承，在 broker 的非交互 session 内运行，不保证交互桌面或映射网络驱动器。PowerShell 在持久 runspace 中按标准顺序加载 profile 脚本。无 linked token 或 OS 权限不足时明确失败。SYSTEM 选项只允许真实 LocalSystem。
 
@@ -89,7 +89,7 @@ Master Password 只保存 Argon2id PHC verifier。TOTP 验证使用可恢复的�
 
 `enter.secret_keys` 选择本次需要的凭据，复用原有 token / 交互授权。用户同意后在 session 中保留不可变的环境快照，各身份 shell 创建时直接覆盖对应子进程环境，不在命令文本、参数或日志中插值。Windows 按不区分大小写的名称替换继承项；管理员后端先取得同用户 profile 环境，再应用所选凭据。惰性创建的用户/管理员 shell 也使用原快照，不重新读取已轮换的值。内部 `SessionEnvironment` 仅在配对加密桥上、验证有效 handle 后返回快照，不作为公开 secret 工具。
 
-长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 必填非空 `query`，按不区分大小写的字面子串返回匹配名称，与 HTTP `POST /v1/secrets/keys` 共用实现，不提供全量列表。`secrets_get` 通过存活 handle 显式读取该会话已授权 key 的明文快照，与 HTTP `POST /v1/secrets/get` 共用实现；关联会话在读取前再次验证系统授权，失联时不返回缓存。搜索和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
+长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 必填非空 `query`，按不区分大小写的字面子串返回匹配名称，与 HTTP `POST /v1/secrets/keys` 共用实现，不提供全量列表。执行接口没有凭据明文读取入口（原 `secrets_get` / `POST /v1/secrets/get` 已移除）。搜索和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
 
 ### 本机传输
 

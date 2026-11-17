@@ -9,10 +9,11 @@ stdio 与下文的 HTTP/直接 MCP 业务语义相同，但输入／输出 schem
 | 操作 | stdio 的差异 |
 | --- | --- |
 | `enter_interactive` | 无 token 参数，授权响应不返回 handle；由接入进程保存 |
-| `run` / `secrets_get` / `destroy` | 不接受 handle，自动使用本接入进程的会话 |
+| `run` / `destroy` | 不接受 handle，自动使用本接入进程的会话 |
 | `secrets_list` | 与直接连接一致，必填 `query`，只返回匹配的名称 |
+| `remote_hosts` / `remote` | 不接受 handle，使用本接入进程的会话作为本机授权 |
 
-始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle 字段填入 stdio 工具。工具共五项。显式明文读取仍要求存活会话及已授权 key。
+始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle 字段填入 stdio 工具。工具共六项，没有读取凭据明文的工具。
 
 一个接入进程仅持有一个会话，已有会话时重复 enter 被拒绝；先 destroy 再更换授权。独立进程不共享全局 handle。宿主如果多个聊天共用一个进程，也会共享该会话，不能把进程级隔离说成聊天级隔离。授权等待期间收到 EOF 后，接入进程仍等待完整授权期限并销毁迟到的会话，清理上限为 775 秒；被宿主强制终止时不能保证清理。
 
@@ -31,10 +32,11 @@ stdio 取消通知按本进程的 requestId 定位，不需要 MCP HTTP 会话�
 | MCP 工具 | HTTP 接口 |
 |---|---|
 | `secrets_list` | `POST /v1/secrets/keys` |
-| `secrets_get` | `POST /v1/secrets/get` |
 | `enter_interactive` | `POST /v1/sessions/enter/interactive` |
 | `run` | `POST /v1/commands/run` |
 | `destroy` | `POST /v1/sessions/destroy` |
+| `remote_hosts` | `POST /v2/remote/hosts` |
+| `remote` | `POST /v2/remote/invoke` |
 
 HTTP 请求直接发送 MCP 工具的 `arguments` 对象，响应直接返回对应的 `structuredContent`，不需要 JSON-RPC 外层。两种入口共用参数校验和业务处理；handle 和凭据授权可以跨入口使用。未知字段、错误类型和不支持的平台参数会被拒绝，不自动转换。HTTP 参数错误返回 400；JSON 格式、Content-Type 等传输错误由 HTTP 层返回 400/415/422。凭据无效返回 401，执行身份越权返回 403，授权通道不可用返回 503，业务错误响应格式为 `{"error":"..."}`。
 
@@ -169,9 +171,7 @@ try {
 
 `POST /v1/secrets/keys` 无需授权，必填 JSON `{"query":"jenkins"}`，返回 `{"keys":["JENKINS_CI_TOKEN"]}`，只返回匹配的名称，不含凭据值。按不区分大小写的字面子串匹配，不修剪空格，不支持通配符或正则；无匹配返回 `{"keys":[]}`。缺少 `query`、非字符串、空串或纯空白返回 400。MCP `secrets_list` 使用相同参数和规则。旧的 GET 全量列表入口返回 405，不提供无条件枚举；升级时 daemon 与 stdio 接入需一并更新，旧 daemon 不会被回退调用。管理页登录后的 `GET /v1/admin/secrets` 仍保留完整名称列表。
 
-`POST /v1/secrets/get` 与 MCP `secrets_get` 同步提供明文读取：请求 `{"handle":"<HANDLE>","key":"JENKINS_CI_TOKEN"}`，返回 `{"key":"JENKINS_CI_TOKEN","value":"..."}`。必须先通过任一 enter 将该 key 纳入 `secret_keys` 并获得授权；只有存活且未过期的会话可以读取自己的授权快照。未授权 key 返回 403，无效、过期、已销毁或已撤销的 handle 返回 401；关联的系统授权不可用时不使用本地快照兜底。后台更新或删除凭据不改变会话快照，重新进入后才读取新值。该接口使用 POST JSON body，响应保持 `Cache-Control: no-store`。
-
-MCP 简短说明明确：不鼓励使用，除非用户明确要求明文；通常优先使用环境变量注入。
+执行接口不提供凭据明文读取：原 `POST /v1/secrets/get`、MCP `secrets_get` 及远端同名操作已移除，旧路径返回 404，旧工具名和远端操作名按未知名称拒绝。凭据只通过 `secret_keys` 注入会话 shell 的环境变量。
 
 MCP 和 HTTP 的 `enter_interactive` 均接收可选 `secret_keys: string[]`。key 同时是环境变量名，符合 `[A-Z_][A-Z0-9_]{0,127}`；后端同样校验大写。最多保存及请求 64 个 key，重复请求名会去重排序。value 为 1–16,384 UTF-8 字节，不能含 NUL。`LOCALSHELLD_*`、`BASH_ENV`、`ENV`、`SHELLOPTS`、`BASHOPTS`、`CDPATH` 为 shell 运行时保留名称。
 
@@ -181,7 +181,7 @@ MCP 和 HTTP 的 `enter_interactive` 均接收可选 `secret_keys: string[]`。k
 - 后台更换或删除凭据不改变已有快照。销毁后重新 enter 才读取新值，且需再次提供所需 key；未知 key 使新建失败，不创建部分会话。
 - 配对后统一使用用户 daemon 的凭据库，两端管理页通过已有加密桥访问同一库。未配对时使用本 daemon 的库；配对不会复制或迁移原独立库。系统端无法连接已配对的凭据库时不会回退到另一份值。
 
-这些值不由列表、enter 或会话元数据回传；显式 `secrets_get` 和管理页文件导出会返回明文值。获得环境变量的 shell 及其子程序仍能主动打印、记录或发送它们，`run` 不提供防泄露隔离或可靠的任意输出脱敏。
+这些值不由列表、enter 或会话元数据回传；只有管理页文件导出会返回明文值。获得环境变量的 shell 及其子程序仍能主动打印、记录或发送它们，`run` 不提供防泄露隔离或可靠的任意输出脱敏。
 
 下列管理接口要求现有 10 分钟管理 session 的 Bearer header，执行 token 不能代替管理登录：
 
@@ -258,15 +258,16 @@ Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。
 
 `POST /mcp` 使用 JSON-RPC 2.0、MCP Streamable HTTP JSON 响应，协议版本 `2025-06-18`。支持 initialize、ping、tools/list、tools/call，以及 notifications/initialized、run 的 notifications/cancelled。
 
-工具列表只公布五个短名称：
+工具列表只公布六个短名称：
 
 | 工具 | 用途 |
 |---|---|
 | `secrets_list` | 必填 `query`，无需授权搜索匹配的凭据 key，不返回 value |
-| `secrets_get` | 读取会话已授权 key 的明文快照；不鼓励使用，除非用户明确要求 |
 | `enter_interactive` | 桌面／Telegram 交互式请求授权，无 token 参数 |
 | `run` | 显式选择身份，执行单次命令并传入可选 stdin |
 | `destroy` | 销毁会话及所有关联进程树 |
+| `remote_hosts` | 需本机授权，列出已配对的远端设备 ID 和标签 |
+| `remote` | 需本机授权，向已配对设备发送 `operation`，详见 [REMOTE.md](REMOTE.md) |
 
 旧 `localshelld_enter_interactive`、`localshelld_run`、`localshelld_destroy_session` 保留调用入口兼容，不重复列入 tools/list。Windows 参数仍必须升级为 privilege_level。每个工具提供 inputSchema、outputSchema；结果同时有 content 文本和 structuredContent。
 

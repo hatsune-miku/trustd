@@ -50,12 +50,6 @@ pub fn operation_schemas() -> Value {
             vec!["query"],
         ),
         (
-            "secrets_get",
-            "Read an authorized credential only when plaintext is explicitly needed; prefer session environment injection.",
-            json!({"session_ref":text,"key":text}),
-            vec!["session_ref", "key"],
-        ),
-        (
             "session_open",
             "Open a remote session; load profiles, default cwd is the target identity's home.",
             json!({"secret_keys":{"type":"array","items":text},"sudo":boolean,"cwd":{"type":["string","null"]}}),

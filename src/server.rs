@@ -764,52 +764,6 @@ impl AppState {
         })
     }
 
-    pub(crate) async fn secret_value(&self, handle: &str, key: &str) -> Result<String, ApiError> {
-        crate::secrets::validate_key(key)?;
-        let (live, remote) = {
-            let sessions = self.sessions.lock().await;
-            let session = sessions
-                .by_handle
-                .get(handle)
-                .ok_or(AuthError::InvalidCredential)?;
-            (session.is_live(), session.remote_handle.clone())
-        };
-        if !live {
-            let _ = self.destroy_session(handle).await;
-            return Err(AuthError::Expired.into());
-        }
-        // A linked user session must still be authorized by its issuing daemon;
-        // a cached snapshot is not an offline authorization fallback.
-        if let Some(remote) = remote
-            && let Err(error) = self
-                .peer
-                .as_ref()
-                .expect("remote session has a peer")
-                .validate(&remote, false)
-                .await
-        {
-            let _ = self.destroy_session(handle).await;
-            return Err(error);
-        }
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .by_handle
-            .get(handle)
-            .ok_or(AuthError::InvalidCredential)?;
-        // Recheck after IPC and while holding the lock used by destruction.
-        if !session.is_live() {
-            drop(sessions);
-            let _ = self.destroy_session(handle).await;
-            return Err(AuthError::Expired.into());
-        }
-        session
-            .environment
-            .0
-            .get(key)
-            .cloned()
-            .ok_or_else(|| ApiError::forbidden("secret key is not authorized for this session"))
-    }
-
     pub(crate) async fn set_remote_session_peer(&self, handle: &str, peer: &str) {
         if let Some(session) = self.sessions.lock().await.by_handle.get_mut(handle) {
             session.remote_peer = Some(peer.into());
@@ -1553,72 +1507,6 @@ mod tests {
 
     fn test_app() -> Router {
         router(test_state())
-    }
-
-    #[tokio::test]
-    async fn plaintext_reads_reject_expired_and_finished_sessions() {
-        for state in [
-            AppState::new(Config::default(), AuthManager::new("unused".into(), None)),
-            AppState::user(
-                Config {
-                    bind: "127.0.0.1:32120".parse().unwrap(),
-                    ..Config::default()
-                },
-                AuthManager::new("unused".into(), None),
-            )
-            .unwrap(),
-        ] {
-            let token = state.auth.lock().await.issue_token(None).unwrap().0;
-            state
-                .put_secret("TEST_SECRET", "fixture-value")
-                .await
-                .unwrap();
-            let entered = state
-                .enter_with_secrets(&token, &["TEST_SECRET".into()])
-                .await
-                .unwrap();
-            state
-                .sessions
-                .lock()
-                .await
-                .by_handle
-                .get_mut(&entered.handle)
-                .unwrap()
-                .expires_at = Some(Utc::now().timestamp() - 1);
-            assert_eq!(
-                state
-                    .secret_value(&entered.handle, "TEST_SECRET")
-                    .await
-                    .unwrap_err()
-                    .status,
-                StatusCode::UNAUTHORIZED
-            );
-            assert!(
-                !state
-                    .sessions
-                    .lock()
-                    .await
-                    .by_handle
-                    .contains_key(&entered.handle)
-            );
-            let entered = state
-                .enter_with_secrets(&token, &["TEST_SECRET".into()])
-                .await
-                .unwrap();
-            let shell = state.sessions.lock().await.by_handle[&entered.handle]
-                .shell
-                .clone();
-            shell.execute("exit", Some(5)).await.unwrap();
-            assert_eq!(
-                state
-                    .secret_value(&entered.handle, "TEST_SECRET")
-                    .await
-                    .unwrap_err()
-                    .status,
-                StatusCode::UNAUTHORIZED
-            );
-            state.shutdown().await;
-        }
     }
 
     #[tokio::test]

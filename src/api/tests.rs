@@ -110,6 +110,7 @@ async fn retired_authorization_routes_are_absent_and_client_identity_is_not_inpu
         "/v1/sessions/enter",
         "/v1/sessions/enter/preauthorized",
         "/v1/admin/remembered/reset",
+        "/v1/secrets/get",
     ] {
         assert_eq!(
             request(&app, "POST", path, Some(json!({}))).await.0,
@@ -177,6 +178,8 @@ async fn llms_is_public_plain_text_with_live_schemas_on_both_daemons() {
             "\"automatic\"",
             "reused",
             "token-env",
+            "secrets_get",
+            "/v1/secrets/get",
         ] {
             assert!(
                 !text.contains(removed),
@@ -445,13 +448,25 @@ async fn interactive_secrets_execution_and_lifecycle_are_interoperable() {
 }
 
 #[tokio::test]
-async fn plaintext_reads_share_scoped_authorization_and_snapshots_across_transports() {
+async fn credentials_are_injected_snapshots_without_a_plaintext_read_operation() {
+    let print = |key: &str| {
+        if cfg!(windows) {
+            format!(
+                "[Console]::Write($(if (Test-Path Env:{key}) {{ $env:{key} }} else {{ 'unset' }}))"
+            )
+        } else {
+            format!("printf '%s' \"${{{key}-unset}}\"")
+        }
+    };
+    assert!(Operation::from_name("secrets_get").is_none());
     for state in [
         user_state().0,
         AppState::new(Config::default(), AuthManager::new("unused".into(), None)),
     ] {
+        // Unpaired privileged daemons execute only their own identity.
+        let sudo = state.mode == crate::server::DaemonMode::Privileged;
         let token = state.auth.lock().await.issue_token(None).unwrap().0;
-        let value = "fixture secret \" ' \\ \r\n中文 $env:NOT_CODE";
+        let value = "fixture secret \" ' \\ \n中文 $env:NOT_CODE";
         state.put_secret("TEST_READ_SECRET", value).await.unwrap();
         state
             .put_secret("TEST_OTHER_SECRET", "not-authorized")
@@ -467,84 +482,37 @@ async fn plaintext_reads_share_scoped_authorization_and_snapshots_across_transpo
         .unwrap();
         assert!(!entered.to_string().contains(value));
         let handle = entered["handle"].as_str().unwrap();
+        let read = |key: &'static str| {
+            let state = state.clone();
+            let command = print(key);
+            async move {
+                state
+                    .run(handle, &command, sudo, None)
+                    .await
+                    .unwrap()
+                    .stdout
+            }
+        };
+        assert_eq!(read("TEST_READ_SECRET").await, value);
+        // Only the authorized selection is injected, never the whole vault.
+        assert_eq!(read("TEST_OTHER_SECRET").await, "unset");
+        // A live handle authorized for the key still has no plaintext read endpoint.
         let arguments = json!({"handle":handle,"key":"TEST_READ_SECRET"});
-        let (status, revealed) = http(&app, Operation::SecretsGet, arguments.clone()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(revealed, json!({"key":"TEST_READ_SECRET","value":value}));
-        assert_eq!(
-            revealed,
-            mcp(&app, "secrets_get", arguments.clone()).await["result"]["structuredContent"]
-        );
-        for key in ["TEST_OTHER_SECRET", "MISSING_SECRET"] {
-            let denied = json!({"handle":handle,"key":key});
-            let (status, error) = http(&app, Operation::SecretsGet, denied.clone()).await;
-            assert_eq!(status, StatusCode::FORBIDDEN);
-            assert_eq!(
-                error,
-                json!({"error":"secret key is not authorized for this session"})
-            );
-            assert_eq!(
-                error["error"],
-                mcp(&app, "secrets_get", denied).await["error"]["message"]
-            );
-        }
-        // No implicit vault access, even with a valid execution session.
-        let other_token = state.auth.lock().await.issue_token(None).unwrap().0;
-        let other = state.enter(&other_token).await.unwrap();
-        assert_eq!(
-            http(
-                &app,
-                Operation::SecretsGet,
-                json!({"handle":other.handle,"key":"TEST_READ_SECRET"})
-            )
-            .await
-            .0,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            http(
-                &app,
-                Operation::SecretsGet,
-                json!({"handle":"invalid","key":"TEST_READ_SECRET"})
-            )
-            .await
-            .0,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            request(&app, "GET", Operation::SecretsGet.path(), None)
-                .await
-                .0,
-            StatusCode::METHOD_NOT_ALLOWED
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post(Operation::SecretsGet.path())
-                    .header("content-type", "application/json")
-                    .body(Body::from(arguments.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        assert_eq!(response.headers()["content-type"], "application/json");
-        // Reads reveal the approved snapshot, not a newly rotated/deleted vault value.
+        let (status, body) =
+            request(&app, "POST", "/v1/secrets/get", Some(arguments.clone())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!body.to_string().contains(value));
+        let rpc = mcp(&app, "secrets_get", arguments).await;
+        assert!(rpc.get("error").is_some());
+        assert!(!rpc.to_string().contains(value));
+        // The session keeps its approved snapshot after vault rotation/deletion.
         state
             .put_secret("TEST_READ_SECRET", "rotated-value")
             .await
             .unwrap();
         state.remove_secret("TEST_READ_SECRET").await.unwrap();
-        assert_eq!(
-            http(&app, Operation::SecretsGet, arguments.clone()).await.1,
-            revealed
-        );
+        assert_eq!(read("TEST_READ_SECRET").await, value);
         state.destroy_session(handle).await.unwrap();
-        assert_eq!(
-            http(&app, Operation::SecretsGet, arguments).await.0,
-            StatusCode::UNAUTHORIZED
-        );
         state
             .put_secret("TEST_READ_SECRET", "fresh-value")
             .await
@@ -553,21 +521,13 @@ async fn plaintext_reads_share_scoped_authorization_and_snapshots_across_transpo
             .enter_with_secrets(&token, &["TEST_READ_SECRET".into()])
             .await
             .unwrap();
-        let arguments = json!({"handle":fresh.handle,"key":"TEST_READ_SECRET"});
         assert_eq!(
-            http(&app, Operation::SecretsGet, arguments.clone()).await.1["value"],
-            "fresh-value"
-        );
-        state.revoke_token(&token).await.unwrap();
-        assert_eq!(
-            http(&app, Operation::SecretsGet, arguments.clone()).await.0,
-            StatusCode::UNAUTHORIZED
-        );
-        assert!(
-            mcp(&app, "secrets_get", arguments)
+            state
+                .run(&fresh.handle, &print("TEST_READ_SECRET"), sudo, None)
                 .await
-                .get("error")
-                .is_some()
+                .unwrap()
+                .stdout,
+            "fresh-value"
         );
         state.shutdown().await;
     }
@@ -637,26 +597,20 @@ async fn http_interactive_approval_uses_the_same_owner_decision_and_secret_selec
     assert_eq!(result["secret_keys"], json!(["TEST_API_SECRET"]));
     assert!(result.get("token").is_none());
     assert!(!result.to_string().contains("fixture-private"));
-    assert_eq!(
-        mcp(
-            &app,
-            "secrets_get",
-            json!({"handle":result["handle"],"key":"TEST_API_SECRET"})
-        )
-        .await["result"]["structuredContent"],
-        json!({"key":"TEST_API_SECRET","value":"fixture-private"})
-    );
+    let command = if cfg!(windows) {
+        "[Console]::Write(\"http-authorized:$env:TEST_API_SECRET\")"
+    } else {
+        "printf '%s' \"http-authorized:$TEST_API_SECRET\""
+    };
     let rpc = mcp(
         &app,
         "run",
-        run_arguments(result["handle"].as_str().unwrap(), "echo http-authorized"),
+        run_arguments(result["handle"].as_str().unwrap(), command),
     )
     .await;
-    assert!(
-        rpc["result"]["structuredContent"]["stdout"]
-            .as_str()
-            .unwrap()
-            .contains("http-authorized")
+    assert_eq!(
+        rpc["result"]["structuredContent"]["stdout"],
+        "http-authorized:fixture-private"
     );
     let remembered = mcp(&app, "enter_interactive", args).await;
     assert_eq!(
@@ -764,18 +718,6 @@ async fn both_transports_reject_invalid_arguments_before_authorization_or_execut
     let (state, calls) = consent_state(Choice::Accept, false);
     let app = router(state.clone());
     let cases = [
-        ("secrets_get", json!({})),
-        ("secrets_get", json!({"handle":"fixture-private"})),
-        ("secrets_get", json!({"handle":123,"key":"TEST_SECRET"})),
-        ("secrets_get", json!({"handle":"fixture-private","key":123})),
-        (
-            "secrets_get",
-            json!({"handle":"fixture-private","key":"lowercase"}),
-        ),
-        (
-            "secrets_get",
-            json!({"handle":"fixture-private","key":"TEST_SECRET","token":"fixture-private"}),
-        ),
         ("enter_interactive", json!(null)),
         ("enter_interactive", json!([])),
         ("enter_interactive", json!({})),
@@ -848,7 +790,7 @@ async fn new_http_routes_keep_the_loopback_browser_boundary() {
     for path in [
         "/llms.txt",
         "/v1/capabilities",
-        Operation::SecretsGet.path(),
+        Operation::SecretsList.path(),
         Operation::EnterInteractive.path(),
         "/v1/admin/agents",
     ] {
