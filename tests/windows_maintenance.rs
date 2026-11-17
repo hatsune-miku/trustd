@@ -25,7 +25,8 @@ impl Drop for Process {
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(10))
+        // The first status call probes PowerShell packages on a cold runner.
+        .timeout(Duration::from_secs(30))
         .build()
         .unwrap()
 }

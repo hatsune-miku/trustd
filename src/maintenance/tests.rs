@@ -28,6 +28,7 @@ fn fixture() -> App {
         user_config: PathBuf::from("fixture-user.toml"),
         owner: "fixture".into(),
         agents: vec![],
+        device_name: "fixture-device".into(),
         busy: AtomicBool::new(false),
         job: Mutex::new(Job::default()),
         shutdown: tokio::sync::Notify::new(),

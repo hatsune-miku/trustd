@@ -99,6 +99,8 @@ struct Inner {
     user_config: PathBuf,
     owner: String,
     agents: Vec<agents::Agent>,
+    /// Default name for joining; resolved once, not on every status poll.
+    device_name: String,
     busy: AtomicBool,
     job: Mutex<Job>,
     shutdown: tokio::sync::Notify,
@@ -165,6 +167,7 @@ fn prepare(authority: String, mode: Option<bool>) -> Result<App> {
         user_config,
         owner: platform::owner()?,
         agents: agents::catalog()?,
+        device_name: super::joining::device_name(),
         busy: AtomicBool::new(false),
         job: Mutex::new(Job::default()),
         shutdown: tokio::sync::Notify::new(),
@@ -268,7 +271,7 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "agents": state.agents,
         "joined": localshelld::remote::joined_backend(&state.user_config).is_some(),
         "backend": localshelld::remote::joined_backend(&state.user_config),
-        "device_name": super::joining::device_name(),
+        "device_name": state.device_name,
     }))
 }
 

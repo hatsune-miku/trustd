@@ -216,7 +216,7 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     let Some(options) = collect(
         &mut terminal,
         backend.as_deref(),
-        &super::super::joining::device_name(),
+        &state.device_name,
         &state.agents,
     )?
     else {
