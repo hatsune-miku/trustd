@@ -189,11 +189,7 @@ impl Adapter {
             "request cancelled"
         );
         match name {
-            "secrets_list" => {
-                crate::api::secret_query_arg(&args)?;
-                // An older GET-only daemon must fail closed, not return its full list.
-                self.request("/v1/secrets/keys", Some(args), false).await
-            }
+            "secrets_list" => self.request("/v1/secrets/keys", Some(args), false).await,
             "enter_interactive" => {
                 let _transition = self.lifecycle.lock().await;
                 ensure!(

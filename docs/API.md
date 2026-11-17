@@ -10,7 +10,7 @@ stdio 与下文的 HTTP/直接 MCP 业务语义相同，但输入／输出 schem
 | --- | --- |
 | `enter_interactive` | 无 token 参数，授权响应不返回 handle；由接入进程保存 |
 | `run` / `destroy` | 不接受 handle，自动使用本接入进程的会话 |
-| `secrets_list` | 与直接连接一致，必填 `query`，只返回匹配的名称 |
+| `secrets_list` | 与直接连接一致，无参数，返回全部凭据名称 |
 | `remote_hosts` / `remote` | 不接受 handle，使用本接入进程的会话作为本机授权 |
 
 始终用当前连接的 `tools/list` 获取 schema，不要把下文 HTTP 的 handle 字段填入 stdio 工具。工具共六项，没有读取凭据明文的工具。
@@ -169,7 +169,7 @@ try {
 
 ### 环境变量凭据
 
-`POST /v1/secrets/keys` 无需授权，必填 JSON `{"query":"jenkins"}`，返回 `{"keys":["JENKINS_CI_TOKEN"]}`，只返回匹配的名称，不含凭据值。按不区分大小写的字面子串匹配，不修剪空格，不支持通配符或正则；无匹配返回 `{"keys":[]}`。缺少 `query`、非字符串、空串或纯空白返回 400。MCP `secrets_list` 使用相同参数和规则。旧的 GET 全量列表入口返回 405，不提供无条件枚举；升级时 daemon 与 stdio 接入需一并更新，旧 daemon 不会被回退调用。管理页登录后的 `GET /v1/admin/secrets` 仍保留完整名称列表。
+`POST /v1/secrets/keys` 无需授权，请求体为 `{}`，返回全部凭据名称，例如 `{"keys":["JENKINS_CI_TOKEN"]}`，不含凭据值；没有凭据时返回 `{"keys":[]}`。不提供搜索参数，传入 `query` 等未知字段返回 400。MCP `secrets_list` 不需要参数，结果相同。与其他操作一致，GET 返回 405。升级时 daemon 与 stdio 接入需一并更新。管理页登录后的 `GET /v1/admin/secrets` 同样返回完整名称列表。
 
 执行接口不提供凭据明文读取：原 `POST /v1/secrets/get`、MCP `secrets_get` 及远端同名操作已移除，旧路径返回 404，旧工具名和远端操作名按未知名称拒绝。凭据只通过 `secret_keys` 注入会话 shell 的环境变量。
 
@@ -262,7 +262,7 @@ Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。
 
 | 工具 | 用途 |
 |---|---|
-| `secrets_list` | 必填 `query`，无需授权搜索匹配的凭据 key，不返回 value |
+| `secrets_list` | 无参数，无需授权列出全部凭据 key，不返回 value |
 | `enter_interactive` | 桌面／Telegram 交互式请求授权，无 token 参数 |
 | `run` | 显式选择身份，执行单次命令并传入可选 stdin |
 | `destroy` | 销毁会话及所有关联进程树 |

@@ -286,47 +286,41 @@ async fn capabilities_publish_all_mcp_schemas_and_registered_http_operations() {
 }
 
 #[tokio::test]
-async fn credential_search_requires_a_nonblank_literal_substring_on_every_transport() {
+async fn credential_list_returns_every_name_without_a_search_term() {
     for state in [
         user_state().0,
         AppState::new(Config::default(), AuthManager::new("unused".into(), None)),
     ] {
-        for key in ["GITHUB_TOKEN", "GITHUB_PRIVATE_KEY", "JENKINS_TOKEN"] {
+        let app = router(state.clone());
+        let (status, empty) = http(&app, Operation::SecretsList, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty, json!({"keys":[]}));
+        for key in ["JENKINS_TOKEN", "GITHUB_TOKEN", "GITHUB_PRIVATE_KEY"] {
             state.put_secret(key, "fixture-secret-value").await.unwrap();
         }
-        let app = router(state.clone());
-        for (query, expected) in [
-            ("gItHuB", vec!["GITHUB_PRIVATE_KEY", "GITHUB_TOKEN"]),
-            ("HUB_T", vec!["GITHUB_TOKEN"]),
-            ("token", vec!["GITHUB_TOKEN", "JENKINS_TOKEN"]),
-            ("GITHUB_TOKEN", vec!["GITHUB_TOKEN"]),
-            ("absent", vec![]),
-            ("*", vec![]),
-            (".*", vec![]),
-            (" github ", vec![]),
-            ("凭据", vec![]),
-        ] {
-            let args = json!({"query":query});
-            let (status, found) = http(&app, Operation::SecretsList, args.clone()).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(found, json!({"keys":expected}));
-            assert_eq!(
-                mcp(&app, "secrets_list", args).await["result"]["structuredContent"],
-                found
-            );
-            assert!(!found.to_string().contains("fixture-secret-value"));
-        }
+        let all = json!({"keys":["GITHUB_PRIVATE_KEY", "GITHUB_TOKEN", "JENKINS_TOKEN"]});
+        let (status, found) = http(&app, Operation::SecretsList, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(found, all);
+        // MCP callers may omit arguments entirely.
+        let rpc = request(
+            &app,
+            "POST",
+            "/mcp",
+            Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"secrets_list"}})),
+        )
+        .await
+        .1;
+        assert_eq!(rpc["result"]["structuredContent"], all);
+        assert_eq!(
+            mcp(&app, "secrets_list", json!({})).await["result"]["structuredContent"],
+            all
+        );
+        assert!(!found.to_string().contains("fixture-secret-value"));
+        // Search was removed: a query is an unknown argument, not a filter.
         for args in [
-            json!({}),
-            json!({"query":""}),
-            json!({"query":" \t\r\n"}),
-            json!({"query":"\u{3000}"}),
-            json!({"query":null}),
-            json!({"query":42}),
-            json!({"query":false}),
-            json!({"query":[]}),
-            json!({"query":{}}),
-            json!({"query":"github","fixture-secret-value":true}),
+            json!({"query":"github"}),
+            json!({"fixture-secret-value":true}),
             json!([]),
         ] {
             let (status, error) = http(&app, Operation::SecretsList, args.clone()).await;
@@ -336,16 +330,13 @@ async fn credential_search_requires_a_nonblank_literal_substring_on_every_transp
             for response in [error, rpc] {
                 assert!(!response.to_string().contains("fixture-secret-value"));
                 assert!(!response.to_string().contains("GITHUB_TOKEN"));
-                assert!(response.get("keys").is_none());
             }
         }
-        // Old clients cannot enumerate by omitting a body or passing a query in the URL.
-        for path in ["/v1/secrets/keys", "/v1/secrets/keys?query=github"] {
-            assert_eq!(
-                request(&app, "GET", path, None).await.0,
-                StatusCode::METHOD_NOT_ALLOWED
-            );
-        }
+        // Every operation shares the POST JSON contract.
+        assert_eq!(
+            request(&app, "GET", "/v1/secrets/keys", None).await.0,
+            StatusCode::METHOD_NOT_ALLOWED
+        );
         state.shutdown().await;
     }
 }
@@ -358,11 +349,11 @@ async fn interactive_secrets_execution_and_lifecycle_are_interoperable() {
         .await
         .unwrap();
     let app = router(state.clone());
-    let (status, keys) = http(&app, Operation::SecretsList, json!({"query":"api"})).await;
+    let (status, keys) = http(&app, Operation::SecretsList, json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         keys,
-        mcp(&app, "secrets_list", json!({"query":"api"})).await["result"]["structuredContent"]
+        mcp(&app, "secrets_list", json!({})).await["result"]["structuredContent"]
     );
     assert_eq!(keys, json!({"keys":["TEST_API_SECRET"]}));
 

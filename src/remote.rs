@@ -323,12 +323,7 @@ impl AppState {
                 "shell":crate::shell::ShellKind::native(),"identities":self.execution_identities().await,
                 "operations":agent_stdio::operation_schemas()}),
             ),
-            "secrets_list" => {
-                let query = crate::api::secret_query_arg(&args)?;
-                Ok(
-                    json!({"keys":peer.secret_keys.into_iter().filter(|key| key.to_ascii_lowercase().contains(&query)).collect::<Vec<_>>()}),
-                )
-            }
+            "secrets_list" => Ok(json!({"keys":peer.secret_keys})),
             "session_open" => self.remote_open(owner, &args).await,
             "session_close" => {
                 let id = string(&args, "session_ref")?;

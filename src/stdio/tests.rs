@@ -1,10 +1,5 @@
 use super::*;
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::{collections::HashSet, sync::atomic::AtomicUsize};
 
 #[derive(Default)]
@@ -83,7 +78,7 @@ async fn fake() -> (SocketAddr, Arc<Fake>, tokio::task::JoinHandle<()>) {
             "/v1/secrets/keys",
             post(
                 |State(state): State<Arc<Fake>>, Json(args): Json<Value>| async move {
-                    assert_eq!(args, json!({"query":"tEsT"}));
+                    assert_eq!(args, json!({}));
                     state.requests.lock().await.push(args);
                     Json(json!({"keys":["TEST_TOKEN"]}))
                 },
@@ -141,18 +136,10 @@ async fn call(adapter: &Adapter, params: Value) -> Result<Value> {
 }
 
 #[tokio::test]
-async fn credential_search_validates_locally_and_forwards_only_explicit_queries() {
+async fn credential_list_needs_no_arguments_and_rejects_search_locally() {
     let (address, state, task) = fake().await;
     let adapter = Adapter::new(address).unwrap();
-    for args in [
-        json!({}),
-        json!({"query":""}),
-        json!({"query":" \n\t"}),
-        json!({"query":null}),
-        json!({"query":1}),
-        json!({"query":false}),
-        json!({"query":[]}),
-    ] {
+    for args in [json!({"query":"test"}), json!({"query":""}), json!([])] {
         assert!(
             call(&adapter, json!({"name":"secrets_list","arguments":args}))
                 .await
@@ -160,35 +147,17 @@ async fn credential_search_validates_locally_and_forwards_only_explicit_queries(
         );
     }
     assert!(state.requests.lock().await.is_empty());
-    let result = call(
-        &adapter,
-        json!({"name":"secrets_list","arguments":{"query":"tEsT"}}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(result, json!({"keys":["TEST_TOKEN"]}));
-    assert_eq!(*state.requests.lock().await, vec![json!({"query":"tEsT"})]);
+    for params in [
+        json!({"name":"secrets_list"}),
+        json!({"name":"secrets_list","arguments":{}}),
+    ] {
+        assert_eq!(
+            call(&adapter, params).await.unwrap(),
+            json!({"keys":["TEST_TOKEN"]})
+        );
+    }
+    assert_eq!(*state.requests.lock().await, vec![json!({}), json!({})]);
     assert!(adapter.handle.lock().await.is_none());
-    task.abort();
-}
-
-#[tokio::test]
-async fn credential_search_does_not_fall_back_to_an_old_daemons_full_list() {
-    let router = Router::new().route(
-        "/v1/secrets/keys",
-        get(|| async { Json(json!({"keys":["TEST_TOKEN","UNRELATED_PRIVATE_KEY"]})) }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let adapter = Adapter::new(listener.local_addr().unwrap()).unwrap();
-    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let error = call(
-        &adapter,
-        json!({"name":"secrets_list","arguments":{"query":"test"}}),
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("HTTP 405"));
-    assert!(!error.to_string().contains("UNRELATED_PRIVATE_KEY"));
     task.abort();
 }
 

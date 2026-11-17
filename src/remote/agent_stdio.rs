@@ -45,9 +45,9 @@ pub fn operation_schemas() -> Value {
         ),
         (
             "secrets_list",
-            "Search credential names within this device's grant.",
-            json!({"query":text}),
-            vec!["query"],
+            "List all credential names within this device's grant.",
+            json!({}),
+            vec![],
         ),
         (
             "session_open",

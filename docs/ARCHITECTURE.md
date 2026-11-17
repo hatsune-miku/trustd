@@ -89,7 +89,7 @@ Master Password 只保存 Argon2id PHC verifier。TOTP 验证使用可恢复的�
 
 `enter.secret_keys` 选择本次需要的凭据，复用原有 token / 交互授权。用户同意后在 session 中保留不可变的环境快照，各身份 shell 创建时直接覆盖对应子进程环境，不在命令文本、参数或日志中插值。Windows 按不区分大小写的名称替换继承项；管理员后端先取得同用户 profile 环境，再应用所选凭据。惰性创建的用户/管理员 shell 也使用原快照，不重新读取已轮换的值。内部 `SessionEnvironment` 仅在配对加密桥上、验证有效 handle 后返回快照，不作为公开 secret 工具。
 
-长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 必填非空 `query`，按不区分大小写的字面子串返回匹配名称，与 HTTP `POST /v1/secrets/keys` 共用实现，不提供全量列表。执行接口没有凭据明文读取入口（原 `secrets_get` / `POST /v1/secrets/get` 已移除）。搜索和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
+长期信任覆盖此路径的后续请求，包括新增 key；每次新会话仍只注入本次选择的 key。`secrets_list` 无参数，返回全部凭据名称，与 HTTP `POST /v1/secrets/keys` 共用实现。执行接口没有凭据明文读取入口（原 `secrets_get` / `POST /v1/secrets/get` 已移除）。列表和 enter 响应不含 value，但注入不是针对 shell 本身的保密边界：获授权的命令仍可读取并输出环境。删除后台凭据不清理已有进程环境，终止已有委托应销毁或撤销其会话授权。
 
 ### 本机传输
 

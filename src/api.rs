@@ -48,7 +48,7 @@ impl Operation {
     }
     fn fields(self) -> &'static [&'static str] {
         match self {
-            Self::SecretsList => &["query"],
+            Self::SecretsList => &[],
             Self::EnterInteractive => &[
                 "agent_name",
                 "request_reason",
@@ -131,7 +131,7 @@ pub(crate) async fn execute_from(
 ) -> Result<Value, ApiError> {
     let event = match operation {
         Operation::EnterInteractive => "authorization",
-        Operation::SecretsList => "credential.search",
+        Operation::SecretsList => "credential.list",
         Operation::Destroy => "session.close",
         Operation::Run => return execute_inner(state, operation, arguments, peer).await,
         Operation::Remote | Operation::RemoteHosts => {
@@ -203,17 +203,8 @@ async fn execute_inner(
             }
             .map_err(|e| ApiError::bad_request(e.to_string()))
         }
-        Operation::SecretsList => {
-            // Validate before reading the local vault or calling its paired owner.
-            let query = secret_query_arg(&arguments)?;
-            let keys: Vec<_> = state
-                .secret_keys()
-                .await?
-                .into_iter()
-                .filter(|key| key.to_ascii_lowercase().contains(&query))
-                .collect();
-            Ok(json!({"keys":keys}))
-        }
+        // Names only: callers often cannot guess a search term for a credential.
+        Operation::SecretsList => Ok(json!({"keys":state.secret_keys().await?})),
         Operation::EnterInteractive => {
             confirmation(&arguments)?;
             state
@@ -266,18 +257,6 @@ fn confirmation(arguments: &Value) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("confirm_text must equal OK"));
     }
     Ok(())
-}
-
-pub(crate) fn secret_query_arg(arguments: &Value) -> Result<String, ApiError> {
-    let query = string_arg(arguments, "query")?;
-    if query.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "query must not be empty or whitespace-only",
-        ));
-    }
-    // Keys are restricted to ASCII environment-variable names. Preserve spaces
-    // and punctuation: search is a literal substring, not a pattern or prefix.
-    Ok(query.to_ascii_lowercase())
 }
 
 pub(crate) fn secret_keys_arg(arguments: &Value) -> Result<Vec<String>, ApiError> {

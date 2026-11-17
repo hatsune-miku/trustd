@@ -270,13 +270,7 @@ async fn credential_management_requires_human_login_and_persists_only_ciphertext
     let (status, listed) = call(&app, "/v1/admin/secrets", None, Some(&session)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed, json!({"keys":["JENKINS_CI_TOKEN"]}));
-    let (status, found) = call(
-        &app,
-        "/v1/secrets/keys",
-        Some(json!({"query":"jenkins"})),
-        None,
-    )
-    .await;
+    let (status, found) = call(&app, "/v1/secrets/keys", Some(json!({})), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(found, listed);
     assert_eq!(

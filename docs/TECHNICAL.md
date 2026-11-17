@@ -160,7 +160,7 @@ Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 
 
 macOS/Linux 将 `command` 改为 `trustd-stdio` 的绝对路径。默认 endpoint 就是 `127.0.0.1:32120`，可以省略参数。它只接受字面量 loopback 地址，不使用 HTTP 代理、不跟随重定向。
 
-默认工具是 `secrets_list`、`enter_interactive`、`run`、`destroy`。查找凭据名称时使用 `secrets_list({"query":"github"})`，只返回名称中包含该子串的匹配项，不区分大小写；空串和纯空白会被拒绝，不支持无参数列出全部。交互授权示例：
+默认工具是 `secrets_list`、`enter_interactive`、`run`、`destroy`。查看凭据名称时调用无参数的 `secrets_list`，返回全部名称，不含值，不提供搜索参数。交互授权示例：
 
 ```json
 {

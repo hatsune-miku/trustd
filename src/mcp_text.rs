@@ -116,9 +116,9 @@ pub fn tool_definitions() -> Value {
     }
     json!([
         {
-            "name":"secrets_list", "title":"Search credential keys",
-            "description":"Search credential names without authorization using a required non-empty, case-insensitive literal substring. Returns only matching names, never values; no unfiltered list is available. Pass needed names as secret_keys to enter_interactive, then reference their environment variables in commands.",
-            "inputSchema":{"type":"object","properties":{"query":{"type":"string","minLength":1,"pattern":"\\S","description":"Case-insensitive literal substring of a credential name, for example github. Empty or whitespace-only queries are rejected. Spaces are not trimmed; wildcards and regular expressions are not supported."}},"required":["query"],"additionalProperties":false},
+            "name":"secrets_list", "title":"List available credential keys",
+            "description":"List all available credential names without authorization. No credential values are returned. Pass needed names as secret_keys to enter_interactive, then reference their environment variables in commands.",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
             "outputSchema":{"type":"object","properties":{"keys":{"type":"array","items":{"type":"string"}}},"required":["keys"],"additionalProperties":false},
             "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}
         },

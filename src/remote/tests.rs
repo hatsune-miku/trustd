@@ -205,6 +205,14 @@ async fn granted_credentials_reach_commands_but_are_never_returned() {
         .get_mut("alice")
         .unwrap()
         .secret_keys = vec!["REMOTE_GRANTED".into()];
+    // The full granted list is returned without a search term.
+    assert_eq!(
+        state
+            .remote_dispatch("alice", json!({"operation":"secrets_list"}))
+            .await
+            .unwrap(),
+        json!({"keys":["REMOTE_GRANTED"]})
+    );
     let session = state
         .remote_open("alice", &json!({"secret_keys":["REMOTE_GRANTED"]}))
         .await
