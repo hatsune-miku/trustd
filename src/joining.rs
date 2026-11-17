@@ -52,6 +52,63 @@ fn post(
     Ok(value)
 }
 
+/// A management session on this user's running daemon, opened with a local
+/// single-use ticket. Logged out when dropped.
+struct Local {
+    client: reqwest::blocking::Client,
+    base: String,
+    session: String,
+}
+
+impl Local {
+    fn connect(path: Option<PathBuf>) -> Result<Self> {
+        let (path, config) = config(path)?;
+        let base = format!("http://127.0.0.1:{}", config.bind.port());
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        let ticket = localshelld::login::write_ticket(&path)?;
+        let login = post(
+            &client,
+            &base,
+            "/v1/admin/login",
+            None,
+            json!({"credential":{"type":"ticket","value":ticket}}),
+        )?;
+        let session = login["session"]
+            .as_str()
+            .context("invalid management login response")?
+            .to_owned();
+        Ok(Self {
+            client,
+            base,
+            session,
+        })
+    }
+
+    fn post(&self, path: &str, body: Value) -> Result<Value> {
+        post(&self.client, &self.base, path, Some(&self.session), body)
+    }
+
+    fn get(&self, path: &str) -> Result<Value> {
+        Ok(self
+            .client
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.session)
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
+}
+
+impl Drop for Local {
+    fn drop(&mut self) {
+        let _ = self.post("/v1/admin/logout", json!({}));
+    }
+}
+
 pub(crate) fn device_name() -> String {
     let name = std::process::Command::new("hostname")
         .output()
@@ -65,31 +122,7 @@ pub(crate) fn device_name() -> String {
 
 /// Print this device's backend, connection, peers and trust rules.
 pub fn status(path: Option<PathBuf>) -> Result<()> {
-    let (path, config) = config(path)?;
-    let base = format!("http://127.0.0.1:{}", config.bind.port());
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let ticket = localshelld::login::write_ticket(&path)?;
-    let login = post(
-        &client,
-        &base,
-        "/v1/admin/login",
-        None,
-        json!({"credential":{"type":"ticket","value":ticket}}),
-    )?;
-    let session = login["session"]
-        .as_str()
-        .context("invalid management login response")?;
-    let remote: Value = client
-        .get(format!("{base}/v2/admin/remote"))
-        .bearer_auth(session)
-        .send()?
-        .error_for_status()?
-        .json()?;
-    let _ = post(&client, &base, "/v1/admin/logout", Some(session), json!({}));
+    let remote = Local::connect(path)?.get("/v2/admin/remote")?;
     let Some(backend) = remote["backend"]
         .as_str()
         .filter(|_| remote["joined"] == true)
@@ -159,29 +192,9 @@ pub(crate) fn join_with(
     path: Option<PathBuf>,
     started: impl FnOnce(&str, &str),
 ) -> Result<()> {
-    let (path, config) = config(path)?;
-    let base = format!("http://127.0.0.1:{}", config.bind.port());
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let ticket = localshelld::login::write_ticket(&path)?;
-    let login = post(
-        &client,
-        &base,
-        "/v1/admin/login",
-        None,
-        json!({"credential":{"type":"ticket","value":ticket}}),
-    )?;
-    let session = login["session"]
-        .as_str()
-        .context("invalid management login response")?;
-    let request = post(
-        &client,
-        &base,
+    let local = Local::connect(path)?;
+    let request = local.post(
         "/v1/admin/sync",
-        Some(session),
         json!({"action":"start","url":url,"name":name.unwrap_or_else(device_name)}),
     )?;
     started(
@@ -193,13 +206,7 @@ pub(crate) fn join_with(
     let interval = Duration::from_secs(request["interval"].as_u64().unwrap_or(3).max(3));
     while Instant::now() < deadline {
         thread::sleep(interval);
-        let result = post(
-            &client,
-            &base,
-            "/v1/admin/sync",
-            Some(session),
-            json!({"action":"poll"}),
-        )?;
+        let result = local.post("/v1/admin/sync", json!({"action":"poll"}))?;
         if result["connected"] == true {
             return Ok(());
         }

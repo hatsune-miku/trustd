@@ -378,7 +378,11 @@ async fn passkey_login_start(State(state): State<AppState>) -> Result<Json<Value
     }
     .to_text();
     let started = state
-        .backend_post("signatures", json!({"statement":statement}))
+        .backend_request(
+            "signatures",
+            json!({"statement":statement}),
+            Duration::from_secs(15),
+        )
         .await?;
     let backend = state.backend_url().await?;
     let verification = started["verification_uri"].as_str().unwrap_or_default();
@@ -434,7 +438,11 @@ async fn passkey_login_poll(
         (login.statement.clone(), login.backend_id.clone())
     };
     let result = state
-        .backend_post("signatures/poll", json!({"id":backend_id}))
+        .backend_request(
+            "signatures/poll",
+            json!({"id":backend_id}),
+            Duration::from_secs(15),
+        )
         .await?;
     if result["pending"] == true {
         return Ok(Json(json!({"pending":true})));

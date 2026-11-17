@@ -233,17 +233,6 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
     assets::serve(uri).await
 }
 
-/// Whether the user daemon has joined a backend, and which one.
-fn joined(user_config: &Path) -> (bool, Option<String>) {
-    let read = |extension: &str| -> Option<Value> {
-        serde_json::from_slice(&std::fs::read(user_config.with_extension(extension)).ok()?).ok()
-    };
-    let owner = read("remote.json").is_some_and(|remote| !remote["owner"].is_null());
-    let backend = read("authorization.json")
-        .and_then(|saved| saved["sync"]["url"].as_str().map(str::to_owned));
-    (owner && backend.is_some(), backend)
-}
-
 fn snapshot(state: &Inner) -> Result<Value> {
     let registration = super::update::service::registration()?;
     // A non-elevated wizard may be unable to inspect protected system state.
@@ -277,8 +266,8 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "system_url": format!("http://localhost:{}/", user.as_ref().map_or(localshelld::config::DEFAULT_PORT, |value| value.privileged_daemon.port())),
         "job": job,
         "agents": state.agents,
-        "joined": joined(&state.user_config).0,
-        "backend": joined(&state.user_config).1,
+        "joined": localshelld::remote::joined_backend(&state.user_config).is_some(),
+        "backend": localshelld::remote::joined_backend(&state.user_config),
         "device_name": super::joining::device_name(),
     }))
 }
@@ -391,7 +380,7 @@ async fn install(
                     .filter(|name| !name.trim().is_empty()),
             ))
         }
-        None if joined(&state.user_config).0 => None,
+        None if localshelld::remote::joined_backend(&state.user_config).is_some() => None,
         None => {
             return Err(ApiError::bad_request(
                 "请填写后端地址：安装后此设备需要加入后端。",

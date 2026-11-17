@@ -206,23 +206,16 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     } else {
         "用户守护进程：桌面模式"
     })?;
-    let registration = super::super::update::service::registration()?;
-    let system_initialized = super::apply::configuration_source(
-        &state.paths,
-        registration.as_ref().map(|value| value.config.as_path()),
-    )
-    .is_ok_and(|source| source.is_some());
     terminal.say(&format!(
         "程序目录：{}\n系统配置：{}\n用户配置：{}",
         state.paths.program.display(),
         state.paths.config.display(),
         state.user_config.display()
     ))?;
-    let _ = system_initialized;
-    let (joined, backend) = super::joined(&state.user_config);
+    let backend = localshelld::remote::joined_backend(&state.user_config);
     let Some(options) = collect(
         &mut terminal,
-        backend.as_deref().filter(|_| joined),
+        backend.as_deref(),
         &super::super::joining::device_name(),
         &state.agents,
     )?

@@ -501,7 +501,7 @@ impl AppState {
                         acknowledgements: acknowledgements.clone(),
                     };
                     if let Ok(response) = state
-                        .telegram_cloud_request(
+                        .backend_request(
                             "telegram/agents",
                             serde_json::json!(exchange),
                             Duration::from_secs(15),

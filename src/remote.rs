@@ -51,6 +51,23 @@ struct Saved {
     statements: Vec<SignedStatement>,
 }
 
+/// The backend the user daemon configured at `config` has joined, read from
+/// its files. For tools that run beside a possibly running daemon; only the
+/// pinned owner's presence is read, never the device's private key.
+pub fn joined_backend(config: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Joined {
+        #[serde(default)]
+        owner: Option<serde::de::IgnoredAny>,
+    }
+    let remote: Joined =
+        serde_json::from_slice(&std::fs::read(config.with_extension("remote.json")).ok()?).ok()?;
+    remote.owner?;
+    let settings: crate::settings::SavedSettings =
+        storage::load_json(&config.with_extension("authorization.json")).ok()?;
+    settings.sync.map(|sync| sync.url)
+}
+
 impl Saved {
     fn roster(&self) -> Option<Roster> {
         self.owner
@@ -230,15 +247,6 @@ impl Runtime {
             .context("this device has not joined a backend")?;
         let keys = owner::roster(pinned, &saved.statements).keys;
         Ok(signed.verify(pinned, &keys)?)
-    }
-
-    /// Whether this device joined a backend and pinned its owner.
-    pub(crate) async fn joined(&self) -> bool {
-        self.saved
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|saved| saved.owner.is_some())
     }
 
     /// This device's Noise identity, created on first use.

@@ -220,7 +220,8 @@ fn encrypted_vault(
 }
 
 impl AppState {
-    pub(crate) async fn telegram_cloud_request(
+    /// POST to this device's backend with its own session (renewed if needed).
+    pub(crate) async fn backend_request(
         &self,
         path: &str,
         body: Value,
@@ -620,12 +621,6 @@ impl AppState {
         }
     }
 
-    /// POST to this device's backend with its own session.
-    pub(crate) async fn backend_post(&self, path: &str, body: Value) -> Result<Value, ApiError> {
-        self.telegram_cloud_request(path, body, Duration::from_secs(15))
-            .await
-    }
-
     /// The origin of the backend this device joined.
     pub(crate) async fn backend_url(&self) -> Result<String, ApiError> {
         self.settings
@@ -641,7 +636,7 @@ impl AppState {
     /// Fetch the owner's statements and adopt them after local verification.
     async fn refresh_roster(&self, url: &str, access_token: &str) -> anyhow::Result<()> {
         // Only a device that verified its own join has an owner to check against.
-        if !self.remote.joined().await {
+        if self.remote.joined_device_id().await.is_none() {
             return Ok(());
         }
         let response: RosterResponse =

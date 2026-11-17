@@ -70,7 +70,7 @@ impl AppState {
         }
         let revision = self.read_vault().await?.revision;
         let mut result = self
-            .telegram_cloud_request(
+            .backend_request(
                 "telegram",
                 json!({"expected_revision":revision,"command":action}),
                 Duration::from_secs(30),
@@ -155,7 +155,7 @@ struct Backend(AppState);
 impl Backend {
     async fn record(&self, prompt: Prompt, choice: Choice) -> Result<(), ApiError> {
         self.0
-            .telegram_cloud_request(
+            .backend_request(
                 "telegram/record",
                 json!({"prompt":prompt,"device":device_name(),"choice":choice}),
                 Duration::from_secs(25),
@@ -165,7 +165,7 @@ impl Backend {
     }
     async fn create(&self, prompt: Prompt) -> Result<(), ApiError> {
         self.0
-            .telegram_cloud_request(
+            .backend_request(
                 "telegram/request",
                 json!({"prompt":prompt,"device":device_name()}),
                 Duration::from_secs(25),
@@ -176,7 +176,7 @@ impl Backend {
     async fn poll(&self, id: &str) -> Result<Option<Decision>, ApiError> {
         let result = self
             .0
-            .telegram_cloud_request("telegram/poll", json!({"id":id}), Duration::from_secs(25))
+            .backend_request("telegram/poll", json!({"id":id}), Duration::from_secs(25))
             .await?;
         serde_json::from_value(result["decision"].clone())
             .map_err(|_| ApiError::unavailable("invalid Telegram relay response"))
@@ -186,7 +186,7 @@ impl Backend {
         for attempt in 0..3 {
             match self
                 .0
-                .telegram_cloud_request(
+                .backend_request(
                     "telegram/finish",
                     json!({"id":id,"completion":completion}),
                     Duration::from_secs(10),
