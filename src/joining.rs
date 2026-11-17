@@ -63,6 +63,83 @@ pub(crate) fn device_name() -> String {
     name.chars().take(80).collect()
 }
 
+/// Print this device's backend, connection, peers and trust rules.
+pub fn status(path: Option<PathBuf>) -> Result<()> {
+    let (path, config) = config(path)?;
+    let base = format!("http://127.0.0.1:{}", config.bind.port());
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let ticket = localshelld::login::write_ticket(&path)?;
+    let login = post(
+        &client,
+        &base,
+        "/v1/admin/login",
+        None,
+        json!({"credential":{"type":"ticket","value":ticket}}),
+    )?;
+    let session = login["session"]
+        .as_str()
+        .context("invalid management login response")?;
+    let remote: Value = client
+        .get(format!("{base}/v2/admin/remote"))
+        .bearer_auth(session)
+        .send()?
+        .error_for_status()?
+        .json()?;
+    let _ = post(&client, &base, "/v1/admin/logout", Some(session), json!({}));
+    let Some(backend) = remote["backend"]
+        .as_str()
+        .filter(|_| remote["joined"] == true)
+    else {
+        println!("Not joined. Run `trustd join <backend URL>`.");
+        return Ok(());
+    };
+    println!(
+        "Backend: {backend} ({})\nThis device: {}",
+        if remote["connected"] == true {
+            "connected"
+        } else {
+            "not connected"
+        },
+        remote["device_id"].as_str().unwrap_or_default()
+    );
+    let own = remote["device_id"].as_str().unwrap_or_default();
+    let rules = remote["rules"].as_array().cloned().unwrap_or_default();
+    for (id, peer) in remote["peers"].as_object().into_iter().flatten() {
+        let restrictions: Vec<String> = rules
+            .iter()
+            .filter(|rule| {
+                (rule["from"] == id.as_str() && rule["to"] == own)
+                    || (rule["from"] == own && rule["to"] == id.as_str())
+            })
+            .map(|rule| {
+                format!(
+                    "{} denies {}",
+                    if rule["from"] == id.as_str() {
+                        "peer → here"
+                    } else {
+                        "here → peer"
+                    },
+                    rule["deny"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        println!(
+            "Peer: {} {id} — {}",
+            peer["label"].as_str().unwrap_or_default(),
+            if restrictions.is_empty() {
+                "trusted".into()
+            } else {
+                restrictions.join("; ")
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Join the backend at `url`; the owner approves with one passkey tap.
 pub fn join(url: String, name: Option<String>, path: Option<PathBuf>) -> Result<()> {
     join_with(url, name, path, |uri, code| {

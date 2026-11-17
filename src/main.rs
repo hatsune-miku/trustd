@@ -122,6 +122,11 @@ enum CommandKind {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Show this device's backend, connection, peers and trust rules.
+    Status {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Print a single-use management login link for this user's daemon, for
     /// when the backend passkey login is unavailable.
     LoginUrl {
@@ -333,6 +338,13 @@ async fn run_command(command: CommandKind) -> Result<()> {
             tokio::task::spawn_blocking(move || {
                 require_user()?;
                 joining::join(url, name, config)
+            })
+            .await?
+        }
+        CommandKind::Status { config } => {
+            tokio::task::spawn_blocking(move || {
+                require_user()?;
+                joining::status(config)
             })
             .await?
         }

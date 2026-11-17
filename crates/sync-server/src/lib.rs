@@ -171,7 +171,18 @@ impl App {
         let webauthn = WebauthnBuilder::new(&rp_id, &url)?
             .rp_name("localshelld sync")
             .build()?;
-        let store = Store::open(directory)?;
+        let mut store = Store::open(directory)?;
+        if store.saved.genesis.is_empty() && !store.saved.passkeys.is_empty() {
+            // Initialized before owner statements existed: the owner's existing
+            // passkeys become the base keys that joining devices pin.
+            let mut next = store.saved.clone();
+            next.genesis = next
+                .passkeys
+                .iter()
+                .map(|key| OwnerKey::from(&key.key))
+                .collect();
+            store.commit(next)?;
+        }
         let (revision, _) = watch::channel(store.saved.vault.revision);
         Ok(Self {
             store: Arc::new(Mutex::new(store)),

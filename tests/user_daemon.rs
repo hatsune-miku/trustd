@@ -190,6 +190,14 @@ async fn verify_user_daemon(headless: bool) {
         .unwrap();
     assert!(page.contains("本机授权管理"));
     assert!(page.contains("/assets/"));
+    // A headless owner can inspect the device from the terminal.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_trustd"))
+        .args(["status", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    assert!(String::from_utf8_lossy(&status.stdout).contains("Not joined"));
     let approval_base = base.clone();
     let config_path = path.clone();
     let entered =
