@@ -126,8 +126,9 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("ssh -N -o ExitOnForwardFailure=yes", output)
         self.assertIn("-L '127.0.0.1:32120:127.0.0.1:32120' -p 2222 'miku@192.0.2.20'", output)
-        self.assertIn("http://localhost:32119/", output)
-        self.assertIn("系统管理页填写 127.0.0.1:32120", output)
+        # Only the user daemon serves a management page; 32119 is not forwarded.
+        self.assertIn("管理页：http://localhost:32120/", output)
+        self.assertNotIn("32119", output)
         self.assertNotIn("pipeline contents", output)
 
     def test_password_eof_restores_echo_without_confirming(self):

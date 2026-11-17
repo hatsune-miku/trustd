@@ -95,6 +95,8 @@ fn prerequisite_download_inherits_proxy_and_does_not_log_proxy_credentials() {
             }
         }
     };
+    // Windows hands out accepted sockets in the listener's non-blocking mode.
+    connection.set_nonblocking(false).unwrap();
     connection
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
