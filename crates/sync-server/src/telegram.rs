@@ -1,5 +1,5 @@
 use super::*;
-use localshelld_telegram::{Action, Api, Completion, Config, Prompt};
+use localshelld_telegram::{Action, Api, Choice, Completion, Config, Prompt};
 
 impl App {
     pub async fn start_telegram(&self) -> anyhow::Result<()> {
@@ -122,6 +122,26 @@ pub(super) async fn create(
         .await
         .map_err(bad)?;
     Ok(Json(json!({"created":true})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Record {
+    prompt: Prompt,
+    device: String,
+    choice: Choice,
+}
+pub(super) async fn record(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<Record>,
+) -> Result<Json<Value>> {
+    let sid = owner(&app, &headers).await?;
+    app.telegram
+        .record(&sid, &body.device, body.prompt, body.choice)
+        .await
+        .map_err(bad)?;
+    Ok(Json(json!({"recorded":true})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -91,6 +91,16 @@ impl AppState {
         }
         Ok(Backend(self.clone()))
     }
+    pub(crate) fn record_telegram_decision(&self, prompt: Prompt, choice: Choice) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            if let Ok(backend) = state.telegram_backend().await
+                && backend.record(prompt, choice).await.is_err()
+            {
+                tracing::warn!("Telegram authorization record delivery failed");
+            }
+        });
+    }
     pub(crate) async fn request_consent(&self, prompt: Prompt) -> Result<Decision, ApiError> {
         crate::consent::validate_request(&prompt.agent_name, &prompt.request_reason)?;
         let remaining = prompt
@@ -112,10 +122,10 @@ impl AppState {
             tokio::select! {
                 _=tokio::time::sleep_until(deadline)=>break (Decision {choice:Choice::Ignore,remember:false,btw:String::new()},Completion::Expired),
                 result=&mut desktop,if !desktop_done=>match result {
-                    Ok(decision)=>break (decision,Completion::Other),Err(_)=>desktop_done=true,
+                    Ok(decision)=>{let completion = decision.choice.into(); break (decision,completion)},Err(_)=>desktop_done=true,
                 },
                 result=&mut telegram.reply,if !telegram_done=>match result {
-                    Ok(Ok(decision))=>break (decision,Completion::Telegram),_=>telegram_done=true,
+                    Ok(Ok(decision))=>{let completion = decision.choice.into(); break (decision,completion)},_=>telegram_done=true,
                 },
             }
             if desktop_done && telegram_done {
@@ -143,14 +153,21 @@ impl AppState {
 // the singleton update worker are compiled into the sync server, not the daemon.
 struct Backend(AppState);
 impl Backend {
+    async fn record(&self, prompt: Prompt, choice: Choice) -> Result<(), ApiError> {
+        self.0
+            .telegram_cloud_request(
+                "telegram/record",
+                json!({"prompt":prompt,"device":device_name(),"choice":choice}),
+                Duration::from_secs(25),
+            )
+            .await
+            .map(|_| ())
+    }
     async fn create(&self, prompt: Prompt) -> Result<(), ApiError> {
-        let device = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "trustd device".into());
         self.0
             .telegram_cloud_request(
                 "telegram/request",
-                json!({"prompt":prompt,"device":device}),
+                json!({"prompt":prompt,"device":device_name()}),
                 Duration::from_secs(25),
             )
             .await
@@ -165,8 +182,9 @@ impl Backend {
             .map_err(|_| ApiError::unavailable("invalid Telegram relay response"))
     }
     async fn finish(&self, id: &str, completion: Completion) {
+        let mut completion = completion;
         for attempt in 0..3 {
-            if self
+            match self
                 .0
                 .telegram_cloud_request(
                     "telegram/finish",
@@ -174,13 +192,29 @@ impl Backend {
                     Duration::from_secs(10),
                 )
                 .await
-                .is_ok()
             {
-                break;
+                Ok(_) => break,
+                Err(error)
+                    if matches!(error.status_code(), 400 | 422)
+                        && matches!(
+                            completion,
+                            Completion::Accepted | Completion::Denied | Completion::Ignored
+                        ) =>
+                {
+                    // Close obsolete buttons even while the cloud is being upgraded.
+                    completion = Completion::Other;
+                    continue;
+                }
+                Err(_) => {}
             }
             tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
         }
     }
+}
+fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "trustd device".into())
 }
 struct Channel {
     reply: oneshot::Receiver<Result<Decision, ApiError>>,

@@ -111,3 +111,5 @@ HTTP/MCP 使用本机 loopback，配置验证限制 bind 和 daemon 间通信目
 - 各平台服务注册分别指向固定路径的专用 daemon；维护向导从临时目录运行，停止安装目录内的旧实例，再替换并启动完整套件。macOS 使用 `/Library/LaunchDaemons/dev.localshelld.plist`，`bootstrap system` 安装，`bootout` 卸载；配置和 seal key 保留。
 - Windows 使用 Job Object 清理进程树，Unix 清理可追踪后代和原始进程组。主动彻底脱离的 Unix daemon 不在回收保证内，这不是容器或作业调度器。刻意改写 `__localshelld_` 内部变量只会破坏自身会话，不构成额外提权。
 - 各 daemon 的配置目录保存 `command.log` 与 `audit.log`，格式为 JSON Lines。命令日志记录源码、执行身份与结果元数据，已知 handle 和注入凭据值使用占位符；审计日志记录授权、会话生命周期和管理操作。每次审批统一写入一条 `authorization.decision`，手动操作、记住选择和路径授权策略使用相同格式，不包含处理来源、策略或记忆状态。日志查看需要管理登录。
+- 已启用的 Telegram 同样保留每次审批的结果。已完成的审批直接发送无按钮记录，交互审批完成后移除按钮，两者的最终消息格式一致。Telegram 投递失败不影响已作出的审批决定。
+- `enter_interactive` 的 HTTP / MCP 返回 `authorization_decision`，包含 `request_id` 和 `choice`，并提供统一结果文案；双 daemon 转发保留该记录。Codex 在 MCP 工具结果中保存这条记录，不额外发起审批交互。新增 Telegram 记录接口需要同步更新云服务；旧云服务仍可关闭原有交互消息。

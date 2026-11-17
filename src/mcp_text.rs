@@ -31,6 +31,15 @@ pub fn missing_string_argument(name: &str) -> String {
     format!("missing string argument: {name}")
 }
 
+pub(crate) fn authorization_message(status: &str) -> &'static str {
+    match status {
+        "authorized" => "Authorization accepted.",
+        "denied" => "Authorization denied.",
+        "timed_out" => "Authorization timed out.",
+        _ => "Authorization request completed.",
+    }
+}
+
 fn enter_output() -> Value {
     let mut schema = json!({
         "type":"object", "properties":{
@@ -43,7 +52,17 @@ fn enter_output() -> Value {
             "identities":{"type":"object","additionalProperties":{"type":"object"}},
             "expires_at":{"type":["integer","null"],"description":"Session expiry in Unix epoch seconds, or null."},
             "expires_at_iso":{"type":["string","null"],"description":"UTC ISO 8601 expiry, or null."},
-            "message":{"type":"string"}
+            "message":{"type":"string"},
+            "authorization_decision":{
+                "type":"object",
+                "description":"The owner's authorization decision for this request.",
+                "properties":{
+                    "request_id":{"type":"string"},
+                    "choice":{"type":"string","enum":["accept","deny","ignore"]}
+                },
+                "required":["request_id","choice"],
+                "additionalProperties":false
+            }
         }
     });
     schema["properties"]["status"] =

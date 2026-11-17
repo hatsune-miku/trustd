@@ -221,8 +221,18 @@ impl Adapter {
                         .as_object()
                         .unwrap();
                     object.retain(|key, _| key == "handle" || allowed.contains_key(key));
-                    if object.contains_key("message") {
-                        object.insert("message".into(), json!("Authorization request completed."));
+                    let message = crate::mcp_text::authorization_message(
+                        object
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    object.insert("message".into(), json!(message));
+                    if let Some(record) = object
+                        .get_mut("authorization_decision")
+                        .and_then(Value::as_object_mut)
+                    {
+                        record.retain(|key, _| key == "request_id" || key == "choice");
                     }
                 }
                 let handle = result

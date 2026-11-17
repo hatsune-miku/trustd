@@ -26,6 +26,20 @@ async fn finish(State(relay): State<Relay>, Json(body): Json<Value>) -> Json<Val
     let _ = relay.done.send(body);
     Json(json!({"closed":true}))
 }
+async fn connect(state: &AppState, url: String) {
+    let mut settings = state.settings.lock().await;
+    let tokens = localshelld_sync_protocol::Tokens {
+        access_token: "test-access".into(),
+        refresh_token: "test-refresh".into(),
+        expires_at: chrono::Utc::now().timestamp() + 600,
+        refresh_expires_at: chrono::Utc::now().timestamp() + 86400,
+    };
+    settings.saved.sync = Some(SavedSync {
+        url,
+        revision: 0,
+        tokens: config::seal(&serde_json::to_vec(&tokens).unwrap(), &settings.seal_key).unwrap(),
+    });
+}
 async fn channels(desktop_wins: bool) {
     let (done, mut completed) = mpsc::unbounded_channel();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -66,21 +80,7 @@ async fn channels(desktop_wins: bool) {
         AuthManager::new("unused".into(), None),
     )
     .with_consent(broker);
-    {
-        let mut settings = state.settings.lock().await;
-        let tokens = localshelld_sync_protocol::Tokens {
-            access_token: "test-access".into(),
-            refresh_token: "test-refresh".into(),
-            expires_at: chrono::Utc::now().timestamp() + 600,
-            refresh_expires_at: chrono::Utc::now().timestamp() + 86400,
-        };
-        settings.saved.sync = Some(SavedSync {
-            url,
-            revision: 0,
-            tokens: config::seal(&serde_json::to_vec(&tokens).unwrap(), &settings.seal_key)
-                .unwrap(),
-        });
-    }
+    connect(&state, url).await;
     let prompt = Prompt {
         id: "arbitration".into(),
         agent_name: "test".into(),
@@ -110,7 +110,7 @@ async fn channels(desktop_wins: bool) {
         .unwrap();
     assert_eq!(
         completion["completion"],
-        if desktop_wins { "other" } else { "telegram" }
+        if desktop_wins { "denied" } else { "accepted" }
     );
     assert_eq!(completion["id"], "arbitration");
     state.shutdown().await;
@@ -123,6 +123,143 @@ async fn telegram_winner_closes_the_native_popup() {
 #[tokio::test]
 async fn desktop_winner_completes_even_late_telegram_delivery() {
     channels(true).await;
+}
+
+#[tokio::test]
+async fn completion_closes_buttons_on_an_older_cloud() {
+    let (done, mut recorded) = mpsc::unbounded_channel();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let router = Router::new()
+        .route(
+            "/sync/v1/telegram/finish",
+            post(
+                |State(relay): State<Relay>, Json(body): Json<Value>| async move {
+                    let _ = relay.done.send(body.clone());
+                    if body["completion"] == "other" {
+                        Ok(Json(json!({"closed":true})))
+                    } else {
+                        Err(axum::http::StatusCode::UNPROCESSABLE_ENTITY)
+                    }
+                },
+            ),
+        )
+        .with_state(Relay {
+            desktop_wins: true,
+            done,
+        });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let state = AppState::new(
+        config::Config::default(),
+        AuthManager::new("unused".into(), None),
+    );
+    connect(&state, url).await;
+    Backend(state.clone())
+        .finish("legacy", Completion::Accepted)
+        .await;
+    assert_eq!(
+        recorded.recv().await.unwrap(),
+        json!({"id":"legacy","completion":"accepted"})
+    );
+    assert_eq!(
+        recorded.recv().await.unwrap(),
+        json!({"id":"legacy","completion":"other"})
+    );
+    assert!(recorded.try_recv().is_err());
+    state.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn remembered_and_saved_decisions_each_deliver_one_completed_record() {
+    use crate::agents::tests::{current_identity, save_policy};
+    use localshelld_telegram::agents::Policy;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (done, mut recorded) = mpsc::unbounded_channel();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let router = Router::new()
+        .route("/sync/v1/telegram/request", post(create))
+        .route("/sync/v1/telegram/poll", post(poll))
+        .route("/sync/v1/telegram/finish", post(finish))
+        .route("/sync/v1/telegram/record", post(finish))
+        .with_state(Relay {
+            desktop_wins: true,
+            done,
+        });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let dialogs = Arc::new(AtomicUsize::new(0));
+    let count = dialogs.clone();
+    let state = AppState::user(
+        config::Config {
+            bind: "127.0.0.1:32120".parse().unwrap(),
+            ..config::Config::default()
+        },
+        AuthManager::new("unused".into(), None),
+    )
+    .unwrap()
+    .with_consent(ConsentBroker::new(move |event| {
+        if let DesktopEvent::Show(_, reply) = event {
+            count.fetch_add(1, Ordering::SeqCst);
+            let _ = reply.send(Decision {
+                choice: Choice::Accept,
+                remember: true,
+                btw: String::new(),
+            });
+        }
+        Ok(())
+    }));
+    connect(&state, url).await;
+    let agent = current_identity();
+    for (index, policy) in [Policy::Ask, Policy::Trust, Policy::Deny, Policy::Once]
+        .into_iter()
+        .enumerate()
+    {
+        // Trust must come from the first request's remember checkbox.
+        if policy != Policy::Trust {
+            save_policy(&state, &agent, policy).await;
+        }
+        let choice = if policy == Policy::Deny {
+            Choice::Deny
+        } else {
+            Choice::Accept
+        };
+        let id = format!("record-{index}");
+        let prompt = Prompt {
+            id: id.clone(),
+            agent_name: "test".into(),
+            agent_path: None,
+            request_reason: "test only".into(),
+            scope: "user".into(),
+            secret_keys: vec![],
+            expires_at_ms: chrono::Utc::now().timestamp_millis()
+                + crate::consent::CONSENT_TIMEOUT_MS,
+        };
+        let result = state
+            .authorize_agent(prompt, Some(agent.clone()))
+            .await
+            .unwrap();
+        assert_eq!(result.choice, choice);
+        let record = tokio::time::timeout(Duration::from_secs(5), recorded.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if index == 0 {
+            assert_eq!(record, json!({"id":id,"completion":"accepted"}));
+        } else {
+            assert_eq!(record["prompt"]["id"], id);
+            assert_eq!(record["choice"], json!(choice));
+            assert_eq!(record.as_object().unwrap().len(), 3);
+        }
+    }
+    assert_eq!(dialogs.load(Ordering::SeqCst), 1);
+    assert!(recorded.try_recv().is_err());
+    state.shutdown().await;
+    server.abort();
 }
 
 #[tokio::test]

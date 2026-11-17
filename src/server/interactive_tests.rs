@@ -69,6 +69,17 @@ async fn accepted_and_remembered_results_are_neutral_and_executable() {
     assert_eq!(second["status"], "authorized");
     assert_eq!(second["btw"], "");
     assert_eq!(second["message"], first["message"]);
+    assert_ne!(
+        first["authorization_decision"]["request_id"],
+        second["authorization_decision"]["request_id"]
+    );
+    for result in [&first, &second] {
+        assert_eq!(result["authorization_decision"]["choice"], "accept");
+        assert_eq!(
+            result["authorization_decision"].as_object().unwrap().len(),
+            2
+        );
+    }
     assert!(second.get("automatic").is_none());
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     state.settings.lock().await.saved.agent_policies.clear();
@@ -112,7 +123,9 @@ async fn ignoring_waits_exactly_six_hundred_seconds_and_does_not_remember() {
     assert_eq!(started.elapsed(), Duration::from_secs(600));
     assert_eq!(
         result,
-        json!({"status":"timed_out","timeout_ms":600_000,"btw":"user note"})
+        json!({"status":"timed_out","timeout_ms":600_000,"btw":"user note",
+            "message":"Authorization timed out.",
+            "authorization_decision":{"request_id":result["authorization_decision"]["request_id"],"choice":"ignore"}})
     );
     assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     assert!(state.auth.lock().await.list().is_empty());

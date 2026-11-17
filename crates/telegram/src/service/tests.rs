@@ -166,7 +166,7 @@ async fn desktop_completion_is_final_and_retry_removes_buttons() {
         .unwrap();
     *fixture.fail.lock().await = true;
     service
-        .finish("owner", "one", Completion::Other)
+        .finish("owner", "one", Completion::Denied)
         .await
         .unwrap();
     assert!(service.paint("one").await.is_err());
@@ -188,7 +188,7 @@ async fn desktop_completion_is_final_and_retry_removes_buttons() {
         .unwrap();
     assert_eq!(
         service.inner.state.lock().await.pending["one"].completed,
-        Some(Completion::Other)
+        Some(Completion::Denied)
     );
     let calls = fixture.calls.lock().await;
     let body = &calls
@@ -197,8 +197,80 @@ async fn desktop_completion_is_final_and_retry_removes_buttons() {
         .find(|(m, _)| m == "editMessageText")
         .unwrap()
         .1;
-    assert!(body["text"].as_str().unwrap().ends_with("已经在其它端操作"));
+    assert!(body["text"].as_str().unwrap().ends_with("已拒绝"));
     assert_eq!(body["reply_markup"]["inline_keyboard"], json!([]));
+    service.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn decision_records_match_completed_prompts_and_never_accept_callbacks() {
+    let (service, fixture, server) = setup().await;
+    for (index, choice) in [Choice::Accept, Choice::Deny, Choice::Ignore]
+        .into_iter()
+        .enumerate()
+    {
+        let interactive = format!("interactive-{index}");
+        let recorded = format!("recorded-{index}");
+        let mut request = prompt(&interactive);
+        // Multi-message records must preserve the entire reason.
+        request.request_reason = "reason 🐈 ".repeat(400);
+        service
+            .create("owner", "device", request.clone())
+            .await
+            .unwrap();
+        service
+            .finish("owner", &interactive, choice.into())
+            .await
+            .unwrap();
+        service.paint(&interactive).await.unwrap();
+        let completed_text = fixture
+            .calls
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|(method, _)| method == "editMessageText")
+            .unwrap()
+            .1["text"]
+            .clone();
+        request.id = recorded.clone();
+        fixture.calls.lock().await.clear();
+        service
+            .record("owner", "device", request.clone(), choice)
+            .await
+            .unwrap();
+        service
+            .record("owner", "device", request.clone(), choice)
+            .await
+            .unwrap();
+        assert!(
+            service
+                .record("other-owner", "device", request, choice)
+                .await
+                .is_err()
+        );
+        let calls = fixture.calls.lock().await;
+        let sent: Vec<_> = calls
+            .iter()
+            .filter(|(method, _)| method == "sendMessage")
+            .collect();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.last().unwrap().1["text"], completed_text);
+        assert!(
+            sent.iter()
+                .all(|(_, body)| body["reply_markup"]["inline_keyboard"] == json!([]))
+        );
+        drop(calls);
+        click(&service, &recorded, "accept", 42, 2).await;
+        assert!(service.poll("owner", &recorded).await.is_err());
+        assert!(
+            service.inner.state.lock().await.pending[&recorded]
+                .candidate
+                .borrow()
+                .is_none()
+        );
+    }
     service.stop().await;
     server.abort();
 }

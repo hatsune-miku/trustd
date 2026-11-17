@@ -501,6 +501,26 @@ fn process_probe() {
             .json(&serde_json::json!({"agent_name":"forged friendly name", "request_reason":"test", "confirm_text":"OK"}))
             .send().unwrap().error_for_status().unwrap().json().unwrap();
         println!("AGENT_STATUS={}", value["status"].as_str().unwrap());
+        assert_eq!(
+            value["authorization_decision"]["choice"],
+            if value["status"] == "authorized" {
+                "accept"
+            } else {
+                "deny"
+            }
+        );
+        assert!(
+            uuid::Uuid::parse_str(
+                value["authorization_decision"]["request_id"]
+                    .as_str()
+                    .unwrap()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            value["authorization_decision"].as_object().unwrap().len(),
+            2
+        );
         for field in ["automatic", "policy", "reused", "remember"] {
             assert!(value.get(field).is_none());
         }

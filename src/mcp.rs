@@ -344,6 +344,16 @@ mod tests {
             );
         }
         let entered = call_tool(&state, json!({"name":"enter_interactive","arguments":{"agent_name":"test","request_reason":"test","confirm_text":"OK","secret_keys":["JENKINS_CI_TOKEN"]}})).await.unwrap();
+        let decision = &entered["structuredContent"]["authorization_decision"];
+        assert_eq!(decision["choice"], "accept");
+        assert!(uuid::Uuid::parse_str(decision["request_id"].as_str().unwrap()).is_ok());
+        assert_eq!(
+            entered["structuredContent"]["message"],
+            "Authorization accepted."
+        );
+        let content: Value =
+            serde_json::from_str(entered["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(content["authorization_decision"], *decision);
         assert_eq!(
             entered["structuredContent"]["secret_keys"],
             json!(["JENKINS_CI_TOKEN"])

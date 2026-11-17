@@ -30,7 +30,9 @@ async fn enter(State(state): State<Arc<Fake>>, Json(args): Json<Value>) -> Json<
     );
     state.sessions.lock().await.insert(handle.clone());
     Json(
-        json!({"handle":handle,"status":"authorized","btw":"owner note","reused":state.reused.load(Ordering::SeqCst)}),
+        json!({"handle":handle,"status":"authorized","btw":"owner note","reused":state.reused.load(Ordering::SeqCst),
+            "message":"Legacy authorization source must not be relayed",
+            "authorization_decision":{"request_id":"approval-fixture","choice":"accept","source":"legacy"}}),
     )
 }
 
@@ -444,6 +446,11 @@ async fn removed_entry_is_rejected_and_authorization_source_is_not_relayed() {
     let result = call(&adapter, approval()).await.unwrap();
     assert!(result.get("reused").is_none());
     assert!(result.get("automatic").is_none());
+    assert_eq!(result["message"], "Authorization accepted.");
+    assert_eq!(
+        result["authorization_decision"],
+        json!({"request_id":"approval-fixture","choice":"accept"})
+    );
     assert!(state.requests.lock().await[0].get("token").is_none());
     adapter.close().await.unwrap();
     server.abort();
@@ -479,6 +486,15 @@ async fn stdio_is_newline_json_and_eof_destroys_the_session() {
     line.clear();
     read.read_line(&mut line).await.unwrap();
     assert!(!line.contains("private-handle"));
+    let response: Value = serde_json::from_str(&line).unwrap();
+    let content: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        content["authorization_decision"],
+        json!({"request_id":"approval-fixture","choice":"accept"})
+    );
+    assert_eq!(content, response["result"]["structuredContent"]);
+    assert_eq!(content["message"], "Authorization accepted.");
     assert_eq!(state.sessions.lock().await.len(), 1);
     write.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), worker)

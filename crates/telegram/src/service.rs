@@ -173,6 +173,25 @@ impl Service {
         Ok(binding.candidate.clone())
     }
     pub async fn create(&self, owner: &str, device: &str, prompt: Prompt) -> Result<()> {
+        self.create_message(owner, device, prompt, None).await
+    }
+    pub async fn record(
+        &self,
+        owner: &str,
+        device: &str,
+        prompt: Prompt,
+        choice: Choice,
+    ) -> Result<()> {
+        self.create_message(owner, device, prompt, Some(choice.into()))
+            .await
+    }
+    async fn create_message(
+        &self,
+        owner: &str,
+        device: &str,
+        prompt: Prompt,
+        completion: Option<Completion>,
+    ) -> Result<()> {
         validate_prompt(&prompt)?;
         if device.is_empty() || device.len() > 256 || device.chars().any(char::is_control) {
             return Err("invalid device name");
@@ -216,7 +235,7 @@ impl Service {
                     remember: false,
                     note: String::new(),
                     candidate: watch::channel(None).0,
-                    completed: None,
+                    completed: completion,
                     paint_lock: Arc::new(Mutex::new(())),
                     dirty: false,
                 },
@@ -230,22 +249,35 @@ impl Service {
             prompt.secret_keys.join(", ")
         };
         let content = format!(
-            "trustd 授权\n设备：{device}\n代理：{}\n路径：{}\n权限：{}\n凭据名称：{keys}\n\n{}\n\n{} 秒内有效。回复本消息可添加备注。",
+            "trustd 授权\n设备：{device}\n代理：{}\n路径：{}\n权限：{}\n凭据名称：{keys}\n\n{}",
             prompt.agent_name,
             prompt.agent_path.as_deref().unwrap_or("无法核验程序路径"),
             prompt.scope,
             prompt.request_reason,
-            (prompt.expires_at_ms.saturating_sub(now()).max(0) as u64).div_ceil(1_000)
         );
         let chunks = chunks(&content, 3400);
         for (index, chunk) in chunks.iter().enumerate() {
             let last = index + 1 == chunks.len();
-            let markup = if last {
+            let (completion, candidate) = {
+                let state = self.inner.state.lock().await;
+                let pending = state.pending.get(&id).ok_or("request not found")?;
+                (pending.completed, pending.candidate.borrow().clone())
+            };
+            let markup = if last && completion.is_none() {
                 keyboard(&id, false, prompt.agent_path.is_some())
             } else {
                 json!([])
             };
-            let value = self.inner.api.call(&config.bot_token,"sendMessage",json!({"chat_id":config.binding.as_ref().unwrap().chat_id,"text":chunk,"reply_markup":{"inline_keyboard":markup},"link_preview_options":{"is_disabled":true}})).await;
+            let text = if !last {
+                chunk.clone()
+            } else if let Some(completed) = completion {
+                format!("{chunk}\n\n{}", completed.label(candidate.as_ref()))
+            } else {
+                let seconds =
+                    (prompt.expires_at_ms.saturating_sub(now()).max(0) as u64).div_ceil(1_000);
+                format!("{chunk}\n\n{seconds} 秒内有效。回复本消息可添加备注。")
+            };
+            let value = self.inner.api.call(&config.bot_token,"sendMessage",json!({"chat_id":config.binding.as_ref().unwrap().chat_id,"text":text,"reply_markup":{"inline_keyboard":markup},"link_preview_options":{"is_disabled":true}})).await;
             let value = match value {
                 Ok(v) => v,
                 Err(error) => {
@@ -260,11 +292,10 @@ impl Service {
             if let Some(p) = state.pending.get_mut(&id) {
                 p.messages.push(message);
                 p.last_text = chunk.clone();
-                let completed = p.completed.is_some();
+                let completed = last && p.completed.is_some() && p.completed != completion;
                 drop(state);
                 if completed {
                     let _ = self.paint(&id).await;
-                    break;
                 }
             }
         }

@@ -299,6 +299,7 @@ pub fn router(app: App) -> Router {
         .route("/sync/v1/vault", get(vault_get).put(vault_put))
         .route("/sync/v1/telegram", post(telegram::control))
         .route("/sync/v1/telegram/request", post(telegram::create))
+        .route("/sync/v1/telegram/record", post(telegram::record))
         .route("/sync/v1/telegram/poll", post(telegram::poll))
         .route("/sync/v1/telegram/finish", post(telegram::finish))
         .route("/sync/v1/telegram/agents", post(telegram::agents))

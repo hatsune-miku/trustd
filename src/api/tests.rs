@@ -686,10 +686,30 @@ async fn http_denial_is_neutral_and_self_reported_names_do_not_create_policy() {
     let app = router(state.clone());
     let (status, result) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(result, json!({"status":"denied","btw":"fixture note"}));
+    assert_eq!(
+        result,
+        json!({"status":"denied","btw":"fixture note",
+        "message":"Authorization denied.",
+        "authorization_decision":{"request_id":result["authorization_decision"]["request_id"],"choice":"deny"}})
+    );
+    assert!(
+        uuid::Uuid::parse_str(
+            result["authorization_decision"]["request_id"]
+                .as_str()
+                .unwrap()
+        )
+        .is_ok()
+    );
     let (_, remembered) = http(&app, Operation::EnterInteractive, consent_arguments()).await;
     let rpc = mcp(&app, "enter_interactive", consent_arguments()).await;
-    assert_eq!(remembered, rpc["result"]["structuredContent"]);
+    let mut rpc_result = rpc["result"]["structuredContent"].clone();
+    assert_ne!(
+        remembered["authorization_decision"]["request_id"],
+        rpc_result["authorization_decision"]["request_id"]
+    );
+    rpc_result["authorization_decision"]["request_id"] =
+        remembered["authorization_decision"]["request_id"].clone();
+    assert_eq!(remembered, rpc_result);
     assert!(remembered.get("automatic").is_none());
     assert_eq!(calls.load(Ordering::Relaxed), 3);
     let page = state
@@ -704,6 +724,15 @@ async fn http_denial_is_neutral_and_self_reported_names_do_not_create_policy() {
         .filter(|entry| entry["event"] == "authorization")
         .collect();
     assert_eq!(authorizations.len(), 3);
+    assert!(
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event"] == "authorization.decision"
+                && entry["request_id"] == result["authorization_decision"]["request_id"]
+                && entry["choice"] == "deny")
+    );
     assert!(
         authorizations
             .iter()
@@ -722,7 +751,9 @@ async fn http_interactive_ignore_preserves_the_fixed_deadline_and_note() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         result,
-        json!({"status":"timed_out","timeout_ms":600000,"btw":"fixture note"})
+        json!({"status":"timed_out","timeout_ms":600000,"btw":"fixture note",
+            "message":"Authorization timed out.",
+            "authorization_decision":{"request_id":result["authorization_decision"]["request_id"],"choice":"ignore"}})
     );
     assert!(state.settings.lock().await.saved.agent_policies.is_empty());
     state.shutdown().await;

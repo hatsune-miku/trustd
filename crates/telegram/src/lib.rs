@@ -81,6 +81,10 @@ pub struct Decision {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Completion {
+    Accepted,
+    Denied,
+    Ignored,
+    // Retained for devices running older versions of the protocol.
     Telegram,
     Other,
     Expired,
@@ -90,7 +94,10 @@ pub enum Completion {
 impl Completion {
     pub fn label(self, decision: Option<&Decision>) -> &'static str {
         match self {
-            Self::Other => "已经在其它端操作",
+            Self::Accepted => "已接受",
+            Self::Denied => "已拒绝",
+            Self::Ignored => "已忽略",
+            Self::Other => "审批已完成",
             Self::Expired => "授权请求已超时",
             Self::Cancelled => "授权请求已取消",
             Self::Telegram => match decision.map(|d| d.choice) {
@@ -98,6 +105,16 @@ impl Completion {
                 Some(Choice::Deny) => "已拒绝",
                 _ => "已忽略",
             },
+        }
+    }
+}
+
+impl From<Choice> for Completion {
+    fn from(choice: Choice) -> Self {
+        match choice {
+            Choice::Accept => Self::Accepted,
+            Choice::Deny => Self::Denied,
+            Choice::Ignore => Self::Ignored,
         }
     }
 }

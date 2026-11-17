@@ -327,10 +327,15 @@ impl AppState {
                     .ok_or_else(|| ApiError::unavailable("missing authorized session handle"))?;
                 let attached = self.attach_remote(handle).await?;
                 let btw = result["btw"].clone();
+                let authorization_decision = result["authorization_decision"].clone();
                 result = serde_json::to_value(attached)
                     .map_err(|_| ApiError::internal("session serialization failed"))?;
                 result["status"] = json!("authorized");
                 result["btw"] = btw;
+                result["message"] = json!(crate::mcp_text::authorization_message("authorized"));
+                if !authorization_decision.is_null() {
+                    result["authorization_decision"] = authorization_decision;
+                }
                 result.as_object_mut().unwrap().remove("reused");
             }
             return Ok(result);
@@ -344,6 +349,7 @@ impl AppState {
             }
         }
         let btw;
+        let authorization_decision;
         {
             let prompt = Prompt {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -363,6 +369,7 @@ impl AppState {
                 .into(),
                 expires_at_ms: Utc::now().timestamp_millis() + CONSENT_TIMEOUT_MS,
             };
+            let request_id = prompt.id.clone();
             let decision: Decision = if self.mode == DaemonMode::Privileged {
                 let pairing = self.pairing().await?;
                 match tokio::time::timeout(
@@ -387,15 +394,20 @@ impl AppState {
             } else {
                 self.authorize_agent(prompt, agent).await?
             };
+            authorization_decision = json!({"request_id":request_id,"choice":decision.choice});
             btw = decision.btw;
             if decision.choice == Choice::Ignore {
                 tokio::time::sleep_until(deadline).await;
                 return Ok(
-                    json!({"status":"timed_out", "timeout_ms":CONSENT_TIMEOUT_MS, "btw":btw}),
+                    json!({"status":"timed_out", "timeout_ms":CONSENT_TIMEOUT_MS, "btw":btw,
+                        "authorization_decision":authorization_decision,
+                        "message":crate::mcp_text::authorization_message("timed_out")}),
                 );
             }
             if decision.choice == Choice::Deny {
-                return Ok(json!({"status":"denied", "btw":btw}));
+                return Ok(json!({"status":"denied", "btw":btw,
+                    "authorization_decision":authorization_decision,
+                    "message":crate::mcp_text::authorization_message("denied")}));
             }
         }
         let token = self
@@ -415,7 +427,8 @@ impl AppState {
             .map_err(|_| ApiError::internal("session serialization failed"))?;
         result.as_object_mut().unwrap().remove("reused");
         result["status"] = json!("authorized");
-        result["message"] = json!("Session authorized. Use the handle for subsequent calls.");
+        result["message"] = json!(crate::mcp_text::authorization_message("authorized"));
+        result["authorization_decision"] = authorization_decision;
         result["btw"] = json!(btw);
         Ok(result)
     }

@@ -412,6 +412,7 @@ impl AppState {
                 drop(settings);
                 self.record_authorization_decision(&prompt.id, Some(&agent.path), choice)
                     .await;
+                self.record_telegram_decision(prompt, choice);
                 return Ok(Decision {
                     choice,
                     remember: false,
