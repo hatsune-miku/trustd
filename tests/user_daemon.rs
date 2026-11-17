@@ -109,6 +109,8 @@ async fn verify_user_daemon(headless: bool) {
         .write_all(b"localshelld integration test password\n")
         .unwrap();
     let initialized = init.wait_with_output().unwrap();
+    // Elevated runners (Windows CI) refuse every user-side CLI command.
+    let cli_usable = initialized.status.success();
     if !initialized.status.success() {
         // CLI initialization still refuses elevation. Interactive Windows
         // daemons can now supervise a reduced child; service sessions and Unix
@@ -196,8 +198,13 @@ async fn verify_user_daemon(headless: bool) {
         .arg(&path)
         .output()
         .unwrap();
-    assert!(status.status.success(), "{status:?}");
-    assert!(String::from_utf8_lossy(&status.stdout).contains("Not joined"));
+    if cli_usable {
+        assert!(status.status.success(), "{status:?}");
+        assert!(String::from_utf8_lossy(&status.stdout).contains("Not joined"));
+    } else {
+        assert!(!status.status.success());
+        assert!(String::from_utf8_lossy(&status.stderr).contains("non-elevated"));
+    }
     let approval_base = base.clone();
     let config_path = path.clone();
     let entered =
