@@ -1,7 +1,17 @@
 use super::*;
 use crate::{auth::AuthManager, config::Config};
+use localshelld_sync_protocol::owner::testing::{Authenticator, owner_for};
 
-async fn fixture() -> (tempfile::TempDir, AppState) {
+/// Roster device IDs of the two other devices the fixture's owner approved.
+struct Devices {
+    alice: String,
+    bob: String,
+    passkey: Authenticator,
+    owner: owner::Owner,
+    statements: Vec<owner::SignedStatement>,
+}
+
+async fn fixture() -> (tempfile::TempDir, AppState, Devices) {
     let directory = tempfile::Builder::new()
         .prefix("trustd-remote [jobs] '")
         .tempdir()
@@ -15,22 +25,37 @@ async fn fixture() -> (tempfile::TempDir, AppState) {
         .with_storage(directory.path().canonicalize().unwrap().join("config.toml"))
         .unwrap();
     state.mode = DaemonMode::User;
-    state.remote.initialize().await.unwrap();
-    let mut saved = state.remote.saved.lock().await;
-    for owner in ["alice", "bob"] {
-        saved.as_mut().unwrap().peers.insert(
-            owner.into(),
-            Peer {
-                label: owner.into(),
-                public_key: Identity::generate().unwrap().public_key.clone(),
-                allow_execution: true,
-                sudo: false,
-                secret_keys: vec![],
-            },
-        );
-    }
-    drop(saved);
-    (directory, state)
+    let passkey = Authenticator::new(b"owner");
+    let owner = owner_for(&passkey, "https://backend.example");
+    let approve = |name: &str| {
+        let identity = Identity::generate().unwrap();
+        let statement = owner::Statement::DeviceApprove {
+            device_id: identity.id().unwrap(),
+            public_key: identity.public_key.clone(),
+            name: name.into(),
+            issued_at: 1,
+        };
+        (identity.id().unwrap(), passkey.sign(&owner, &statement))
+    };
+    let (alice, alice_approval) = approve("alice");
+    let (bob, bob_approval) = approve("bob");
+    let statements = vec![alice_approval, bob_approval];
+    state
+        .remote
+        .join(owner.clone(), statements.clone())
+        .await
+        .unwrap();
+    (
+        directory,
+        state,
+        Devices {
+            alice,
+            bob,
+            passkey,
+            owner,
+            statements,
+        },
+    )
 }
 
 fn execution(command: &str) -> Value {
@@ -43,8 +68,11 @@ fn execution(command: &str) -> Value {
 
 #[tokio::test]
 async fn jobs_survive_session_close_and_persist_without_replaying() {
-    let (directory, state) = fixture().await;
-    let session = state.remote_open("alice", &json!({})).await.unwrap();
+    let (directory, state, devices) = fixture().await;
+    let session = state
+        .remote_open(devices.alice.as_str(), &json!({}))
+        .await
+        .unwrap();
     let command = if cfg!(windows) {
         "Start-Sleep -Seconds 1; Write-Output 'durable-result'"
     } else {
@@ -54,17 +82,28 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
     args["session_ref"] = session["session_ref"].clone();
     args["idempotency_key"] = json!("once");
     args["_agent_id"] = json!("agent-a");
-    let job = state.remote_job_start("alice", &args).await.unwrap();
+    let job = state
+        .remote_job_start(devices.alice.as_str(), &args)
+        .await
+        .unwrap();
     assert_eq!(
-        state.remote_job_start("alice", &args).await.unwrap()["id"],
+        state
+            .remote_job_start(devices.alice.as_str(), &args)
+            .await
+            .unwrap()["id"],
         job["id"]
     );
     let mut changed = args.clone();
     changed["command"] = json!("echo twice");
-    assert!(state.remote_job_start("alice", &changed).await.is_err());
+    assert!(
+        state
+            .remote_job_start(devices.alice.as_str(), &changed)
+            .await
+            .is_err()
+    );
     state
         .remote_dispatch(
-            "alice",
+            devices.alice.as_str(),
             json!({"operation":"session_close","arguments":{"session_ref":session["session_ref"]}}),
         )
         .await
@@ -74,14 +113,14 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
         json!({"job_id":job["id"],"session_ref":"new-delegated-session","_agent_id":"agent-a"});
     assert!(
         state
-            .remote_job_action("alice", "job_get", &rebound)
+            .remote_job_action(devices.alice.as_str(), "job_get", &rebound)
             .await
             .is_ok()
     );
     assert!(
         state
             .remote_job_action(
-                "alice",
+                devices.alice.as_str(),
                 "job_get",
                 &json!({"job_id":job["id"],"_agent_id":"agent-b"})
             )
@@ -91,19 +130,22 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
     let mut retry = args.clone();
     retry["session_ref"] = json!("new-delegated-session");
     assert_eq!(
-        state.remote_job_start("alice", &retry).await.unwrap()["id"],
+        state
+            .remote_job_start(devices.alice.as_str(), &retry)
+            .await
+            .unwrap()["id"],
         job["id"]
     );
     assert!(
         state
-            .remote_job_action("bob", "job_get", &query)
+            .remote_job_action(devices.bob.as_str(), "job_get", &query)
             .await
             .is_err()
     );
     assert!(
         state
             .remote_job_action(
-                "alice",
+                devices.alice.as_str(),
                 "job_get",
                 &json!({"job_id":job["id"],"session_ref":"other"})
             )
@@ -113,7 +155,7 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let status = state
-                .remote_job_action("alice", "job_get", &query)
+                .remote_job_action(devices.alice.as_str(), "job_get", &query)
                 .await
                 .unwrap();
             if status["finished_at"].is_number() {
@@ -126,7 +168,7 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
     .await
     .unwrap();
     let output = state
-        .remote_job_action("alice", "job_output", &query)
+        .remote_job_action(devices.alice.as_str(), "job_output", &query)
         .await
         .unwrap();
     assert!(output["text"].as_str().unwrap().contains("durable-result"));
@@ -154,74 +196,93 @@ async fn jobs_survive_session_close_and_persist_without_replaying() {
 }
 
 #[tokio::test]
-async fn grants_restrict_elevation_credentials_and_peer_sessions() {
-    let (_directory, state) = fixture().await;
+async fn only_roster_devices_open_sessions_and_removal_ends_them() {
+    let (_directory, state, devices) = fixture().await;
+    let stranger = Identity::generate().unwrap().id().unwrap();
+    assert!(state.remote_open(&stranger, &json!({})).await.is_err());
     assert!(
         state
-            .remote_open("alice", &json!({"sudo":true}))
+            .remote_dispatch(&stranger, json!({"operation":"host_info"}))
             .await
             .is_err()
     );
+    let session = state.remote_open(&devices.alice, &json!({})).await.unwrap();
+    let reference = session["session_ref"].as_str().unwrap();
+    assert!(state.remote.session(&devices.bob, reference).await.is_err());
+    // A roster update must come from the pinned owner.
+    let impostor = Authenticator::new(b"owner");
+    let wrong_owner = owner_for(&impostor, "https://backend.example");
     assert!(
         state
-            .remote_open("alice", &json!({"secret_keys":["UNGRANTED"]}))
+            .apply_roster(localshelld_sync_protocol::RosterResponse {
+                owner: wrong_owner,
+                statements: vec![],
+            })
             .await
             .is_err()
     );
-    let session = state.remote_open("alice", &json!({})).await.unwrap();
     assert!(
         state
             .remote
-            .session("bob", session["session_ref"].as_str().unwrap())
+            .session(&devices.alice, reference)
             .await
-            .is_err()
+            .is_ok()
     );
-    state.revoke_remote_peer("alice").await;
+    // An owner-signed revocation removes the device and ends its sessions.
+    let mut statements = devices.statements.clone();
+    statements.push(devices.passkey.sign(
+        &devices.owner,
+        &owner::Statement::DeviceRevoke {
+            device_id: devices.alice.clone(),
+            issued_at: 2,
+        },
+    ));
+    state
+        .apply_roster(localshelld_sync_protocol::RosterResponse {
+            owner: devices.owner.clone(),
+            statements,
+        })
+        .await
+        .unwrap();
     assert!(
         state
             .remote
-            .session("alice", session["session_ref"].as_str().unwrap())
+            .session(&devices.alice, reference)
             .await
             .is_err()
     );
+    assert!(state.remote_open(&devices.alice, &json!({})).await.is_err());
+    assert!(state.remote_open(&devices.bob, &json!({})).await.is_ok());
     state.shutdown().await;
 }
 
 #[tokio::test]
 async fn granted_credentials_reach_commands_but_are_never_returned() {
-    let (_directory, state) = fixture().await;
+    let (_directory, state, devices) = fixture().await;
     state
         .put_secret("REMOTE_GRANTED", "remote-fixture-value")
         .await
         .unwrap();
-    state
-        .remote
-        .saved
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .peers
-        .get_mut("alice")
-        .unwrap()
-        .secret_keys = vec!["REMOTE_GRANTED".into()];
-    // The full granted list is returned without a search term.
+    // Devices of one owner see every credential name, never values.
     assert_eq!(
         state
-            .remote_dispatch("alice", json!({"operation":"secrets_list"}))
+            .remote_dispatch(devices.alice.as_str(), json!({"operation":"secrets_list"}))
             .await
             .unwrap(),
         json!({"keys":["REMOTE_GRANTED"]})
     );
     let session = state
-        .remote_open("alice", &json!({"secret_keys":["REMOTE_GRANTED"]}))
+        .remote_open(
+            devices.alice.as_str(),
+            &json!({"secret_keys":["REMOTE_GRANTED"]}),
+        )
         .await
         .unwrap();
     let reference = session["session_ref"].clone();
     // There is no plaintext read operation; the value is only injected.
     let error = state
         .remote_dispatch(
-            "alice",
+            devices.alice.as_str(),
             json!({"operation":"secrets_get","arguments":{"session_ref":reference,"key":"REMOTE_GRANTED"}}),
         )
         .await
@@ -234,12 +295,15 @@ async fn granted_credentials_reach_commands_but_are_never_returned() {
     });
     args["session_ref"] = reference;
     let result = state
-        .remote_dispatch("alice", json!({"operation":"run","arguments":args}))
+        .remote_dispatch(
+            devices.alice.as_str(),
+            json!({"operation":"run","arguments":args}),
+        )
         .await
         .unwrap();
     assert_eq!(result["stdout"], "remote-fixture-value");
     let info = state
-        .remote_dispatch("alice", json!({"operation":"host_info"}))
+        .remote_dispatch(devices.alice.as_str(), json!({"operation":"host_info"}))
         .await
         .unwrap();
     let operations: Vec<_> = info["operations"]

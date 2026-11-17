@@ -7,27 +7,38 @@ use std::{
     },
     time::Duration,
 };
-use trustd_remote::{Handler, Identity, Node, relay};
+use trustd_remote::{Handler, Identity, Node, relay, static_token};
+
+/// Admit exactly the listed device/token pairs; heartbeats keep them admitted.
+fn admit(devices: BTreeMap<String, &'static str>) -> relay::Authorize {
+    let devices = Arc::new(devices);
+    Arc::new(move |device, token| {
+        let devices = devices.clone();
+        Box::pin(async move {
+            Ok(match token {
+                Some(token) => devices.get(&device).is_some_and(|t| *t == token),
+                None => devices.contains_key(&device),
+            })
+        })
+    })
+}
 
 #[tokio::test]
 async fn two_outbound_nodes_authenticate_and_exchange_fragmented_requests() {
-    let directory = tempfile::tempdir().unwrap();
     let alice = Identity::generate().unwrap();
     let bob = Identity::generate().unwrap();
     let alice_id = alice.id().unwrap();
     let bob_id = bob.id().unwrap();
-    let config = relay::Config {
-        devices: BTreeMap::from([
-            (alice_id.clone(), relay::token_hash("alice-test-token")),
-            (bob_id.clone(), relay::token_hash("bob-test-token")),
-        ]),
-    };
-    let path = directory.path().join("relay.json");
-    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let authorize = admit(BTreeMap::from([
+        (alice_id.clone(), "alice-test-token"),
+        (bob_id.clone(), "bob-test-token"),
+    ]));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
-        axum::serve(listener, relay::router(path)).await.unwrap();
+        axum::serve(listener, relay::router::<()>(authorize))
+            .await
+            .unwrap();
     });
     let a = Node::new(
         alice.clone(),
@@ -51,10 +62,13 @@ async fn two_outbound_nodes_authenticate_and_exchange_fragmented_requests() {
     });
     let task_a = tokio::spawn(a.clone().run(
         url.clone(),
-        "alice-test-token".into(),
+        static_token("alice-test-token"),
         handler.clone(),
     ));
-    let task_b = tokio::spawn(b.clone().run(url.clone(), "bob-test-token".into(), handler));
+    let task_b = tokio::spawn(
+        b.clone()
+            .run(url.clone(), static_token("bob-test-token"), handler),
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         while !a.connected() || !b.connected() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -120,15 +134,22 @@ async fn two_outbound_nodes_authenticate_and_exchange_fragmented_requests() {
 }
 
 #[tokio::test]
-async fn relay_rejects_missing_credentials_and_remote_cleartext() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("relay.json");
-    std::fs::write(&path, b"{\"devices\":{}}").unwrap();
-    let registry = path.clone();
+async fn relay_rejects_unadmitted_devices_and_remote_cleartext() {
+    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail = failing.clone();
+    let authorize: relay::Authorize = Arc::new(move |_, _| {
+        let fail = fail.load(Ordering::SeqCst);
+        Box::pin(async move {
+            anyhow::ensure!(!fail, "admission store unavailable");
+            Ok(false)
+        })
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        axum::serve(listener, relay::router(path)).await.unwrap();
+        axum::serve(listener, relay::router::<()>(authorize))
+            .await
+            .unwrap();
     });
     let request = reqwest::Client::new()
         .get(format!("http://{address}/v2/relay/{}", "a".repeat(64)))
@@ -138,15 +159,16 @@ async fn relay_rejects_missing_credentials_and_remote_cleartext() {
         .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
     let response = request.try_clone().unwrap().send().await.unwrap();
     assert_eq!(response.status(), 401);
-    std::fs::remove_file(registry).unwrap();
+    failing.store(true, Ordering::SeqCst);
     let response = request.send().await.unwrap();
     assert_eq!(response.status(), 503);
     let node = Node::new(Identity::generate().unwrap(), BTreeMap::new());
     let handler: Handler = Arc::new(|_, _| Box::pin(async { Ok(Value::Null) }));
-    let task = tokio::spawn(
-        node.clone()
-            .run("http://192.0.2.1".into(), "test".into(), handler),
-    );
+    let task = tokio::spawn(node.clone().run(
+        "http://192.0.2.1".into(),
+        static_token("test"),
+        handler,
+    ));
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!node.connected());
     task.abort();

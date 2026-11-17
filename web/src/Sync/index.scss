@@ -51,6 +51,12 @@
   .sync-device-name {
     overflow-wrap: anywhere;
   }
+  .sync-device-id {
+    max-width: 100%;
+    color: var(--muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
   .sync-device-hint {
     margin: 0 0 8px;
     color: var(--muted);

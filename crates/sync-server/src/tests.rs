@@ -1,6 +1,7 @@
 use super::*;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
+use localshelld_sync_protocol::owner::testing::{Authenticator, owner_for};
 use tower::ServiceExt;
 
 async fn call(
@@ -40,9 +41,9 @@ async fn setup() -> (tempfile::TempDir, App, Router, Tokens, Tokens) {
     let (browser, device) = {
         let mut store = app.store.lock().await;
         (
-            app.new_session(&mut store, "Test browser".into(), true)
+            app.new_session(&mut store, "Test browser".into(), true, None)
                 .unwrap(),
-            app.new_session(&mut store, "Test device".into(), false)
+            app.new_session(&mut store, "Test device".into(), false, None)
                 .unwrap(),
         )
     };
@@ -225,10 +226,11 @@ async fn vault_requires_authentication_and_origin_is_enforced() {
             "/sync/v1/telegram/agents",
             Some(json!({"device":"fixture", "agents":[], "acknowledgements":[]})),
         ),
+        ("GET", "/sync/v1/roster", None),
         (
             "POST",
-            "/sync/v1/device/approve",
-            Some(json!({"user_code":"wrong"})),
+            "/sync/v1/statements/prepare",
+            Some(json!({"kind":"device_revoke","device_id":"0".repeat(64)})),
         ),
     ] {
         assert_eq!(
@@ -460,20 +462,111 @@ async fn forged_refresh_does_not_revoke_a_known_session_and_jwt_audience_is_chec
     }
 }
 
-#[tokio::test]
-async fn device_approval_requires_a_browser_and_poll_is_single_use() {
-    let (_directory, state, app, browser, device) = setup().await;
+/// Make `passkey` the service's genesis owner key, as initialization does.
+async fn initialize_owner(app: &App) -> (Authenticator, Owner) {
+    let passkey = Authenticator::new(b"owner-passkey");
+    let owner = owner_for(&passkey, "https://sync.example.com");
+    let mut store = app.store.lock().await;
+    let mut next = store.saved.clone();
+    next.genesis = owner.keys.clone();
+    store.commit(next).unwrap();
+    (passkey, owner)
+}
+
+fn device_statement(identity: &trustd_remote::Identity, name: &str) -> String {
+    Statement::DeviceApprove {
+        device_id: identity.id().unwrap(),
+        public_key: identity.public_key.clone(),
+        name: name.into(),
+        issued_at: Utc::now().timestamp(),
+    }
+    .to_text()
+}
+
+/// Run the join flow up to the owner's signature; returns the poll result.
+async fn join(
+    app: &Router,
+    state: &App,
+    passkey: &Authenticator,
+    owner: &Owner,
+    statement: &str,
+) -> Joined {
     let (status, started) = call(
-        &app,
+        app,
         "POST",
         "/sync/v1/device/start",
-        Some(json!({"name":"Laptop"})),
+        Some(json!({"statement":statement})),
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let user_code = json!({"user_code":started["user_code"]});
+    assert_eq!(status, StatusCode::OK, "{started}");
     let code = json!({"device_code":started["device_code"]});
+    let user_code = started["user_code"].clone();
+    let signed = passkey.assert(owner, &owner::challenge(statement), 0x05);
+    let (status, approved) = call(
+        app,
+        "POST",
+        "/sync/v1/device/approve",
+        Some(json!({"user_code":user_code,"assertion":signed})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    for pending in state.pending.lock().await.devices.values_mut() {
+        pending.last_poll = 0;
+    }
+    let (status, joined) = call(app, "POST", "/sync/v1/device/poll", Some(code), None).await;
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    serde_json::from_value(joined).unwrap()
+}
+
+#[tokio::test]
+async fn join_needs_the_owner_signature_over_the_devices_own_statement() {
+    let (_directory, state, app, browser, _) = setup().await;
+    let identity = trustd_remote::Identity::generate().unwrap();
+    let statement = device_statement(&identity, "Laptop");
+    // An uninitialized service cannot admit devices.
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/device/start",
+            Some(json!({"statement":statement})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (passkey, owner) = initialize_owner(&state).await;
+    for bad_statement in [
+        json!({"statement":"{}"}),
+        json!({"statement":Statement::DeviceRevoke{device_id:identity.id().unwrap(),issued_at:Utc::now().timestamp()}.to_text()}),
+        json!({"statement":Statement::DeviceApprove{device_id:identity.id().unwrap(),public_key:identity.public_key.clone(),name:"Old".into(),issued_at:0}.to_text()}),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/sync/v1/device/start",
+                Some(bad_statement),
+                None
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let (_, started) = call(
+        &app,
+        "POST",
+        "/sync/v1/device/start",
+        Some(json!({"statement":statement})),
+        None,
+    )
+    .await;
+    let code = json!({"device_code":started["device_code"]});
+    let user_code = json!({"user_code":started["user_code"]});
     assert_eq!(
         call(
             &app,
@@ -486,34 +579,46 @@ async fn device_approval_requires_a_browser_and_poll_is_single_use() {
         .0,
         StatusCode::ACCEPTED
     );
+    // The approval page needs no login: it shows the exact text to sign.
+    let (status, inspected) = call(
+        &app,
+        "POST",
+        "/sync/v1/device/inspect",
+        Some(user_code.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inspected["statement"], statement.as_str());
+    assert_eq!(inspected["challenge"], b64(&owner::challenge(&statement)));
+    assert_eq!(inspected["name"], "Laptop");
+    // A stranger's key, or the owner's signature over other text, is refused.
+    let other = device_statement(&trustd_remote::Identity::generate().unwrap(), "Other");
+    for assertion in [
+        Authenticator::new(b"owner-passkey").assert(&owner, &owner::challenge(&statement), 0x05),
+        passkey.assert(&owner, &owner::challenge(&other), 0x05),
+    ] {
+        let mut body = user_code.clone();
+        body["assertion"] = json!(assertion);
+        assert_eq!(
+            call(&app, "POST", "/sync/v1/device/approve", Some(body), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let mut body = user_code;
+    body["assertion"] = json!(passkey.assert(&owner, &owner::challenge(&statement), 0x05));
     assert_eq!(
-        call(
-            &app,
-            "POST",
-            "/sync/v1/device/approve",
-            Some(user_code.clone()),
-            Some(&device.access_token)
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            "/sync/v1/device/approve",
-            Some(user_code),
-            Some(&browser.access_token)
-        )
-        .await
-        .0,
+        call(&app, "POST", "/sync/v1/device/approve", Some(body), None)
+            .await
+            .0,
         StatusCode::OK
     );
     for pending in state.pending.lock().await.devices.values_mut() {
         pending.last_poll = 0;
     }
-    let (status, tokens) = call(
+    let (status, joined) = call(
         &app,
         "POST",
         "/sync/v1/device/poll",
@@ -521,26 +626,164 @@ async fn device_approval_requires_a_browser_and_poll_is_single_use() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(tokens["access_token"].is_string());
+    assert_eq!(status, StatusCode::OK, "{joined}");
+    let joined: Joined = serde_json::from_value(joined).unwrap();
+    // The device verifies its own approval with the pinned owner keys.
+    assert_eq!(joined.owner, owner);
+    assert_eq!(joined.approval.statement, statement);
+    joined.approval.verify(&owner, &owner.keys).unwrap();
+    assert!(
+        owner::roster(&owner, &joined.statements)
+            .devices
+            .contains_key(&identity.id().unwrap())
+    );
     assert_eq!(
         call(&app, "POST", "/sync/v1/device/poll", Some(code), None)
             .await
             .0,
         StatusCode::BAD_REQUEST
     );
+    let token = joined.tokens.access_token.clone();
+    assert_eq!(
+        call(&app, "GET", "/sync/v1/vault", None, Some(&token))
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // Revocation is an owner-signed statement prepared for the logged-in owner.
+    let (status, prepared) = call(
+        &app,
+        "POST",
+        "/sync/v1/statements/prepare",
+        Some(json!({"kind":"device_revoke","device_id":identity.id().unwrap()})),
+        Some(&browser.access_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let revoke = prepared["statement"].as_str().unwrap().to_owned();
+    let forged = SignedStatement {
+        assertion: Authenticator::new(b"owner-passkey").assert(
+            &owner,
+            &owner::challenge(&revoke),
+            0x05,
+        ),
+        statement: revoke.clone(),
+    };
     assert_eq!(
         call(
             &app,
-            "GET",
-            "/sync/v1/vault",
-            None,
-            tokens["access_token"].as_str()
+            "POST",
+            "/sync/v1/statements",
+            Some(json!(forged)),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let signed = SignedStatement {
+        assertion: passkey.assert(&owner, &owner::challenge(&revoke), 0x05),
+        statement: revoke,
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/statements",
+            Some(json!(signed)),
+            None
         )
         .await
         .0,
         StatusCode::OK
     );
+    // The revoked device loses its session and can never rejoin with that key.
+    assert_eq!(
+        call(&app, "GET", "/sync/v1/vault", None, Some(&token))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, listed) = call(
+        &app,
+        "GET",
+        "/sync/v1/roster",
+        None,
+        Some(&browser.access_token),
+    )
+    .await;
+    assert!(listed["devices"].as_object().unwrap().is_empty());
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/device/start",
+            Some(json!({"statement":device_statement(&identity, "Laptop")})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    // Device approvals are only recorded through the join flow.
+    let direct = passkey.sign(&owner, &Statement::parse(&other).unwrap());
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/statements",
+            Some(json!(direct)),
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn relay_admits_only_roster_devices_with_their_own_session() {
+    let (_directory, state, app, _, _) = setup().await;
+    let (passkey, owner) = initialize_owner(&state).await;
+    let member = trustd_remote::Identity::generate().unwrap();
+    let outsider = trustd_remote::Identity::generate().unwrap();
+    let joined = join(
+        &app,
+        &state,
+        &passkey,
+        &owner,
+        &device_statement(&member, "Member"),
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let handler: trustd_remote::Handler = Arc::new(|_, _| Box::pin(async { Ok(Value::Null) }));
+    let run = |identity: &trustd_remote::Identity, token: &str| {
+        let node = trustd_remote::Node::new(identity.clone(), Default::default());
+        let task = tokio::spawn(node.clone().run(
+            url.clone(),
+            trustd_remote::static_token(token),
+            handler.clone(),
+        ));
+        (node, task)
+    };
+    let (admitted, admitted_task) = run(&member, &joined.tokens.access_token);
+    // The member's token does not admit another identity.
+    let (outsider_node, outsider_task) = run(&outsider, &joined.tokens.access_token);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !admitted.connected() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!outsider_node.connected());
+    admitted_task.abort();
+    outsider_task.abort();
+    server.abort();
 }
 
 #[tokio::test]

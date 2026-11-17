@@ -233,7 +233,7 @@ test('desktop overview renders cleanly', async ({ page }) => {
 test('credential file export is plaintext and import replaces the vault after confirmation', async ({ page }) => {
   await login(page)
   await page.getByRole('button', { name: '凭据', exact: true }).click()
-  await expect(page.getByText('本机离线', { exact: true })).toBeVisible()
+  await expect(page.getByText('未加入', { exact: true })).toBeVisible()
   const file = {
     format: 'localshelld-credentials',
     version: 1,

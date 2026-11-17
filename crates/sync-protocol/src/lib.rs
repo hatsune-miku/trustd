@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroize;
 
+pub mod owner;
+
 pub const FORMAT: &str = "localshelld-credentials";
 pub const VERSION: u32 = 1;
 pub const MAX_KEYS: usize = 64;
@@ -254,6 +256,31 @@ pub struct DeviceStart {
     pub verification_uri: String,
     pub expires_in: u64,
     pub interval: u64,
+}
+
+/// Join request: the device's own approval statement, which the owner signs
+/// on the backend's approval page.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoin {
+    pub statement: String,
+}
+
+/// Result of an approved join. The device verifies `approval` against
+/// `owner` before trusting anything else in this response.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Joined {
+    pub tokens: Tokens,
+    pub owner: owner::Owner,
+    pub approval: owner::SignedStatement,
+    pub statements: Vec<owner::SignedStatement>,
+}
+
+/// The owner's signed statements, from which each device derives its roster.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RosterResponse {
+    pub owner: owner::Owner,
+    pub statements: Vec<owner::SignedStatement>,
 }
 
 #[cfg(test)]

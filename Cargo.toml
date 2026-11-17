@@ -114,6 +114,8 @@ localshelld-native-dialog = { path = "crates/native-dialog", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
+localshelld-sync-protocol = { path = "crates/sync-protocol", features = ["testing"] }
+localshelld-sync-server = { path = "crates/sync-server", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]

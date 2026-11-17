@@ -5,7 +5,9 @@ use std::{collections::BTreeMap, time::Duration};
 
 use chrono::Utc;
 use localshelld_sync_protocol::{
-    CredentialFile, DeviceStart, MAX_BODY_BYTES, Replace, Snapshot, Tokens, validate_credentials,
+    CredentialFile, DeviceStart, Joined, MAX_BODY_BYTES, Replace, RosterResponse, Snapshot, Tokens,
+    owner::{self, Statement},
+    validate_credentials,
 };
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -29,9 +31,44 @@ struct PendingConnection {
     url: String,
     device: DeviceStart,
     expires_at: i64,
+    /// This device's approval statement, exactly as the owner must sign it.
+    statement: String,
     // If the cloud exchange succeeds but the first fetch/write fails, keep
     // the one-use result in memory so that retry does not consume it twice.
-    tokens: Option<Tokens>,
+    joined: Option<Joined>,
+}
+
+/// Check an approved join without trusting the backend: the owner is for the
+/// origin this device chose, and the owner's passkey signed this device's own
+/// statement. The owner pinned here then verifies every later roster update.
+fn verify_join(url: &str, statement: &str, joined: &Joined) -> Result<(), ApiError> {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    if joined.owner.origin != url || host.as_deref() != Some(joined.owner.rp_id.as_str()) {
+        return Err(ApiError::unavailable(
+            "the backend answered for a different origin",
+        ));
+    }
+    if joined.approval.statement != statement {
+        return Err(ApiError::unavailable(
+            "the backend returned an approval for another device",
+        ));
+    }
+    let Ok(Statement::DeviceApprove { device_id, .. }) = Statement::parse(statement) else {
+        return Err(ApiError::internal("invalid local join statement"));
+    };
+    let roster = owner::roster(&joined.owner, &joined.statements);
+    joined
+        .approval
+        .verify(&joined.owner, &roster.keys)
+        .map_err(|_| ApiError::unavailable("the owner's signature did not verify"))?;
+    if !roster.devices.contains_key(&device_id) {
+        return Err(ApiError::unavailable(
+            "this device is missing from the owner's roster",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -414,12 +451,30 @@ impl AppState {
                 if info["protocol"] != 1 {
                     return Err(ApiError::bad_request("unsupported sync protocol"));
                 }
+                // Join with this device's own Noise identity; the owner signs
+                // exactly this statement on the backend's approval page.
+                let identity = self
+                    .remote
+                    .identity()
+                    .await
+                    .map_err(|_| ApiError::internal("device identity is unavailable"))?;
+                let statement = Statement::DeviceApprove {
+                    device_id: identity
+                        .id()
+                        .map_err(|_| ApiError::internal("invalid device identity"))?,
+                    public_key: identity.public_key.clone(),
+                    name: name.trim().into(),
+                    issued_at: Utc::now().timestamp(),
+                }
+                .to_text();
+                Statement::parse(&statement)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
                 let device: DeviceStart = request(
                     Method::POST,
                     &url,
                     "device/start",
                     None,
-                    Some(&json!({"name":name})),
+                    Some(&json!({"statement":statement})),
                     None,
                 )
                 .await?;
@@ -439,7 +494,8 @@ impl AppState {
                     url,
                     expires_at: Utc::now().timestamp() + device.expires_in as i64,
                     device,
-                    tokens: None,
+                    statement,
+                    joined: None,
                 });
                 Ok(response)
             }
@@ -452,7 +508,7 @@ impl AppState {
                     runtime.pending = None;
                     return Err(ApiError::bad_request("device authorization expired"));
                 }
-                if pending.tokens.is_none() {
+                if pending.joined.is_none() {
                     let value: Value = request(
                         Method::POST,
                         &pending.url,
@@ -465,12 +521,13 @@ impl AppState {
                     if value["pending"] == true {
                         return Ok(json!({"pending":true}));
                     }
-                    pending.tokens =
-                        Some(serde_json::from_value(value).map_err(|_| {
-                            ApiError::unavailable("invalid device session response")
-                        })?);
+                    let joined: Joined = serde_json::from_value(value)
+                        .map_err(|_| ApiError::unavailable("invalid device session response"))?;
+                    verify_join(&pending.url, &pending.statement, &joined)?;
+                    pending.joined = Some(joined);
                 }
-                let tokens = pending.tokens.as_ref().expect("assigned above");
+                let joined = pending.joined.clone().expect("assigned above");
+                let tokens = &joined.tokens;
                 let snapshot: Snapshot = request(
                     Method::GET,
                     &pending.url,
@@ -499,9 +556,18 @@ impl AppState {
                     revision: snapshot.revision,
                 });
                 settings.save(next).await?;
+                drop(settings);
+                self.remote
+                    .join(joined.owner.clone(), joined.statements.clone())
+                    .await
+                    .map_err(|_| ApiError::internal("could not save the owner's roster"))?;
                 runtime.pending = None;
                 runtime.last_error = None;
                 runtime.last_sync = Some(Utc::now().timestamp());
+                drop(runtime);
+                self.start_remote_worker()
+                    .await
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
                 Ok(json!({"connected":true}))
             }
             Action::Disconnect => {
@@ -529,6 +595,12 @@ impl AppState {
                     next.telegram = crate::telegram::encrypt_config(&settings, Some(&config))?;
                 }
                 settings.save(next).await?;
+                drop(settings);
+                self.stop_remote_worker().await;
+                self.remote
+                    .leave()
+                    .await
+                    .map_err(|_| ApiError::internal("could not leave the owner's devices"))?;
                 runtime.pending = None;
                 runtime.last_error = None;
                 runtime.last_sync = None;
@@ -537,9 +609,39 @@ impl AppState {
             Action::Refresh => {
                 let result = self.read_vault_locked().await;
                 report(&mut runtime, &result);
-                result.map(|snapshot| json!({"revision":snapshot.revision}))
+                let snapshot = result?;
+                if let Some((saved, tokens)) = self.tokens_locked().await? {
+                    self.refresh_roster(&saved.url, &tokens.access_token)
+                        .await
+                        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+                }
+                Ok(json!({"revision":snapshot.revision}))
             }
         }
+    }
+
+    /// Fetch the owner's statements and adopt them after local verification.
+    async fn refresh_roster(&self, url: &str, access_token: &str) -> anyhow::Result<()> {
+        // Only a device that verified its own join has an owner to check against.
+        if !self.remote.joined().await {
+            return Ok(());
+        }
+        let response: RosterResponse =
+            request(Method::GET, url, "roster", Some(access_token), None, None)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.apply_roster(response).await
+    }
+
+    /// A current access token of this device's backend session, renewed when
+    /// needed; the relay connection uses it to prove roster membership.
+    pub(crate) async fn sync_access_token(&self) -> Result<String, ApiError> {
+        let _serial = self.sync.lock().await;
+        let (_, tokens) = self
+            .tokens_locked()
+            .await?
+            .ok_or_else(|| ApiError::unavailable("this device has not joined a backend"))?;
+        Ok(tokens.access_token.clone())
     }
 
     pub async fn start_sync_worker(&self) {
@@ -596,6 +698,12 @@ impl AppState {
                         let result = state.read_vault_locked().await;
                         report(&mut runtime, &result);
                         let _ = event;
+                        // Statements also wake this poll; adopt verified roster changes.
+                        if let Err(error) =
+                            state.refresh_roster(&saved.url, &tokens.access_token).await
+                        {
+                            runtime.last_error = Some(error.to_string());
+                        }
                     }
                     Err(error) => {
                         runtime.last_error = Some(error.to_string());

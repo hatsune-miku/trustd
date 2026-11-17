@@ -1,4 +1,5 @@
 //! Bounded, authenticated routing only; no execution or offline command queue.
+//! The embedding service decides which devices are admitted.
 use crate::{Frame, MAX_FRAME};
 use anyhow::{Context, Result};
 use axum::{
@@ -12,20 +13,17 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc};
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct Config {
-    /// Device ID -> SHA-256 of an independently generated relay access token.
-    pub devices: BTreeMap<String, String>,
-}
-
-pub fn token_hash(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
-}
+/// Admission check for `device`. With `Some(token)` it decides whether the
+/// bearer token may open a connection; with `None` (every heartbeat) whether
+/// an already connected device is still admitted.
+pub type Authorize = Arc<
+    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>>
+        + Send
+        + Sync,
+>;
 
 struct Connection {
     generation: String,
@@ -34,33 +32,17 @@ struct Connection {
 
 #[derive(Clone)]
 struct Hub {
-    config: PathBuf,
+    authorize: Authorize,
     connections: Arc<Mutex<BTreeMap<String, Connection>>>,
 }
 
-pub fn router(config: PathBuf) -> Router {
+pub fn router<S: Clone + Send + Sync + 'static>(authorize: Authorize) -> Router<S> {
     Router::new()
-        .route(
-            "/health",
-            get(|| async {
-                axum::Json(serde_json::json!({"service":"trustd-relay","protocol":2}))
-            }),
-        )
         .route("/v2/relay/{device}", get(connect))
         .with_state(Hub {
-            config,
+            authorize,
             connections: Default::default(),
         })
-}
-
-fn authorized(path: &std::path::Path, device: &str, token: &str) -> Result<bool> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("could not read relay registry {}", path.display()))?;
-    let config: Config = serde_json::from_slice(&bytes).context("invalid relay registry")?;
-    Ok(config
-        .devices
-        .get(device)
-        .is_some_and(|expected| *expected == token_hash(token)))
 }
 
 fn announce_offline(peers: &BTreeMap<String, Connection>, device: &str) {
@@ -90,21 +72,21 @@ async fn connect(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default()
         .to_owned();
-    match authorized(&hub.config, &device, &token) {
+    match (hub.authorize)(device.clone(), Some(token)).await {
         Ok(true) => {}
         Ok(false) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(error) => {
-            tracing::warn!(error = %format!("{error:#}"), "relay registry unavailable");
+            tracing::warn!(error = %format!("{error:#}"), "relay admission unavailable");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     }
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| connection(hub, device, token, socket))
+        .on_upgrade(move |socket| connection(hub, device, socket))
         .into_response()
 }
 
-async fn connection(hub: Hub, device: String, token: String, socket: WebSocket) {
+async fn connection(hub: Hub, device: String, socket: WebSocket) {
     let generation = uuid::Uuid::new_v4().to_string();
     let (tx, mut rx) = mpsc::channel(64);
     {
@@ -161,7 +143,7 @@ async fn connection(hub: Hub, device: String, token: String, socket: WebSocket) 
                     }
                 }
                 _ = heartbeat.tick() => {
-                    if last_seen.elapsed() > Duration::from_secs(70) || !authorized(&hub.config, &device, &token)? { break; }
+                    if last_seen.elapsed() > Duration::from_secs(70) || !(hub.authorize)(device.clone(), None).await? { break; }
                     sink.send(Message::Ping(Vec::new().into())).await?;
                 }
             }

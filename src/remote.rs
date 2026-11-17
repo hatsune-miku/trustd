@@ -11,6 +11,7 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
+use localshelld_sync_protocol::owner::{self, Owner, Roster, SignedStatement};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -22,36 +23,63 @@ use tokio::sync::{Mutex, RwLock};
 use trustd_remote::{Identity, Node};
 
 pub mod agent_stdio;
-mod setup;
-pub use setup::{SetupCommand, configure_local};
 mod codex;
 mod files;
 mod jobs;
 #[cfg(test)]
+mod join_tests;
+#[cfg(test)]
 mod tests;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Another device of the same owner, from the verified roster. Devices of one
+/// owner trust each other by default: execution, elevation and credentials.
+#[derive(Clone, Serialize)]
 pub struct Peer {
     pub label: String,
     pub public_key: String,
-    #[serde(default)]
-    pub allow_execution: bool,
-    #[serde(default)]
-    pub sudo: bool,
-    #[serde(default)]
-    pub secret_keys: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Saved {
     identity: Identity,
+    /// The owner pinned when this device joined; every later roster update is
+    /// verified against it, never taken from the backend's word.
     #[serde(default)]
-    relay_url: String,
+    owner: Option<Owner>,
+    /// Owner-signed statements; the roster is derived from them locally.
     #[serde(default)]
-    relay_token: String,
-    #[serde(default)]
-    peers: BTreeMap<String, Peer>,
+    statements: Vec<SignedStatement>,
+}
+
+impl Saved {
+    fn roster(&self) -> Option<Roster> {
+        self.owner
+            .as_ref()
+            .map(|owner| owner::roster(owner, &self.statements))
+    }
+
+    /// Roster devices other than this one, keyed by device ID.
+    fn peers(&self) -> BTreeMap<String, Peer> {
+        let own = self.identity.id().unwrap_or_default();
+        self.roster()
+            .map(|roster| {
+                roster
+                    .devices
+                    .into_iter()
+                    .filter(|(id, _)| *id != own)
+                    .map(|(id, device)| {
+                        (
+                            id,
+                            Peer {
+                                label: device.name,
+                                public_key: device.public_key,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone)]
@@ -122,9 +150,8 @@ impl Runtime {
         if saved.is_none() {
             let new = Saved {
                 identity: Identity::generate()?,
-                relay_url: String::new(),
-                relay_token: String::new(),
-                peers: BTreeMap::new(),
+                owner: None,
+                statements: vec![],
             };
             storage::save_json(
                 self.path
@@ -142,9 +169,9 @@ impl Runtime {
         let saved = self.saved.lock().await;
         let saved = saved.as_ref().unwrap();
         Ok(
-            json!({"protocol":2,"device_id":saved.identity.id()?,"public_key":saved.identity.public_key,
-            "relay_url":saved.relay_url,"token_configured":!saved.relay_token.is_empty(),
-            "connected":self.node.read().await.as_ref().is_some_and(|n| n.connected()),"peers":saved.peers}),
+            json!({"protocol":3,"device_id":saved.identity.id()?,"public_key":saved.identity.public_key,
+            "joined":saved.owner.is_some(),"backend":saved.owner.as_ref().map(|o| &o.origin),
+            "connected":self.node.read().await.as_ref().is_some_and(|n| n.connected()),"peers":saved.peers()}),
         )
     }
 
@@ -153,9 +180,56 @@ impl Runtime {
             .lock()
             .await
             .as_ref()
-            .and_then(|s| s.peers.get(id))
-            .cloned()
-            .context("device is not paired")
+            .and_then(|s| s.peers().remove(id))
+            .context("device is not in the owner's roster")
+    }
+
+    /// Whether this device joined a backend and pinned its owner.
+    pub(crate) async fn joined(&self) -> bool {
+        self.saved
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|saved| saved.owner.is_some())
+    }
+
+    /// This device's Noise identity, created on first use.
+    pub(crate) async fn identity(&self) -> Result<Identity> {
+        self.initialize().await?;
+        Ok(self.saved.lock().await.as_ref().unwrap().identity.clone())
+    }
+
+    /// Pin the owner and adopt the statements of a verified join.
+    pub(crate) async fn join(&self, owner: Owner, statements: Vec<SignedStatement>) -> Result<()> {
+        self.initialize().await?;
+        let mut guard = self.saved.lock().await;
+        let mut next = guard.as_ref().unwrap().clone();
+        next.owner = Some(owner);
+        next.statements = statements;
+        self.persist(&next)?;
+        *guard = Some(next);
+        Ok(())
+    }
+
+    /// Leave the owner's devices; the identity is kept for a later join.
+    pub(crate) async fn leave(&self) -> Result<()> {
+        let mut guard = self.saved.lock().await;
+        if let Some(mut next) = guard.clone() {
+            next.owner = None;
+            next.statements.clear();
+            self.persist(&next)?;
+            *guard = Some(next);
+        }
+        Ok(())
+    }
+
+    fn persist(&self, saved: &Saved) -> Result<()> {
+        storage::save_json(
+            self.path
+                .as_ref()
+                .context("remote storage is unavailable")?,
+            saved,
+        )
     }
 
     async fn session(&self, owner: &str, id: &str) -> Result<Session> {
@@ -185,13 +259,22 @@ impl AppState {
         let Some(saved) = self.remote.saved.lock().await.clone() else {
             return Ok(());
         };
-        if saved.relay_url.is_empty() || saved.relay_token.is_empty() {
+        // The relay is part of the joined backend; its sync session admits us.
+        let backend = self
+            .settings
+            .lock()
+            .await
+            .saved
+            .sync
+            .as_ref()
+            .map(|s| s.url.clone());
+        let Some(url) = backend.filter(|_| saved.owner.is_some()) else {
             return Ok(());
-        }
+        };
         let peers = saved
-            .peers
-            .iter()
-            .map(|(id, p)| (id.clone(), p.public_key.clone()))
+            .peers()
+            .into_iter()
+            .map(|(id, p)| (id, p.public_key))
             .collect();
         let node = Node::new(saved.identity, peers);
         *self.remote.node.write().await = Some(node.clone());
@@ -200,8 +283,67 @@ impl AppState {
             let state = state.clone();
             Box::pin(async move { state.remote_dispatch(&peer, request).await })
         });
-        let worker = tokio::spawn(node.run(saved.relay_url, saved.relay_token, handler));
+        let state = self.clone();
+        let token: trustd_remote::TokenSource = Arc::new(move || {
+            let state = state.clone();
+            Box::pin(async move {
+                state
+                    .sync_access_token()
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            })
+        });
+        let worker = tokio::spawn(node.run(url, token, handler));
         *self.remote.worker.lock().await = Some(worker.abort_handle());
+        Ok(())
+    }
+
+    /// Adopt a roster update after verifying it against the pinned owner.
+    /// Devices that left the roster lose their sessions, jobs and agents.
+    pub(crate) async fn apply_roster(
+        &self,
+        response: localshelld_sync_protocol::RosterResponse,
+    ) -> Result<()> {
+        let mut guard = self.remote.saved.lock().await;
+        let Some(current) = guard.clone() else {
+            return Ok(());
+        };
+        let Some(pinned) = current.owner.as_ref() else {
+            return Ok(());
+        };
+        ensure!(
+            response.owner == *pinned,
+            "the backend presented a different owner; roster update ignored"
+        );
+        let unchanged = response.statements.len() == current.statements.len()
+            && response
+                .statements
+                .iter()
+                .zip(&current.statements)
+                .all(|(a, b)| a.statement == b.statement);
+        if unchanged {
+            return Ok(());
+        }
+        let before = current.peers();
+        let mut next = current;
+        next.statements = response.statements;
+        self.remote.persist(&next)?;
+        let after = next.peers();
+        *guard = Some(next);
+        drop(guard);
+        if let Some(node) = self.remote.node.read().await.as_ref() {
+            node.set_peers(
+                after
+                    .iter()
+                    .map(|(id, p)| (id.clone(), p.public_key.clone()))
+                    .collect(),
+            )
+            .await;
+        }
+        for id in before.keys().filter(|id| !after.contains_key(*id)) {
+            self.revoke_remote_peer(id).await;
+            self.audit("remote.peer.removed", json!({"peer":id})).await;
+        }
         Ok(())
     }
 
@@ -250,21 +392,10 @@ impl AppState {
     }
 
     async fn remote_open(&self, owner: &str, args: &Value) -> Result<Value> {
-        let peer = self.remote.peer(owner).await?;
-        ensure!(
-            peer.allow_execution,
-            "this device has not been granted execution access"
-        );
+        // Devices of the same owner trust each other by default.
+        self.remote.peer(owner).await?;
         let keys = crate::api::secret_keys_arg(args)?;
         let options = crate::api::enter_options_arg(args)?;
-        ensure!(
-            !options.sudo || peer.sudo,
-            "elevation is not granted to this device"
-        );
-        ensure!(
-            keys.iter().all(|key| peer.secret_keys.contains(key)),
-            "requested credentials are outside this device's grant"
-        );
         let entered = self
             .enter_remote_granted(owner, &keys, options.clone())
             .await?;
@@ -286,11 +417,7 @@ impl AppState {
     }
 
     async fn remote_dispatch(&self, owner: &str, request: Value) -> Result<Value> {
-        let peer = self.remote.peer(owner).await?;
-        ensure!(
-            peer.allow_execution,
-            "remote execution is not granted to this device"
-        );
+        self.remote.peer(owner).await?;
         let operation = string(&request, "operation")?;
         let args = request
             .get("arguments")
@@ -323,7 +450,7 @@ impl AppState {
                 "shell":crate::shell::ShellKind::native(),"identities":self.execution_identities().await,
                 "operations":agent_stdio::operation_schemas()}),
             ),
-            "secrets_list" => Ok(json!({"keys":peer.secret_keys})),
+            "secrets_list" => Ok(json!({"keys":self.secret_keys().await?})),
             "session_open" => self.remote_open(owner, &args).await,
             "session_close" => {
                 let id = string(&args, "session_ref")?;
@@ -423,8 +550,7 @@ impl AppState {
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v2/admin/remote", get(status).post(configure))
-        .route("/v2/admin/remote/peer", post(pair))
+        .route("/v2/admin/remote", get(status))
         .route("/v2/admin/remote/invoke", post(admin_invoke))
         .route("/v2/agent/invoke", post(agent_invoke))
 }
@@ -457,110 +583,6 @@ async fn status(
 ) -> Result<Json<Value>, ApiError> {
     crate::management::authorize(&state, &headers, None).await?;
     state.remote.status().await.map(Json).map_err(api)
-}
-
-async fn configure(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    crate::management::authorize(&state, &headers, None).await?;
-    let result: Result<Value> = async {
-        ensure!(
-            state.mode == DaemonMode::User,
-            "configure remote access on the user daemon"
-        );
-        state.remote.initialize().await?;
-        let mut guard = state.remote.saved.lock().await;
-        let mut next = guard.as_ref().unwrap().clone();
-        next.relay_url = string(&args, "relay_url")?.trim_end_matches('/').into();
-        let url = reqwest::Url::parse(&next.relay_url)?;
-        ensure!(
-            matches!(url.scheme(), "https" | "wss")
-                || url.host_str().is_some_and(|h| h == "localhost"
-                    || h.parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())),
-            "relay URL must use HTTPS or WSS"
-        );
-        if let Some(token) = args
-            .get("relay_token")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            next.relay_token = token.into();
-        }
-        storage::save_json(state.remote.path.as_ref().unwrap(), &next)?;
-        *guard = Some(next);
-        drop(guard);
-        state.start_remote_worker().await?;
-        state.remote.status().await
-    }
-    .await;
-    result.map(Json).map_err(api)
-}
-
-async fn pair(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    crate::management::authorize(&state, &headers, None).await?;
-    let result: Result<Value> = async {
-        state.remote.initialize().await?;
-        let mut guard = state.remote.saved.lock().await;
-        let mut next = guard.as_ref().unwrap().clone();
-        let id = if args["remove"].as_bool() == Some(true) {
-            let id = string(&args, "device_id")?.to_owned();
-            next.peers.remove(&id);
-            id
-        } else {
-            let mut peer: Peer = serde_json::from_value(args)?;
-            peer.secret_keys = crate::secrets::normalize_keys(&peer.secret_keys)?;
-            ensure!(
-                !peer.label.trim().is_empty() && peer.label.len() <= 128,
-                "invalid device label"
-            );
-            let id = trustd_remote::node_id(&peer.public_key)?;
-            ensure!(
-                id != next.identity.id()?,
-                "cannot pair this device with itself"
-            );
-            next.peers.insert(id.clone(), peer);
-            id
-        };
-        storage::save_json(state.remote.path.as_ref().unwrap(), &next)?;
-        if let Some(node) = state.remote.node.read().await.as_ref() {
-            node.set_peers(
-                next.peers
-                    .iter()
-                    .map(|(id, p)| (id.clone(), p.public_key.clone()))
-                    .collect(),
-            )
-            .await;
-        }
-        let previous = guard.as_ref().and_then(|s| s.peers.get(&id));
-        let revoked = next.peers.get(&id).is_none_or(|p| !p.allow_execution)
-            || previous.is_some_and(|old| {
-                next.peers.get(&id).is_some_and(|new| {
-                    (old.sudo && !new.sudo)
-                        || old
-                            .secret_keys
-                            .iter()
-                            .any(|key| !new.secret_keys.contains(key))
-                })
-            });
-        *guard = Some(next);
-        drop(guard);
-        if revoked {
-            state.revoke_remote_peer(&id).await;
-        }
-        state
-            .audit("remote.peer.updated", json!({"peer":id,"revoked":revoked}))
-            .await;
-        state.remote.status().await
-    }
-    .await;
-    result.map(Json).map_err(api)
 }
 
 async fn admin_invoke(

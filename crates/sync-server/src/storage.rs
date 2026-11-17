@@ -4,7 +4,10 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use fs2::FileExt;
-use localshelld_sync_protocol::Snapshot;
+use localshelld_sync_protocol::{
+    Snapshot,
+    owner::{OwnerKey, SignedStatement},
+};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,6 +35,9 @@ pub struct Session {
     pub expires_at: i64,
     pub refresh_hash: String,
     pub used_refresh: Vec<String>,
+    /// The roster device this session belongs to; browser sessions have none.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -42,6 +48,13 @@ pub struct Saved {
     pub passkeys: Vec<StoredPasskey>,
     pub sessions: BTreeMap<String, Session>,
     pub vault: Snapshot,
+    /// Owner keys devices pin as the base of the roster: the passkey that
+    /// initialized the service. Later keys need a signed `PasskeyAdd`.
+    #[serde(default)]
+    pub genesis: Vec<OwnerKey>,
+    /// Owner-signed statements in arrival order; devices verify every one.
+    #[serde(default)]
+    pub statements: Vec<SignedStatement>,
 }
 
 pub struct Store {
@@ -133,6 +146,8 @@ impl Store {
                 passkeys: vec![],
                 sessions: BTreeMap::new(),
                 vault: Snapshot::default(),
+                genesis: vec![],
+                statements: vec![],
             }
         };
         let mut store = Self {

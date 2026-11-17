@@ -32,7 +32,6 @@ pub fn names(windows: bool) -> Vec<String> {
         },
         "trustd-stdio",
         "trustd-agent-stdio",
-        "trustd-relay",
     ]
     .into_iter()
     .map(|name| {

@@ -21,6 +21,19 @@ use tokio_tungstenite::{
 
 pub type Handler =
     Arc<dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send + Sync>;
+/// Supplies the bearer token for each connection attempt, so a short-lived
+/// access token is renewed before every reconnect.
+pub type TokenSource =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
+
+/// A token source that always returns the same token.
+pub fn static_token(token: &str) -> TokenSource {
+    let token = Arc::new(zeroize::Zeroizing::new(token.to_owned()));
+    Arc::new(move || {
+        let token = token.clone();
+        Box::pin(async move { Ok(token.as_str().to_owned()) })
+    })
+}
 type Inbox = mpsc::Receiver<Frame>;
 
 pub struct Node {
@@ -58,11 +71,16 @@ impl Node {
         *self.peers.write().await = peers;
     }
 
-    pub async fn run(self: Arc<Self>, url: String, token: String, handler: Handler) {
-        let token = zeroize::Zeroizing::new(token);
+    pub async fn run(self: Arc<Self>, url: String, token: TokenSource, handler: Handler) {
         let mut delay = 1;
         loop {
-            let result = self.connection(&url, &token, handler.clone()).await;
+            let result = match token().await {
+                Ok(token) => {
+                    let token = zeroize::Zeroizing::new(token);
+                    self.connection(&url, &token, handler.clone()).await
+                }
+                Err(error) => Err(error.context("relay access token unavailable")),
+            };
             self.disconnect().await;
             if let Err(error) = result {
                 tracing::warn!(%error, "remote relay disconnected");

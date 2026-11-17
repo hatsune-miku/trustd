@@ -105,15 +105,12 @@ impl AppState {
                 if state.remote.jobs.lock().await[&id].status == "cancelled" {
                     anyhow::bail!("cancelled before execution");
                 }
-                let peer = state.remote.peer(&owner).await?;
-                ensure!(
-                    peer.allow_execution && (!session.options.sudo || peer.sudo),
-                    "device grant was revoked"
-                );
-                ensure!(
-                    session.keys.iter().all(|k| peer.secret_keys.contains(k)),
-                    "credential grant was revoked"
-                );
+                // A device removed from the roster since submission loses its jobs.
+                state
+                    .remote
+                    .peer(&owner)
+                    .await
+                    .context("device was removed from the roster")?;
                 let entered = state
                     .enter_remote_granted(&owner, &session.keys, session.options)
                     .await?;

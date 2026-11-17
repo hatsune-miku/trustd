@@ -454,10 +454,7 @@ pub(crate) fn complete_legacy_bundle() -> Result<()> {
 }
 
 fn needs_extension_roles(directory: &Path) -> bool {
-    let extensions = [
-        super::bundle::filename("trustd-agent-stdio"),
-        super::bundle::filename("trustd-relay"),
-    ];
+    let extensions = [super::bundle::filename("trustd-agent-stdio")];
     extensions.iter().any(|name| !directory.join(name).exists())
         && super::bundle::names(cfg!(windows))
             .iter()

@@ -329,3 +329,53 @@ fn validates_sync_origin_without_permitting_insecure_remote_urls() {
         assert!(normalize_url(invalid).is_err());
     }
 }
+
+#[test]
+fn joins_are_verified_on_the_device_not_taken_from_the_backend() {
+    use localshelld_sync_protocol::owner::testing::{Authenticator, owner_for};
+    let url = "https://backend.example";
+    let passkey = Authenticator::new(b"owner");
+    let owner = owner_for(&passkey, url);
+    let identity = trustd_remote::Identity::generate().unwrap();
+    let statement = Statement::DeviceApprove {
+        device_id: identity.id().unwrap(),
+        public_key: identity.public_key.clone(),
+        name: "laptop".into(),
+        issued_at: 1,
+    };
+    let approval = passkey.sign(&owner, &statement);
+    let joined = |owner: &owner::Owner, approval: &owner::SignedStatement, roster: bool| Joined {
+        tokens: tokens(false),
+        owner: owner.clone(),
+        approval: approval.clone(),
+        statements: if roster {
+            vec![approval.clone()]
+        } else {
+            vec![]
+        },
+    };
+    let text = statement.to_text();
+    verify_join(url, &text, &joined(&owner, &approval, true)).unwrap();
+    // A forged signature, another device's approval, another origin, or an
+    // approval left out of the roster are all refused.
+    let forged = Authenticator::new(b"owner").sign(&owner, &statement);
+    assert!(verify_join(url, &text, &joined(&owner, &forged, true)).is_err());
+    let other = trustd_remote::Identity::generate().unwrap();
+    let other_statement = Statement::DeviceApprove {
+        device_id: other.id().unwrap(),
+        public_key: other.public_key.clone(),
+        name: "laptop".into(),
+        issued_at: 1,
+    };
+    let other_approval = passkey.sign(&owner, &other_statement);
+    assert!(verify_join(url, &text, &joined(&owner, &other_approval, true)).is_err());
+    assert!(
+        verify_join(
+            "https://elsewhere.example",
+            &text,
+            &joined(&owner, &approval, true)
+        )
+        .is_err()
+    );
+    assert!(verify_join(url, &text, &joined(&owner, &approval, false)).is_err());
+}

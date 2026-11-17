@@ -1,61 +1,17 @@
 # 远端执行与 Codex
 
-远端功能由用户 daemon 提供。发起端、执行端都主动连接 HTTPS 中转，不要求两台设备之间能建立连接。现有本机执行接口继续使用。
+远端功能由用户 daemon 提供。设备都主动连接后端，不要求两台设备之间能建立连接。现有本机执行接口继续使用。
 
-## 配置中转
+## 加入与信任
 
-在一台可被两端访问的服务器上运行独立程序 `trustd-relay`。中转只监听 loopback，通过已有 HTTPS 反向代理提供 WebSocket 入口。默认端口是 `32129`。
+远端执行使用同一个后端（见 [SYNC.md](SYNC.md)）。设备在管理页“凭据 → 后端”加入后端，主人在后端页面按一次通行密钥批准即可，不需要另外部署中转、登记设备或复制公钥。
 
-在各设备管理页面的「远端」中复制设备 ID 或公钥，在中转服务器上登记：
+- 同一主人的设备默认互相信任：可以互相执行命令、申请管理员 / root 身份并使用全部凭据。任何一台设备被攻破，都可能借此在其他设备上执行命令。
+- 设备之间的公钥来自主人通行密钥签名的名册，每台设备自行验证；后端无法伪造设备或冒充主人。
+- 在后端页面撤销设备后，其他设备会断开它的连接，并终止其会话、任务和 Codex 进程。
+- 连接使用 Noise IK，双方固定对方的设备公钥；后端中转只看到设备、连接时间和流量大小，无法解密执行请求及结果。客户端使用环境变量及受支持的系统代理设置，除 loopback 测试外拒绝明文连接。
 
-```sh
-trustd-relay add-device 'DEVICE_ID_OR_PUBLIC_KEY'
-trustd-relay serve
-```
-
-位置参数接受 64 个十六进制字符的设备 ID，或管理页面显示的 Base64 公钥。公钥会自动换算成设备 ID，即公钥的 SHA-256 摘要；两种输入登记的是同一台设备。
-
-`--config` 可省略，默认路径为：
-
-| 平台 | 中转配置文件 |
-| --- | --- |
-| Linux | `/var/lib/trustd-relay/config.json` |
-| macOS | `/Library/Application Support/trustd-relay/config.json` |
-| Windows | `%ProgramData%\trustd-relay\config.json` |
-
-`--token-file` 可省略，默认将令牌写入配置文件同目录下的 `<设备ID>.token`，命令完成后会显示文件路径。配置文件保存各设备的令牌摘要。使用 `--config /custom/relay.json` 时，默认令牌也写入 `/custom/`；仍可用 `--token-file` 单独指定输出路径。
-
-以独立服务账号运行中转时，使用该账号登记设备，例如 Linux 上的 `sudo -u trustd-relay trustd-relay add-device 'DEVICE_ID_OR_PUBLIC_KEY'`。同一设备再次登记会生成新令牌并替换旧令牌，配置变更不需要重启中转。旧的 `--device DEVICE_ID` 写法仍兼容。
-
-将令牌文件中的完整内容填入对应设备管理页的接入令牌栏，同时填写 HTTPS 中转地址，再添加另一台设备的公钥。双方都要添加对方公钥；在接受执行请求的一端明确授予执行权限、sudo 权限和可用凭据名称。中转接入登记不代替设备之间的公钥配对。凭据与 sudo 独立，凭据保留在执行端。
-
-nginx 的示例配置，放入已经配置证书的 HTTPS server：
-
-```nginx
-location /trustd-remote/ {
-    proxy_pass http://127.0.0.1:32129/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_read_timeout 90s;
-    proxy_send_timeout 90s;
-    proxy_buffering off;
-}
-```
-
-设备填写 `https://your-host/trustd-remote`。客户端使用环境变量及受支持的系统代理设置。除 loopback 测试外拒绝明文中转。连接使用已有的 Noise IK 协议实现，双方固定对方的设备公钥；先完成双向握手，再发送请求。中转看到设备、连接时间和流量大小，无法解密执行请求及结果。接入令牌不等于执行授权。
-
-不使用网页时，可在用户 daemon 停止期间配置，随后重新启动：
-
-```sh
-trustd remote identity --config /path/to/user/config.toml
-trustd remote connect --config /path/to/user/config.toml \
-  --relay https://your-host/trustd-remote --token-file /private/path/device.token
-trustd remote pair --config /path/to/user/config.toml \
-  --public-key PEER_PUBLIC_KEY --label workstation --allow-execution
-```
-
-按需添加 `--sudo`、重复的 `--secret-key NAME`。撤销设备或缩减权限会终止其现有会话、任务和 Codex 进程。`trustd-relay remove-device 'DEVICE_ID_OR_PUBLIC_KEY'` 则撤销中转接入，连接在下一次心跳检查后关闭。
+部署后端时，Nginx 需要为 `/v2/relay/` 转发 WebSocket 升级，`deploy/sync/nginx-https.conf` 已包含相应配置。
 
 ## 使用远端
 

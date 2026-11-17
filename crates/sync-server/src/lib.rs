@@ -13,7 +13,9 @@ use axum::{
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use localshelld_sync_protocol::{
-    DeviceStart, MAX_BODY_BYTES, Replace, Snapshot, Tokens, validate_credentials,
+    DeviceJoin, DeviceStart, Joined, MAX_BODY_BYTES, Replace, RosterResponse, Snapshot, Tokens,
+    owner::{self, Owner, OwnerKey, Roster, SignedStatement, Statement},
+    validate_credentials,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,6 +29,9 @@ const REFRESH_SECONDS: i64 = 30 * 86400;
 const CHALLENGE_SECONDS: i64 = 300;
 const MAX_PENDING: usize = 128;
 const MAX_SESSIONS: usize = 128;
+const MAX_STATEMENTS: usize = 4096;
+/// Allowed difference between a joining device's clock and the service's.
+const JOIN_CLOCK_SKEW: i64 = 600;
 
 #[derive(Debug)]
 struct Error(StatusCode, &'static str);
@@ -61,9 +66,12 @@ enum Challenge {
 struct Device {
     user_code: String,
     name: String,
+    device_id: String,
+    /// The device's own approval statement, exactly as the owner signs it.
+    statement: String,
     expires_at: i64,
     last_poll: i64,
-    approved: bool,
+    approval: Option<SignedStatement>,
 }
 struct Pending {
     challenges: HashMap<String, (i64, Challenge)>,
@@ -108,6 +116,7 @@ pub struct App {
     pending: Arc<Mutex<Pending>>,
     webauthn: Arc<Webauthn>,
     origin: String,
+    rp_id: String,
     revision: watch::Sender<u64>,
     telegram: localshelld_telegram::Service,
     telegram_config_lock: Arc<Mutex<()>>,
@@ -140,19 +149,20 @@ impl App {
             "HTTPS is required, except http://localhost for development"
         );
         let origin = url.origin().ascii_serialization();
-        let webauthn = WebauthnBuilder::new(
-            url.host_str()
-                .ok_or_else(|| anyhow::anyhow!("missing host"))?,
-            &url,
-        )?
-        .rp_name("localshelld sync")
-        .build()?;
+        let rp_id = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("missing host"))?
+            .to_owned();
+        let webauthn = WebauthnBuilder::new(&rp_id, &url)?
+            .rp_name("localshelld sync")
+            .build()?;
         let store = Store::open(directory)?;
         let (revision, _) = watch::channel(store.saved.vault.revision);
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             webauthn: Arc::new(webauthn),
             origin,
+            rp_id,
             pending: Arc::new(Mutex::new(Pending {
                 challenges: HashMap::new(),
                 devices: HashMap::new(),
@@ -164,12 +174,36 @@ impl App {
             telegram_config_lock: Arc::new(Mutex::new(())),
         })
     }
+    /// Set the genesis owner keys without a WebAuthn registration ceremony.
+    #[cfg(feature = "testing")]
+    pub async fn initialize_owner_for_tests(&self, keys: Vec<OwnerKey>) {
+        let mut store = self.store.lock().await;
+        let mut next = store.saved.clone();
+        next.genesis = keys;
+        store.commit(next).expect("test state commit");
+    }
+
+    /// The owner as devices pin it: this relying party and the genesis keys.
+    fn owner(&self, saved: &storage::Saved) -> Owner {
+        Owner {
+            rp_id: self.rp_id.clone(),
+            origin: self.origin.clone(),
+            keys: saved.genesis.clone(),
+        }
+    }
+    /// Derived exactly as every device derives it, from verified statements.
+    fn roster(&self, saved: &storage::Saved) -> Roster {
+        owner::roster(&self.owner(saved), &saved.statements)
+    }
     fn authenticate(&self, store: &Store, headers: &HeaderMap) -> Result<Claims> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(denied)?;
+        self.claims(store, token)
+    }
+    fn claims(&self, store: &Store, token: &str) -> Result<Claims> {
         let mut validation = Validation::new(Algorithm::HS256);
         validation.leeway = 0;
         validation.set_audience(&["localshelld-sync"]);
@@ -233,7 +267,13 @@ impl App {
             refresh_expires_at,
         })
     }
-    fn new_session(&self, store: &mut Store, name: String, browser: bool) -> Result<Tokens> {
+    fn new_session(
+        &self,
+        store: &mut Store,
+        name: String,
+        browser: bool,
+        device: Option<String>,
+    ) -> Result<Tokens> {
         let now = Utc::now().timestamp();
         let mut next = store.saved.clone();
         next.sessions.retain(|_, session| session.expires_at > now);
@@ -263,6 +303,7 @@ impl App {
                 expires_at: expires,
                 refresh_hash: digest(&refresh_token),
                 used_refresh: vec![],
+                device,
             },
         );
         let tokens = self.tokens(&next, &sid, refresh_token, expires)?;
@@ -288,7 +329,6 @@ pub fn router(app: App) -> Router {
             "/sync/v1/passkeys/authenticate/finish",
             post(authenticate_finish),
         )
-        .route("/sync/v1/passkeys/remove", post(passkey_remove))
         .route("/sync/v1/session/refresh", post(refresh))
         .route("/sync/v1/session/revoke", post(revoke))
         .route("/sync/v1/sessions", get(sessions))
@@ -296,6 +336,9 @@ pub fn router(app: App) -> Router {
         .route("/sync/v1/device/inspect", post(device_inspect))
         .route("/sync/v1/device/approve", post(device_approve))
         .route("/sync/v1/device/poll", post(device_poll))
+        .route("/sync/v1/roster", get(roster))
+        .route("/sync/v1/statements/prepare", post(statement_prepare))
+        .route("/sync/v1/statements", post(statement_submit))
         .route("/sync/v1/vault", get(vault_get).put(vault_put))
         .route("/sync/v1/telegram", post(telegram::control))
         .route("/sync/v1/telegram/request", post(telegram::create))
@@ -304,6 +347,7 @@ pub fn router(app: App) -> Router {
         .route("/sync/v1/telegram/finish", post(telegram::finish))
         .route("/sync/v1/telegram/agents", post(telegram::agents))
         .route("/sync/v1/events", get(events))
+        .merge(trustd_remote::relay::router(relay_admission(app.clone())))
         .fallback(assets)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(app.clone(), security))
@@ -411,7 +455,7 @@ async fn register_finish(
     State(app): State<App>,
     headers: HeaderMap,
     Json(body): Json<RegisterFinish>,
-) -> Result<Json<Tokens>> {
+) -> Result<Json<Value>> {
     let challenge = app.pending.lock().await.take(&body.challenge_id)?;
     let Challenge::Register {
         state,
@@ -445,6 +489,11 @@ async fn register_finish(
     }
     let mut next = store.saved.clone();
     next.bootstrap_hash = None;
+    let owner_key = OwnerKey::from(&key);
+    if bootstrap {
+        // The initializing passkey is the base every device pins.
+        next.genesis = vec![owner_key.clone()];
+    }
     next.passkeys.push(StoredPasskey {
         id: random(),
         name,
@@ -452,7 +501,18 @@ async fn register_finish(
     });
     store.commit(next).map_err(|_| internal())?;
     store.remove_bootstrap_file();
-    Ok(Json(app.new_session(&mut store, "Browser".into(), true)?))
+    let mut result = json!(app.new_session(&mut store, "Browser".into(), true, None)?);
+    if !bootstrap {
+        // Devices trust a later passkey only after a trusted one endorses it.
+        result["endorse"] = app.prepare(
+            &store.saved,
+            &Statement::PasskeyAdd {
+                key: owner_key,
+                issued_at: Utc::now().timestamp(),
+            },
+        );
+    }
+    Ok(Json(result))
 }
 
 async fn authenticate_start(State(app): State<App>) -> Result<Json<Value>> {
@@ -508,29 +568,18 @@ async fn authenticate_finish(
         .ok_or_else(denied)?;
     key.key.update_credential(&auth);
     store.commit(next).map_err(|_| internal())?;
-    Ok(Json(app.new_session(&mut store, "Browser".into(), true)?))
+    Ok(Json(app.new_session(
+        &mut store,
+        "Browser".into(),
+        true,
+        None,
+    )?))
 }
 
 #[derive(Deserialize)]
 struct Id {
     id: String,
 }
-async fn passkey_remove(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Json(body): Json<Id>,
-) -> Result<Json<Value>> {
-    let mut store = app.store.lock().await;
-    app.browser(&store, &headers)?;
-    if store.saved.passkeys.len() <= 1 {
-        return Err(bad("the last passkey cannot be removed"));
-    }
-    let mut next = store.saved.clone();
-    next.passkeys.retain(|key| key.id != body.id);
-    store.commit(next).map_err(|_| internal())?;
-    Ok(Json(json!({"removed":true})))
-}
-
 #[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct Refresh {
     refresh_token: String,
@@ -567,8 +616,13 @@ async fn refresh(State(app): State<App>, Json(body): Json<Refresh>) -> Result<Js
 async fn sessions(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
     let store = app.store.lock().await;
     app.browser(&store, &headers)?;
+    let trusted = app.roster(&store.saved).keys;
+    let is_trusted = |key: &StoredPasskey| {
+        let key = OwnerKey::from(&key.key);
+        trusted.iter().any(|t| t.credential_id == key.credential_id)
+    };
     Ok(Json(
-        json!({"passkeys":store.saved.passkeys.iter().map(|key| json!({"id":key.id,"name":key.name})).collect::<Vec<_>>(),
+        json!({"passkeys":store.saved.passkeys.iter().map(|key| json!({"id":key.id,"name":key.name,"trusted":is_trusted(key)})).collect::<Vec<_>>(),
         "sessions":store.saved.sessions.iter().filter(|(_,s)| !s.browser && s.expires_at > Utc::now().timestamp()).map(|(id,s)| json!({"id":id,"name":s.name,"created_at":s.created_at,"expires_at":s.expires_at})).collect::<Vec<_>>()}),
     ))
 }
@@ -595,35 +649,81 @@ async fn revoke(
     Ok(Json(json!({"revoked":true})))
 }
 
-#[derive(Deserialize)]
-struct DeviceName {
-    name: String,
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
+
+impl App {
+    /// Everything the approval page needs to have a trusted owner passkey
+    /// sign `statement`: its exact text and the derived WebAuthn challenge.
+    fn prepare(&self, saved: &storage::Saved, statement: &Statement) -> Value {
+        let text = statement.to_text();
+        json!({
+            "statement":text,
+            "challenge":b64(&owner::challenge(&text)),
+            "rp_id":self.rp_id,
+            "allow_credentials":self.roster(saved).keys.iter()
+                .map(|key| b64(key.credential_id.as_ref())).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A device joins by submitting its own approval statement; the owner signs
+/// exactly that text on the approval page, so every device can verify it.
 async fn device_start(
     State(app): State<App>,
-    Json(body): Json<DeviceName>,
+    Json(body): Json<DeviceJoin>,
 ) -> Result<Json<DeviceStart>> {
-    if body.name.trim().is_empty() || body.name.len() > 80 {
-        return Err(bad("device name must contain 1–80 bytes"));
+    let Ok(Statement::DeviceApprove {
+        device_id,
+        name,
+        issued_at,
+        ..
+    }) = Statement::parse(&body.statement)
+    else {
+        return Err(bad("join requires a valid device approval statement"));
+    };
+    if (issued_at - Utc::now().timestamp()).abs() > JOIN_CLOCK_SKEW {
+        return Err(bad(
+            "device clock differs from the service by more than 10 minutes",
+        ));
     }
     let mut pending = app.pending.lock().await;
     pending.allow_start()?;
+    {
+        let store = app.store.lock().await;
+        if store.saved.genesis.is_empty() {
+            return Err(bad("initialize the service first"));
+        }
+        if app.roster(&store.saved).revoked.contains(&device_id) {
+            return Err(Error(
+                StatusCode::FORBIDDEN,
+                "this device identity was revoked; reset it before joining again",
+            ));
+        }
+    }
+    pending
+        .devices
+        .retain(|_, device| device.device_id != device_id);
     let device_code = random();
     let user_code = uuid::Uuid::new_v4().simple().to_string()[..12].to_uppercase();
     pending.devices.insert(
         digest(&device_code),
         Device {
             user_code: user_code.clone(),
-            name: body.name.trim().into(),
+            name,
+            device_id,
+            statement: body.statement.clone(),
             expires_at: Utc::now().timestamp() + 600,
             last_poll: 0,
-            approved: false,
+            approval: None,
         },
     );
     Ok(Json(DeviceStart {
         device_code,
         user_code: user_code.clone(),
-        verification_uri: format!("{}/#device={user_code}", app.origin),
+        verification_uri: format!("{}/#join={user_code}", app.origin),
         expires_in: 600,
         interval: 3,
     }))
@@ -633,41 +733,66 @@ async fn device_start(
 struct UserCode {
     user_code: String,
 }
-async fn device_inspect(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Json(body): Json<UserCode>,
-) -> Result<Json<Value>> {
+/// Public by design: the user code is the capability to view one pending
+/// request, and approving it still needs the owner's passkey signature.
+async fn device_inspect(State(app): State<App>, Json(body): Json<UserCode>) -> Result<Json<Value>> {
     let mut pending = app.pending.lock().await;
-    pending.prune();
-    let store = app.store.lock().await;
-    app.browser(&store, &headers)?;
+    pending.allow_start()?;
     let device = pending
         .devices
         .values()
         .find(|d| d.user_code == body.user_code)
         .ok_or_else(|| bad("device request expired"))?;
-    Ok(Json(
-        json!({"name":device.name,"user_code":device.user_code,"approved":device.approved}),
-    ))
+    let store = app.store.lock().await;
+    let Ok(statement) = Statement::parse(&device.statement) else {
+        return Err(internal());
+    };
+    let mut value = app.prepare(&store.saved, &statement);
+    // The exact stored text, not a re-serialization, is what gets signed.
+    value["statement"] = json!(device.statement);
+    value["challenge"] = json!(b64(&owner::challenge(&device.statement)));
+    value["name"] = json!(device.name);
+    value["device_id"] = json!(device.device_id);
+    value["user_code"] = json!(device.user_code);
+    value["approved"] = json!(device.approval.is_some());
+    Ok(Json(value))
 }
-async fn device_approve(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Json(body): Json<UserCode>,
-) -> Result<Json<Value>> {
+
+#[derive(Deserialize)]
+struct Approve {
+    user_code: String,
+    assertion: PublicKeyCredential,
+}
+async fn device_approve(State(app): State<App>, Json(body): Json<Approve>) -> Result<Json<Value>> {
     let mut pending = app.pending.lock().await;
     pending.prune();
-    let store = app.store.lock().await;
-    app.browser(&store, &headers)?;
     let device = pending
         .devices
         .values_mut()
         .find(|d| d.user_code == body.user_code)
         .ok_or_else(|| bad("device request expired"))?;
-    device.approved = true;
+    if device.approval.is_some() {
+        return Ok(Json(json!({"approved":true})));
+    }
+    let signed = SignedStatement {
+        statement: device.statement.clone(),
+        assertion: body.assertion,
+    };
+    let mut store = app.store.lock().await;
+    let roster = app.roster(&store.saved);
+    signed
+        .verify(&app.owner(&store.saved), &roster.keys)
+        .map_err(|_| denied())?;
+    if store.saved.statements.len() >= MAX_STATEMENTS {
+        return Err(bad("statement limit reached"));
+    }
+    let mut next = store.saved.clone();
+    next.statements.push(signed.clone());
+    store.commit(next).map_err(|_| internal())?;
+    device.approval = Some(signed);
     Ok(Json(json!({"approved":true})))
 }
+
 #[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 struct DeviceCode {
     device_code: String,
@@ -688,14 +813,179 @@ async fn device_poll(State(app): State<App>, Json(body): Json<DeviceCode>) -> Re
         ));
     }
     device.last_poll = now;
-    if !device.approved {
+    let Some(approval) = device.approval.clone() else {
         return Ok((StatusCode::ACCEPTED, Json(json!({"pending":true}))).into_response());
-    }
-    let name = device.name.clone();
+    };
+    let (name, id) = (device.name.clone(), device.device_id.clone());
     let mut store = app.store.lock().await;
-    let tokens = app.new_session(&mut store, name, false)?;
+    let tokens = app.new_session(&mut store, name, false, Some(id))?;
     pending.devices.remove(&hash);
-    Ok(Json(tokens).into_response())
+    Ok(Json(Joined {
+        tokens,
+        owner: app.owner(&store.saved),
+        approval,
+        statements: store.saved.statements.clone(),
+    })
+    .into_response())
+}
+
+async fn roster(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
+    let store = app.store.lock().await;
+    app.authenticate(&store, &headers)?;
+    let roster = app.roster(&store.saved);
+    let mut value = json!(RosterResponse {
+        owner: app.owner(&store.saved),
+        statements: store.saved.statements.clone(),
+    });
+    // Display aid for the owner's page; devices derive the roster themselves.
+    value["devices"] = json!(roster.devices);
+    value["trusted_keys"] = json!(
+        roster
+            .keys
+            .iter()
+            .map(|key| b64(key.credential_id.as_ref()))
+            .collect::<Vec<_>>()
+    );
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Prepare {
+    DeviceRevoke { device_id: String },
+    PasskeyAdd { id: String },
+    PasskeyRemove { id: String },
+}
+async fn statement_prepare(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<Prepare>,
+) -> Result<Json<Value>> {
+    let store = app.store.lock().await;
+    app.browser(&store, &headers)?;
+    let issued_at = Utc::now().timestamp();
+    let statement = match body {
+        Prepare::DeviceRevoke { device_id } => Statement::DeviceRevoke {
+            device_id,
+            issued_at,
+        },
+        Prepare::PasskeyAdd { id } => Statement::PasskeyAdd {
+            key: OwnerKey::from(
+                &store
+                    .saved
+                    .passkeys
+                    .iter()
+                    .find(|key| key.id == id)
+                    .ok_or_else(|| bad("passkey not found"))?
+                    .key,
+            ),
+            issued_at,
+        },
+        Prepare::PasskeyRemove { id } => Statement::PasskeyRemove {
+            credential_id: store
+                .saved
+                .passkeys
+                .iter()
+                .find(|key| key.id == id)
+                .ok_or_else(|| bad("passkey not found"))?
+                .key
+                .cred_id()
+                .as_ref()
+                .to_vec()
+                .into(),
+            issued_at,
+        },
+    };
+    Ok(Json(app.prepare(&store.saved, &statement)))
+}
+
+/// Accept an owner-signed statement. The signature is the authorization:
+/// no session can make the service record a statement the owner did not sign.
+async fn statement_submit(
+    State(app): State<App>,
+    Json(signed): Json<SignedStatement>,
+) -> Result<Json<Value>> {
+    let mut store = app.store.lock().await;
+    let roster = app.roster(&store.saved);
+    let statement = signed
+        .verify(&app.owner(&store.saved), &roster.keys)
+        .map_err(|_| denied())?;
+    if store
+        .saved
+        .statements
+        .iter()
+        .any(|existing| existing.statement == signed.statement)
+    {
+        return Ok(Json(json!({"accepted":true})));
+    }
+    if store.saved.statements.len() >= MAX_STATEMENTS {
+        return Err(bad("statement limit reached"));
+    }
+    let mut next = store.saved.clone();
+    match &statement {
+        Statement::DeviceApprove { .. } => {
+            return Err(bad("devices join through the approval page"));
+        }
+        Statement::DeviceRevoke { device_id, .. } => {
+            next.sessions
+                .retain(|_, session| session.device.as_deref() != Some(device_id.as_str()));
+        }
+        Statement::PasskeyAdd { key, .. } => {
+            if !next
+                .passkeys
+                .iter()
+                .any(|stored| OwnerKey::from(&stored.key).credential_id == key.credential_id)
+            {
+                return Err(bad("register the passkey before trusting it"));
+            }
+        }
+        Statement::PasskeyRemove { credential_id, .. } => {
+            if roster.keys.len() <= 1
+                && roster
+                    .keys
+                    .iter()
+                    .any(|k| &k.credential_id == credential_id)
+            {
+                return Err(bad("the last trusted passkey cannot be removed"));
+            }
+            next.passkeys
+                .retain(|stored| stored.key.cred_id().as_ref() != credential_id.as_ref());
+            if next.passkeys.is_empty() {
+                return Err(bad("the last passkey cannot be removed"));
+            }
+        }
+    }
+    next.statements.push(signed);
+    store.commit(next).map_err(|_| internal())?;
+    // Wake long polls so revoked devices are rejected promptly.
+    app.revision.send_replace(store.saved.vault.revision);
+    Ok(Json(json!({"accepted":true})))
+}
+
+/// Relay admission: a roster device presenting an access token of a live
+/// session bound to it. Heartbeats re-check roster and session liveness.
+fn relay_admission(app: App) -> trustd_remote::relay::Authorize {
+    Arc::new(move |device, token| {
+        let app = app.clone();
+        Box::pin(async move {
+            let store = app.store.lock().await;
+            if !app.roster(&store.saved).devices.contains_key(&device) {
+                return Ok(false);
+            }
+            let now = Utc::now().timestamp();
+            let live = |sid: &str| {
+                store.saved.sessions.get(sid).is_some_and(|session| {
+                    session.device.as_deref() == Some(device.as_str()) && session.expires_at > now
+                })
+            };
+            Ok(match token {
+                Some(token) => app
+                    .claims(&store, &token)
+                    .is_ok_and(|claims| live(&claims.sid)),
+                None => store.saved.sessions.keys().any(|sid| live(sid)),
+            })
+        })
+    })
 }
 
 fn wire_snapshot(snapshot: &Snapshot, headers: &HeaderMap) -> Value {

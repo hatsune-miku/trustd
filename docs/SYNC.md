@@ -1,4 +1,4 @@
-# 凭据同步协议 v1
+# 后端协议 v1
 
 localshelld 默认使用本机离线凭据库，也可以连接自托管同步服务。此协议同步凭据和 Telegram bot 配置，不同步执行令牌、Master Password、TOTP、桌面授权记忆或本机通行密钥。
 
@@ -9,12 +9,12 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 ## 使用
 
 1. 在本机“凭据”页导出需要保留的数据。
-2. 部署后端，打开其 HTTPS 地址。读取服务器数据目录的 `bootstrap-code`，创建第一个通行密钥。
-3. 在本机“凭据 → 存储方式”填入后端地址和设备名称，选择“连接服务”。
-4. 打开授权链接，使用后端的通行密钥登录，核对本机显示的设备验证码，再授权设备。
-5. 客户端下载云端整库并替换本机。新服务的云端库为空；需要迁移原数据时，再导入第 1 步的文件。
+2. 部署后端，打开其 HTTPS 地址。读取服务器数据目录的 `bootstrap-code`，创建第一个通行密钥。它是所有设备固定信任的主人密钥。
+3. 在设备管理页“凭据 → 后端”填入后端地址和设备名称，选择“加入后端”。
+4. 打开批准链接，核对设备上显示的验证码，按一次通行密钥批准。无需先登录后端。
+5. 设备在本机验证这次批准，下载云端整库并替换本机库，并与同一主人的其他设备互相信任。新服务的云端库为空；需要迁移原数据时，再导入第 1 步的文件。
 
-通行密钥属于后端的域名，不属于 localhost。另一台设备可以使用已同步的通行密钥、跨设备验证，或由已登录的浏览器添加另一个通行密钥。私钥不上传至服务端。
+一个后端只服务一位主人。通行密钥属于后端的域名，不属于 localhost。私钥不上传至服务端。
 
 ## 一致性
 
@@ -25,7 +25,7 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 - 冲突：返回 409，不覆盖另一端的写入。客户端拉取最新快照并要求用户重试，不自动重放旧整库。
 - 实时通知：在线客户端长轮询版本变化；提交成功立即唤醒等待者，客户端随后拉取整库。重连和每次心跳也重新读取云端。
 - 断网：仍配置云端时，凭据列表、导出、修改及新会话的凭据解析失败，不使用旧缓存授予新凭据，也不积压离线写入。
-- 离线模式：用户明确切换为离线存储后，保留最后确认的本机快照，停止同步。
+- 离开后端：用户明确离开后，保留最后确认的本机快照，停止同步，也不再与其他设备互通。
 
 保证的是服务端读写的顺序一致和客户端成功操作以云端为准。网络存在延迟，断线设备的磁盘缓存不可能与云端在同一瞬间变化；它不会被当作最新数据使用。已经授权的 shell 保留创建时的环境变量快照，不会因同步而改写正在运行的程序。
 
@@ -127,32 +127,42 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 
 此实现不是 OAuth/OIDC 服务；设备授权流程借鉴其交互方式，但端点和字段以本文为准。
 
-## 设备授权
+## 主人签名的声明
 
-1. 客户端 `POST /device/start`，body `{"name":"我的电脑"}`，无需认证。返回：
+设备不把后端的结论当作授权依据。设备加入、撤销以及通行密钥的增删，都是主人通行密钥签名的“声明”：一段 JSON 文本，WebAuthn challenge 为 `SHA-256("trustd-owner-statement-v1\n" + 声明文本)`。每台设备用加入时固定的主人公钥自行验证每条声明，从而在本机推导设备名册。后端只保存和转发声明，无法伪造或改写它们，但可以扣留声明，例如不转发某条撤销。
 
-   ```json
-   {
-     "device_code": "<PRIVATE_DEVICE_CODE>",
-     "user_code": "A1B2C3D4E5F6",
-     "verification_uri": "https://sync.example.com/#device=A1B2C3D4E5F6",
-     "expires_in": 600,
-     "interval": 3
-   }
-   ```
+声明类型（`kind`）：
 
-2. `device_code` 仅保留在客户端进程内，不传给页面或放入 URL。页面只显示 `user_code`，并打开同源的 verification URI。
-3. 用户在后端页面登录。浏览器 JWT 调用 `POST /device/inspect`，body `{"user_code":"..."}`，返回 `name`、`user_code`、`approved`。用户核对设备名和本机验证码后，用相同 body 调用 `POST /device/approve`。
-4. 客户端每 3 秒 `POST /device/poll`，body `{"device_code":"..."}`。未批准返回 HTTP 202 和 `{"pending":true}`；批准后返回设备 JWT/token，并一次性消费请求。过期、已使用或不存在的 code 返回 400，过快轮询返回 429。
-5. 客户端取得 token 后读取 `/vault`，原子保存云端快照和同步配置。此前不覆盖本机库。
+- `device_approve`：`device_id`、`public_key`（设备的 Noise 静态公钥，Base64）、`name`、`issued_at`。`device_id` 必须等于公钥的 SHA-256 十六进制值。
+- `device_revoke`：`device_id`、`issued_at`。撤销是永久的，无论声明顺序如何都优先于批准；同一设备身份不能再次加入。
+- `passkey_add`：`key`（凭据 ID 与 COSE 公钥）、`issued_at`。必须由已信任的通行密钥签名，新密钥才会被设备信任。
+- `passkey_remove`：`credential_id`、`issued_at`。最后一个受信任的密钥不会被移除。
 
-任何已授权设备都可读取、替换完整云端凭据库，但不能凭设备 JWT 管理其他设备或通行密钥。
+声明拒绝未知字段，签名要求 user presence 与 user verification，并校验 origin、RP ID 和 challenge。共享实现位于 `crates/sync-protocol/src/owner.rs`。
 
-`GET /sessions` 要求浏览器 JWT，返回 `passkeys:[{id,name}]` 和 `sessions:[{id,name,created_at,expires_at}]`；后者只列出仍有效的设备会话。
+## 设备加入
 
-`POST /session/revoke`，body `{"id":"<SESSION_ID>"}`。浏览器可撤销指定设备；设备可传空 id 撤销自身。撤销即时作用于 JWT 验证，也唤醒通知连接。
+1. 设备生成自己的加入声明（`device_approve`，含本机公钥），`POST /device/start`，body `{"statement":"..."}`，无需认证。设备时钟与服务端相差超过 10 分钟、声明无效或身份已被撤销时拒绝。返回 `device_code`、`user_code`、`verification_uri`（`https://sync.example.com/#join=<USER_CODE>`）、`expires_in` 和 `interval`。
+2. `device_code` 仅保留在设备进程内。页面打开 verification URI，`POST /device/inspect`，body `{"user_code":"..."}`，返回待签名的原文 `statement`、`challenge`、`rp_id`、`allow_credentials` 以及设备名称和验证码。此接口无需登录；`user_code` 只能用于查看这一项请求。
+3. 主人核对验证码后按一次通行密钥。页面 `POST /device/approve`，body `{"user_code":"...","assertion":<WebAuthn 断言>}`。服务端用当前受信任的主人密钥验证签名后记录这条声明。
+4. 设备每 3 秒 `POST /device/poll`，body `{"device_code":"..."}`。未批准返回 202 和 `{"pending":true}`；批准后一次性返回 `tokens`、`owner`（RP ID、origin 与主人基础公钥）、`approval` 和全部 `statements`。
+5. 设备核对 `owner` 的 origin 与 RP ID 是否就是自己选择的后端，确认 `approval` 正是自己的声明并通过签名验证、本机已出现在推导出的名册中，然后固定 `owner`，读取 `/vault` 并保存。此前不覆盖本机库。
 
-`POST /passkeys/remove`，body `{"id":"<PASSKEY_ID>"}`，要求浏览器 JWT，不允许移除最后一个通行密钥。移除通行密钥不等同于撤销已授权设备，应分别操作。
+首次加入时，设备从后端获得主人公钥，这一步属于首次信任；此后的名册更新都必须通过已固定公钥的验证。
+
+## 名册与撤销
+
+`GET /roster`（任意有效会话）返回 `owner` 和 `statements`，另附便于页面显示的 `devices` 与 `trusted_keys`；设备只采信自己从声明推导的结果。在线设备的长轮询在新声明到达时被唤醒，随后重新拉取名册。
+
+撤销设备或增删通行密钥时，已登录的页面调用 `POST /statements/prepare`（浏览器 JWT），body 为 `{"kind":"device_revoke","device_id":"..."}`、`{"kind":"passkey_add","id":"..."}` 或 `{"kind":"passkey_remove","id":"..."}`，取得待签名原文与 challenge；签名后 `POST /statements`，body `{"statement":"...","assertion":...}`。签名本身即授权，此接口无需会话。撤销会立即删除该设备的会话，设备随之失去同步与中转。
+
+`GET /sessions` 要求浏览器 JWT，返回 `passkeys:[{id,name,trusted}]`；`trusted` 表示设备是否信任该密钥。在已登录页面新增通行密钥后，页面会立即请求一个已受信任的密钥签署 `passkey_add`。
+
+`POST /session/revoke`，body `{"id":""}` 撤销调用者自己的会话，用于浏览器退出登录或设备离开后端。
+
+## 设备中转
+
+后端同时提供设备之间的加密中转：`GET /v2/relay/<device_id>`（WebSocket），`Authorization: Bearer <access_token>`。只有名册中的设备、使用绑定到自己的有效会话才能连接；心跳时重新检查名册与会话，被撤销的设备会被断开。设备之间使用 Noise IK 端到端加密，公钥来自已验证的名册，中转只能看到密文、设备 ID 和流量大小。
 
 ## 凭据整库
 
@@ -207,7 +217,7 @@ sudo bash deploy/sync/install.sh "$PWD/target/release/localshelld-sync-server" s
 
 安装脚本要求已有 Nginx、Certbot、systemd，并且域名已解析至当前服务器、80/443 可达。它只配置独立的 `localshelld-sync` 站点和服务，使用 Certbot webroot 获取证书并登记 Nginx reload hook。应确认系统已有 Certbot 续期 timer，必要时启用对应的发行包或 Snap timer。
 
-服务以独立的 `localshelld-sync` 系统账户运行，只监听 `127.0.0.1:32121`。Nginx 提供 TLS、请求限流和连接数限制。程序与数据分别位于 `/opt/localshelld-sync`、`/var/lib/localshelld-sync`。初始化码：
+服务以独立的 `localshelld-sync` 系统账户运行，只监听 `127.0.0.1:32121`。Nginx 提供 TLS、请求限流和连接数限制，并为 `/v2/relay/` 转发 WebSocket 升级；设备中转与同步使用同一个域名和服务，不需要另外部署中转程序。程序与数据分别位于 `/opt/localshelld-sync`、`/var/lib/localshelld-sync`。初始化码：
 
 ```bash
 sudo cat /var/lib/localshelld-sync/bootstrap-code

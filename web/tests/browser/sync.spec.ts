@@ -61,21 +61,22 @@ async function localLogin(page: Page, url: string) {
   await page.getByRole('button', { name: '凭据', exact: true }).click()
 }
 
+/** Join from the device page, then approve with one passkey tap on the backend. */
 async function connect(local: Page, cloud: Page, name: string) {
-  await local.getByText('连接同步服务', { exact: true }).click()
-  await local.getByLabel('服务地址').fill(origin)
+  await local.locator('summary', { hasText: '加入后端' }).click()
+  await local.getByLabel('后端地址').fill(origin)
   await local.getByLabel('设备名称').fill(name)
   local.once('dialog', (dialog) => dialog.accept())
-  await local.getByRole('button', { name: '连接服务', exact: true }).click()
-  const link = local.getByRole('link', { name: '打开服务并授权此设备' })
+  await local.getByRole('button', { name: '加入后端', exact: true }).click()
+  const link = local.getByRole('link', { name: '打开后端，用通行密钥批准此设备' })
   await expect(link).toBeVisible()
   const target = new URL((await link.getAttribute('href'))!)
-  const code = new URLSearchParams(target.hash.slice(1)).get('device')!
-  await cloud.getByLabel('设备验证码').fill(code)
-  await cloud.getByRole('button', { name: '查看设备', exact: true }).click()
+  expect(new URLSearchParams(target.hash.slice(1)).get('join')).toBeTruthy()
+  await cloud.goto(target.href)
   await expect(cloud.locator('.sync-device-name')).toHaveText(name)
-  await cloud.getByRole('button', { name: '授权此设备', exact: true }).click()
-  await expect(local.getByText('云端同步', { exact: true })).toBeVisible({ timeout: 15000 })
+  await cloud.getByRole('button', { name: '批准此设备', exact: true }).click()
+  await expect(cloud.getByRole('button', { name: '已批准', exact: true })).toBeVisible()
+  await expect(local.getByText('已加入', { exact: true })).toBeVisible({ timeout: 15000 })
 }
 
 test('passkey initialization, device pairing and two-client credential synchronization', async ({
@@ -96,7 +97,7 @@ test('passkey initialization, device pairing and two-client credential synchroni
     },
   })
   await cloud.goto(origin)
-  await expect(cloud.getByRole('heading', { name: '初始化同步服务' })).toBeVisible()
+  await expect(cloud.getByRole('heading', { name: '初始化后端' })).toBeVisible()
   await cloud.screenshot({ path: 'test-results/sync-initialize.png', fullPage: true })
   await cloud.getByLabel('初始化码').fill(bootstrap)
   await cloud.getByLabel('通行密钥名称').fill('Browser test passkey')
@@ -104,7 +105,7 @@ test('passkey initialization, device pairing and two-client credential synchroni
   await expect(cloud.getByText('通行密钥已添加。', { exact: true })).toBeVisible()
   await cloud.getByRole('button', { name: '退出登录', exact: true }).click()
   await cloud.getByRole('button', { name: '使用通行密钥登录', exact: true }).click()
-  await expect(cloud.getByRole('heading', { name: '连接设备', exact: true })).toBeVisible()
+  await expect(cloud.getByRole('heading', { name: '我的设备', exact: true })).toBeVisible()
   const a = await context.newPage()
   const b = await context.newPage()
   await localLogin(a, 'http://localhost:31819')
@@ -142,8 +143,8 @@ test('passkey initialization, device pairing and two-client credential synchroni
   await cloud.screenshot({ path: 'test-results/sync-trusted-mobile.png', fullPage: true })
   for (const local of [a, b]) {
     local.once('dialog', (dialog) => dialog.accept())
-    await local.getByRole('button', { name: '使用离线存储', exact: true }).click()
-    await expect(local.getByText('本机离线', { exact: true })).toBeVisible()
+    await local.getByRole('button', { name: '离开后端', exact: true }).click()
+    await expect(local.getByText('未加入', { exact: true })).toBeVisible()
     await local.close()
   }
   await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId })

@@ -14,17 +14,10 @@ test('remote task errors, credential-only sessions, Codex approval and event pag
       json: {
         device_id: 'local',
         public_key: 'local-key',
-        relay_url: 'https://relay.example',
+        joined: true,
+        backend: 'https://backend.example',
         connected: true,
-        peers: {
-          remote: {
-            label: 'workstation',
-            public_key: 'remote-key',
-            allow_execution: true,
-            sudo: false,
-            secret_keys: ['TEST_KEY'],
-          },
-        },
+        peers: { remote: { label: 'workstation', public_key: 'remote-key' } },
       },
     })
   )

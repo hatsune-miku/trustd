@@ -4,17 +4,11 @@ version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
-[[bin]]
-name = "trustd-relay"
-path = "src/main.rs"
-
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
-clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,7 +17,6 @@ snow = "0.10"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.28"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
 tempfile = "3"

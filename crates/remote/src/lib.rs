@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-pub use transport::{Handler, Node};
+pub use transport::{Handler, Node, TokenSource, static_token};
 
 const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_SHA256";
 pub const VERSION: &str = env!("TRUSTD_REMOTE_VERSION");

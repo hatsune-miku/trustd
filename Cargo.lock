@@ -2005,7 +2005,12 @@ dependencies = [
 name = "localshelld-sync-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "openssl",
  "serde",
+ "serde_json",
+ "sha2",
+ "webauthn-rs",
  "zeroize",
 ]
 
@@ -2034,6 +2039,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "trustd-remote",
  "uuid",
  "webauthn-rs",
  "zeroize",
@@ -4111,6 +4117,7 @@ dependencies = [
  "localshelld-native-dialog",
  "localshelld-native-process",
  "localshelld-sync-protocol",
+ "localshelld-sync-server",
  "localshelld-telegram",
  "mime_guess",
  "netstat2",
@@ -4153,10 +4160,8 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "clap",
  "futures-util",
  "localshelld-native-process",
- "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
@@ -4166,7 +4171,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "zeroize",
 ]

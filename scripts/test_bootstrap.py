@@ -40,7 +40,7 @@ class BootstrapTests(unittest.TestCase):
                     (base / "release.json").write_text(json.dumps({"tag_name": "v0.1.0-test"}), encoding="utf-8")
                     asset = f"trustd-{platform}.tar.gz"
                     with tarfile.open(base / asset, "w:gz") as archive:
-                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio", "trustd-relay"):
+                        for role in ("trustd", "trustd-root", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio"):
                             if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             content = b'#!/bin/sh\nprintf "%s\\n" "$@" > "$TRUSTD_FIXTURE/launched"\n[ "$TRUSTD_FIXTURE_MODE" != wizard ]\n'
@@ -91,7 +91,7 @@ cp "$TRUSTD_FIXTURE/$file" "$output"
                     sentinel.write_text("unrelated", encoding="utf-8")
                     asset = "trustd-windows-x86_64.zip"
                     with zipfile.ZipFile(base / asset, "w") as archive:
-                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio", "trustd-relay"):
+                        for role in ("trustd", "trustd-system", "trustd-user", "trustd-user-headless", "trustd-stdio", "trustd-agent-stdio"):
                             if mode == "missing" and role == "trustd-user-headless":
                                 continue
                             archive.writestr(f"trustd-windows-x86_64/{role}.exe", b"never executed")
