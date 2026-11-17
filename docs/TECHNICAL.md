@@ -141,9 +141,9 @@ Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 
 
 向导的“安装选项”可自动配置 Codex、Claude Code、Claude Desktop、Cursor、Windsurf、VS Code、Gemini CLI 和 Devin Desktop。默认不勾选；只写入所选客户端的用户级配置。VS Code 使用默认本地用户配置，便携版、自定义 profile 和远端配置需手动接入。
 
-配置指向固定程序目录内的 `trustd-stdio`，使用实际用户 daemon 地址。上述客户端已有的旧摘要路径会自动迁移，仅修改 `command`，保留参数、环境变量、超时和注释；固定路径配置在后续升级中不再改写。自定义路径或远端连接不会自动替换，需另行勾选；未纳入向导的客户端首次迁移需手动更新路径。改写已有文件前保存同目录的 `*.trustd-backup-*` 备份，各客户端的结果和备份位置分别显示。单个配置失败不影响服务安装，完成后重启客户端。
+配置指向固定程序目录内的 `trustd-stdio`，使用实际用户 daemon 地址。上述客户端已有的旧摘要路径会自动迁移，保留参数、环境变量、超时和注释。Codex 的受管 `[mcp_servers.trustd]` 条目在安装和升级时设置 `default_tools_approval_mode = "approve"`，已有固定路径配置也会补写；配置已符合要求时不再改写。自定义路径或远端连接不会自动替换，需另行勾选；未纳入向导的客户端首次迁移需手动更新路径。改写已有文件前保存同目录的 `*.trustd-backup-*` 备份，各客户端的结果和备份位置分别显示。单个配置失败不影响服务安装，完成后重启客户端。
 
-配置格式参照 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[VS Code MCP](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) 等官方文档。向导只写配置，不修改客户端的工具审批设置。
+配置格式参照 [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[VS Code MCP](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) 等官方文档。Codex 的 `trustd` 工具默认批准调用，避免 MCP 请求被不可见的工具审批阻塞。
 
 在支持 stdio 的 MCP 宿主中配置完整安装路径：
 

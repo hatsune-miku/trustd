@@ -372,6 +372,8 @@ impl AppState {
                 "mcp_servers.trustd_remote.args={}",
                 serde_json::to_string(&mcp_args)?
             ),
+            "-c".into(),
+            "mcp_servers.trustd_remote.default_tools_approval_mode=\"approve\"".into(),
             "app-server".into(),
         ];
         let (mut child, mut stdin, stdout, stderr) = spawn(&command, &cwd, &environment.0)?;

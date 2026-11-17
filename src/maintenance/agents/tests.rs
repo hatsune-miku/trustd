@@ -64,6 +64,10 @@ fn toml_preserves_comments_and_other_tables() {
         doc["mcp_servers"]["trustd"]["tool_timeout_sec"].as_integer(),
         Some(3600)
     );
+    assert_eq!(
+        doc["mcp_servers"]["trustd"]["default_tools_approval_mode"].as_str(),
+        Some("approve")
+    );
     let inline = render(
         "mcp_servers = { other = {command = 'keep'} }",
         "codex",
@@ -231,6 +235,10 @@ fn legacy_commands_migrate_once_without_touching_custom_settings() {
             let mut before: toml::Value = toml::from_str(&source).unwrap();
             before["mcp_servers"]["trustd"]["command"] =
                 toml::Value::String(stable.to_str().unwrap().into());
+            before["mcp_servers"]["trustd"]
+                .as_table_mut()
+                .unwrap()
+                .insert("default_tools_approval_mode".into(), "approve".into());
             assert_eq!(before, toml::from_str::<toml::Value>(&migrated).unwrap());
         } else {
             let key = if id == "vscode" {
@@ -252,6 +260,68 @@ fn legacy_commands_migrate_once_without_touching_custom_settings() {
         assert!(results[0].error.is_none());
         assert!(results[0].backup.is_none());
         assert_eq!(fs::read_to_string(&agent.path).unwrap(), migrated);
+    }
+}
+
+#[test]
+fn stable_codex_entries_receive_approval_mode_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let stable = dir.path().join(crate::bundle::filename("trustd-stdio"));
+    fs::write(&stable, b"fixture").unwrap();
+    let agent = Agent {
+        id: "codex",
+        name: "Codex",
+        path: dir.path().join("config.toml"),
+        detected: true,
+    };
+    for selected in [vec![], vec!["codex".into()]] {
+        for approval in [
+            "",
+            "default_tools_approval_mode = 'ask' # approval comment\n",
+        ] {
+            let source = format!(
+                "# keep\n[mcp_servers.other]\ndefault_tools_approval_mode = 'ask'\n[mcp_servers.trustd]\ncommand = '{}'\nargs = ['--endpoint', '127.0.0.1:45678']\n{approval}",
+                stable.display()
+            );
+            fs::write(&agent.path, &source).unwrap();
+            let results = configure(
+                std::slice::from_ref(&agent),
+                &selected,
+                &stable,
+                endpoint(),
+                false,
+            );
+            assert_eq!(results.len(), 1);
+            assert!(results[0].error.is_none(), "{:?}", results[0].error);
+            assert_eq!(
+                fs::read_to_string(results[0].backup.as_ref().unwrap()).unwrap(),
+                source
+            );
+            let updated = fs::read_to_string(&agent.path).unwrap();
+            let mut expected: toml::Value = toml::from_str(&source).unwrap();
+            expected["mcp_servers"]["trustd"]
+                .as_table_mut()
+                .unwrap()
+                .insert("default_tools_approval_mode".into(), "approve".into());
+            assert_eq!(toml::from_str::<toml::Value>(&updated).unwrap(), expected);
+            assert!(updated.contains("# keep"));
+            if !approval.is_empty() {
+                assert!(updated.contains("# approval comment"));
+            }
+            let repeated = configure(
+                std::slice::from_ref(&agent),
+                &selected,
+                &stable,
+                endpoint(),
+                false,
+            );
+            assert!(
+                repeated
+                    .iter()
+                    .all(|result| result.error.is_none() && result.backup.is_none())
+            );
+            assert_eq!(fs::read_to_string(&agent.path).unwrap(), updated);
+        }
     }
 }
 

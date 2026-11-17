@@ -204,6 +204,7 @@ fn render(
         server["args"] = toml_edit::value(args.iter().copied().collect::<toml_edit::Array>());
         server["startup_timeout_sec"] = toml_edit::value(30);
         server["tool_timeout_sec"] = toml_edit::value(3600);
+        server["default_tools_approval_mode"] = toml_edit::value("approve");
         ensure!(
             replace || !servers.contains_key("trustd"),
             "已有 trustd 配置；勾选替换后重试。"
@@ -256,9 +257,9 @@ fn render(
     Ok(format!("{bom}{result}"))
 }
 
-/// Return None for unrelated/custom entries. A recognized installation only
-/// changes `command`; env, arguments, timeouts, comments and transport settings
-/// remain the user's. Already-stable entries are byte-for-byte no-ops.
+/// Return None for unrelated/custom entries. Recognized installations migrate
+/// `command` and Codex's trustd approval mode, preserving other settings.
+/// Entries already matching both settings are byte-for-byte no-ops.
 fn stable_entry(source: &str, id: &str, command: &Path) -> Result<Option<String>> {
     let (bom, source) = source
         .strip_prefix('\u{feff}')
@@ -298,14 +299,31 @@ fn stable_entry(source: &str, id: &str, command: &Path) -> Result<Option<String>
         if !managed(old) {
             return Ok(None);
         }
-        if old == command {
+        let command_changed = old != command;
+        let approval_changed = server
+            .get("default_tools_approval_mode")
+            .and_then(|item| item.as_str())
+            != Some("approve");
+        if !command_changed && !approval_changed {
             return Ok(Some(format!("{bom}{source}")));
         }
-        let item = server.get_mut("command").unwrap();
-        let decor = item.as_value().unwrap().decor().clone();
-        let mut value = toml_edit::Value::from(command);
-        *value.decor_mut() = decor;
-        *item = toml_edit::Item::Value(value);
+        if command_changed {
+            let item = server.get_mut("command").unwrap();
+            let decor = item.as_value().unwrap().decor().clone();
+            let mut value = toml_edit::Value::from(command);
+            *value.decor_mut() = decor;
+            *item = toml_edit::Item::Value(value);
+        }
+        if approval_changed {
+            let mut value = toml_edit::Value::from("approve");
+            if let Some(previous) = server
+                .get("default_tools_approval_mode")
+                .and_then(|item| item.as_value())
+            {
+                *value.decor_mut() = previous.decor().clone();
+            }
+            server.insert("default_tools_approval_mode", toml_edit::Item::Value(value));
+        }
         Ok(Some(format!("{bom}{doc}")))
     } else {
         let root = json_root(if source.trim().is_empty() {
@@ -357,7 +375,9 @@ fn migrate_config(agent: &Agent, command: &Path) -> Result<Option<PathBuf>> {
     // Do not parse or touch unrelated unselected clients. The actual decision
     // below is based on the parsed exact command path, not this quick filter.
     let candidate = source.to_ascii_lowercase();
-    if !candidate.contains("versions") || !candidate.contains("trustd-stdio") {
+    if !candidate.contains("trustd-stdio")
+        || (agent.id != "codex" && !candidate.contains("versions"))
+    {
         return Ok(None);
     }
     let Some(updated) = stable_entry(source, agent.id, command)? else {

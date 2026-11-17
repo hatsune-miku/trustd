@@ -78,6 +78,8 @@ MCP 授权后调用 `remote_hosts` 获取已配对设备，再调用 `remote`，
 
 Codex 本身以目标普通用户身份启动，默认采用目标 CLI 的 model、approval policy、sandbox 配置。trustd 为它提供一个绑定当前授权会话的 MCP adapter，能够提交、查询、取消持久任务及传输文件。需要独立于对话生命周期的工作应通过 `job_start` 提交。Codex 内置工具的活动保存在对话事件中；通过 trustd 执行的命令进入 command / audit 日志。
 
+启动或恢复对话时，注入的 `mcp_servers.trustd_remote` 设置 `default_tools_approval_mode = "approve"`，避免该 adapter 的请求等待不可见的 Codex MCP 工具审批。
+
 每个对话的 trustd 工具使用独立 shell，初始目录与对话的 cwd 一致。对话恢复后可继续查询、取消自己先前提交的任务，不能访问其他对话的任务。
 
 远端状态保存在用户配置旁的 `config.remote.json` 和 `config.remote/` 中，包括设备身份、授权配置、任务元数据、输出及 Codex 事件。配置与能力令牌仅允许对应用户访问；不要把这些运行数据放入代码仓库。
