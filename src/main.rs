@@ -92,7 +92,7 @@ enum CommandKind {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Register and start both daemons, then complete trust pairing in the management UI.
+    /// Register, pair and start both daemons.
     Install {
         /// Install only the current non-elevated user's autostart daemon.
         #[arg(long)]
@@ -115,6 +115,22 @@ enum CommandKind {
         privileged_daemon: std::net::SocketAddr,
         #[arg(long)]
         start: bool,
+    },
+    /// Internal installation step run as the login user: stage the user half of
+    /// daemon pairing and print it as JSON for the privileged half.
+    #[command(hide = true)]
+    PairUser {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        privileged_daemon: std::net::SocketAddr,
+    },
+    /// Internal installation step: stage the privileged half of daemon pairing
+    /// from the JSON printed by `pair-user` on standard input.
+    #[command(hide = true)]
+    PairSystem {
+        #[arg(long)]
+        config: PathBuf,
     },
     /// Stop and unregister both daemons without deleting configuration or authorization data.
     Uninstall {
@@ -299,6 +315,30 @@ async fn run_command(command: CommandKind) -> Result<()> {
             tokio::task::spawn_blocking(move || {
                 require_user()?;
                 installation::setup_user(config, Some(privileged_daemon), start)
+            })
+            .await?
+        }
+        CommandKind::PairUser {
+            config,
+            privileged_daemon,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                require_user()?;
+                let pairing = installation::pair_user(config, privileged_daemon)?;
+                println!("{}", serde_json::to_string(&pairing)?);
+                Ok(())
+            })
+            .await?
+        }
+        CommandKind::PairSystem { config } => {
+            tokio::task::spawn_blocking(move || {
+                let mut input = String::new();
+                std::io::Read::read_to_string(
+                    &mut std::io::Read::take(std::io::stdin(), 4096),
+                    &mut input,
+                )?;
+                let pairing: localshelld::pairing::Pairing = serde_json::from_str(input.trim())?;
+                localshelld::pairing::provision(&config, &pairing)
             })
             .await?
         }

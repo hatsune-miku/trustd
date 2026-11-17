@@ -47,7 +47,8 @@ Windows 的管理员后端使用配对用户进程的 linked elevated token，�
 - `agents`：主动扫描当前用户的已知进程名，用操作系统连接归属和进程祖先核验完整路径。不同路径独立管理，同路径多个进程共享策略；无法核验时只允许当次人工决定。
 - `consent`：最多 8 个 pending 请求、600 秒截止时间、取消清理与进程内一次性决策回调；`server` 统一决定权限与创建会话。
 - `desktop`：平台适配。Windows 的 `crates/native-dialog` 封装 Win32 FFI；应用主库继续禁止 unsafe。模型无关的窗口层只接收文字和完成回调，不知道 token、shell 或提权接口。Linux/macOS 保留 Tao/Wry 实现。
-- `bridge`：显式配对后使用 AES-256-GCM 信封，绑定角色、方向、请求 ID，限制请求年龄并阻止重放。控制请求有短超时，授权请求遵循 600 秒截止时间，命令不默认限时、不重试。
+- `pairing`：安装程序在两份配置旁暂存同一配对密钥（`config.pairing.json`），daemon 启动时导入并删除，安装程序从不改写运行中 daemon 的授权文件；用户端已有可用配对时沿用原密钥。
+- `bridge`：配对后使用 AES-256-GCM 信封，绑定角色、方向、请求 ID，限制请求年龄并阻止重放。控制请求有短超时，授权请求遵循 600 秒截止时间，命令不默认限时、不重试。
 
 Windows 使用模型无关的原生无模式对话框，`IsDialogMessageW` 负责键盘导航，W 系列控件处理 Unicode。GUI 线程只处理窗口、布局和事件；有界 Rust 队列与 `PostMessageW` 传递唤醒，停止事件不受队列满影响。GUI 不读取配置、不阻塞等待 HTTP、不创建 shell。DPI 切换时替换字体并重排，关闭 HWND 后释放 GDI 资源。原生窗口不需要 WebView2；Windows 构建不引入 Wry/Tao。
 

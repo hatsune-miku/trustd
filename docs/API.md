@@ -222,7 +222,7 @@ credential 格式为：
 
 Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证会清除失败计数。
 
-会话列表只管理当前 daemon 签发的会话授权，不转发 Master/TOTP。经系统 daemon 授权的会话在系统管理页撤销。
+会话列表不转发 Master/TOTP。配对后，用户管理页的会话列表同时包含系统 daemon 签发的会话授权，每条记录的 `daemon` 字段标明来源；撤销系统端会话时传入 `"daemon":"privileged"`，经加密桥执行。执行令牌（`credential`）只能列出、撤销当前 daemon 的会话。
 
 ### 管理登录与凭据设置
 
@@ -246,13 +246,15 @@ Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证�
 
 Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。相同完整路径共享策略，不同路径分别管理。一次授权在允许前持久化消费；长期信任不限制以后请求的凭据 key。`command_id` 是幂等键，`revision` 防止旧页面覆盖新状态；可选 `expires_at_ms` 拒绝过期命令。配对后两端访问同一份用户 daemon 策略，修改策略不撤销已建立的会话。
 
-### 用户进程配对
+### 本机进程配对
 
-在两端分别登录后，用户端 `POST /v1/admin/pairing/new` 返回 `code` 和 `user_daemon`。系统端 `POST /v1/admin/pairing/connect` 接收 `{"code":"...","user_daemon":"127.0.0.1:32120"}`，验证对端后保存。`POST /v1/admin/pairing/remove` 仅清除调用端的配对。用户配置的 `privileged_daemon` 必须指向对应系统端。
+安装程序自动配对两个 daemon：以登录用户身份运行的步骤在用户配置旁写入 `config.pairing.json`，经管理员授权的步骤在系统配置旁写入同一密钥和用户 daemon 地址，两个 daemon 在下次启动时导入并删除该文件。用户端已有指向同一系统端的配对时沿用原密钥，重新安装不会破坏可用的互信。不再提供配对码，原 `/v1/admin/pairing/new`、`/connect`、`/remove` 返回 404；修复配对请以管理员身份重新运行安装。用户配置的 `privileged_daemon` 必须指向对应系统端。
+
+配对后系统端不再提供管理页：访问 32119 的 `/` 会重定向到用户管理页，系统端的管理登录和其他管理接口返回 409。用户管理页通过加密桥读取系统端日志（`GET /v1/admin/logs?daemon=privileged`），并列出、撤销系统端会话：`POST /v1/admin/sessions/list` 的每条记录带 `daemon` 字段，撤销系统端会话时传 `{"id":"...","daemon":"privileged"}`。未配对的系统端（例如仅安装系统服务时）保留自己的管理页。
 
 `POST /v1/bridge` 是配对 daemon 的内部协议，不是公开审批接口。请求和响应使用 AES-256-GCM 认证加密，绑定方向、角色和请求 ID，并检查请求时间与重放；不通过普通 HTTP 接口接收允许/拒绝决定。配对不依赖仅凭端口号认定进程身份。
 
-浏览器请求同时校验 loopback Host 和 Origin 的端口，不开放跨域 CORS；响应禁用缓存。管理 session、配对码和执行凭据不要放入 URL。
+浏览器请求同时校验 loopback Host 和 Origin 的端口，不开放跨域 CORS；响应禁用缓存。管理 session 和执行凭据不要放入 URL。
 
 ## MCP
 

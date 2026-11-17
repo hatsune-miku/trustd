@@ -51,7 +51,7 @@ pub struct TokenAuthorization {
     pub expires_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TokenRecord {
     pub id: String,
     pub issued_at: i64,

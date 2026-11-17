@@ -1,4 +1,4 @@
-//! Eager installation of both identities. Establishing trust remains a UI action.
+//! Eager installation of both identities, paired by the installer itself.
 use std::{
     io::Read,
     net::SocketAddr,
@@ -42,15 +42,18 @@ pub fn install(system_path: PathBuf, user_path: Option<PathBuf>, system_only: bo
     owner
         .setup(user_path.as_deref(), system.bind, false)
         .context("user configuration preparation failed; services were not installed")?;
+    // Root approval already proves one owner controls both daemons; each daemon
+    // adopts its staged half of the pairing when it starts.
+    let pairing = owner
+        .pair(user_path.as_deref(), system.bind)
+        .context("daemon pairing could not be prepared; services were not installed")?;
+    localshelld::pairing::provision(&system_path, &pairing)?;
     super::install_system(system_path)?;
     wait_healthy(system.bind, "privileged", Duration::from_secs(30))?;
     owner.setup(user_path.as_deref(), system.bind, true).context(
         "system service is running, but user installation/startup failed; fix the reported error and rerun install (existing configuration is preserved)",
     )?;
-    println!(
-        "Both daemons are running. Existing trust was preserved; no new pairing was created automatically.\nIf not already paired, generate a code in the user management page, then complete pairing at http://localhost:{}/ under Desktop authorization before using the agent.",
-        system.bind.port()
-    );
+    println!("Both daemons are running and paired. Manage them at the user management page.");
     Ok(())
 }
 
@@ -93,11 +96,30 @@ pub fn setup_user(path: Option<PathBuf>, system: Option<SocketAddr>, start: bool
         wait_healthy(config.bind, "user", Duration::from_secs(30))?;
         super::user_service::verify_running(&path)?;
         println!(
-            "User management is ready at http://localhost:{}/. If not already paired, open Desktop authorization to create a pairing code.",
+            "User management is ready at http://localhost:{}/.",
             config.bind.port()
         );
     }
     Ok(())
+}
+
+/// User half of installation pairing; returns the pairing the privileged
+/// daemon adopts (this user's key and endpoint).
+pub fn pair_user(
+    path: Option<PathBuf>,
+    system: SocketAddr,
+) -> Result<localshelld::pairing::Pairing> {
+    let path = path.map_or_else(user_config_path, Ok)?;
+    let config = prepare_user_config(&path, Some(system), |path| {
+        bail!(
+            "user configuration {} is missing; run the user installation step first",
+            path.display()
+        )
+    })?;
+    Ok(localshelld::pairing::Pairing {
+        key: localshelld::pairing::ensure_user(&path, system)?,
+        peer: config.bind,
+    })
 }
 
 fn prepare_user_config(
@@ -259,6 +281,39 @@ impl LoginOwner {
                 .context("failed to run user installation step")?;
             ensure!(status.success(), "user installation step failed ({status})");
             Ok(())
+        }
+    }
+
+    fn pair(
+        &self,
+        path: Option<&Path>,
+        system: SocketAddr,
+    ) -> Result<localshelld::pairing::Pairing> {
+        #[cfg(windows)]
+        {
+            pair_user(path.map(Path::to_owned), system)
+        }
+        #[cfg(unix)]
+        {
+            let mut command = owner_command(self.uid, &std::env::current_exe()?);
+            command
+                .arg("pair-user")
+                .arg("--privileged-daemon")
+                .arg(system.to_string());
+            if let Some(path) = path {
+                command.arg("--config").arg(path);
+            }
+            // The key travels over this pipe, never through process arguments.
+            let output = command
+                .stderr(std::process::Stdio::inherit())
+                .output()
+                .context("failed to run the user pairing step")?;
+            ensure!(
+                output.status.success(),
+                "user pairing step failed ({})",
+                output.status
+            );
+            Ok(serde_json::from_slice(&output.stdout)?)
         }
     }
 
@@ -430,6 +485,32 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn user_pairing_step_requires_configuration_and_keeps_its_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("user.toml");
+        let system: SocketAddr = "127.0.0.1:32119".parse().unwrap();
+        assert!(pair_user(Some(path.clone()), system).is_err());
+        assert!(!localshelld::pairing::provision_path(&path).exists());
+        Config {
+            password_hash: localshelld::auth::hash_password(b"test").unwrap(),
+            bind: "127.0.0.1:32120".parse().unwrap(),
+            privileged_daemon: system,
+            ..Config::default()
+        }
+        .save(&path)
+        .unwrap();
+        let pairing = pair_user(Some(path.clone()), system).unwrap();
+        assert_eq!(pairing.peer, "127.0.0.1:32120".parse().unwrap());
+        assert!(localshelld::pairing::provision_path(&path).exists());
+        assert_eq!(
+            pair_user(Some(path.clone()), system).unwrap().key,
+            pairing.key
+        );
+        // A user configuration bound to another system daemon is never repointed.
+        assert!(pair_user(Some(path), "127.0.0.1:42119".parse().unwrap()).is_err());
     }
 
     #[test]

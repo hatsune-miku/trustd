@@ -166,7 +166,7 @@ async fn active_installation_cannot_be_closed_or_started_twice() {
 
 #[test]
 fn plan_never_accepts_arbitrary_programs_or_installation_targets() {
-    let value = json!({"protocol":2,"operation":"install","binary_hash":"a".repeat(64),"binaries":{},"password_hash":null,"owner":"fixture","user_config":"user.toml","system_bind":"127.0.0.1:32119"});
+    let value = json!({"protocol":3,"operation":"install","binary_hash":"a".repeat(64),"binaries":{},"password_hash":null,"owner":"fixture","user_config":"user.toml","system_bind":"127.0.0.1:32119","pairing":{"key":"fixture-key","peer":"127.0.0.1:32120"}});
     assert!(serde_json::from_value::<Plan>(value.clone()).is_ok());
     for key in ["command", "program", "system_config", "download_url"] {
         let mut malicious = value.clone();

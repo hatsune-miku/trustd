@@ -8,7 +8,13 @@ export type Settings = {
   desktop_available: boolean
   passkey_origin: string
 }
-export type SessionRecord = { id: string; issued_at: number; expires_at: number | null; revoked: boolean }
+export type SessionRecord = {
+  id: string
+  issued_at: number
+  expires_at: number | null
+  revoked: boolean
+  daemon?: 'user' | 'privileged'
+}
 export type AgentPolicy = 'once' | 'trust' | 'ask' | 'deny'
 export type Agent = {
   id: string

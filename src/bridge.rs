@@ -74,6 +74,17 @@ pub enum Request {
     SessionEnvironment {
         handle: String,
     },
+    /// The single management page lists and revokes root/Administrator tokens.
+    SessionsList,
+    SessionRevoke {
+        id: String,
+    },
+    /// The single management page reads root/Administrator records here.
+    LogsPage {
+        kind: crate::logs::Kind,
+        before: Option<u64>,
+        limit: usize,
+    },
     Attach {
         handle: String,
     },
@@ -141,9 +152,9 @@ pub fn generate_key() -> String {
 fn cipher(key: &str) -> Result<Aes256Gcm, ApiError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(key)
-        .map_err(|_| ApiError::bad_request("invalid pairing code"))?;
+        .map_err(|_| ApiError::bad_request("invalid pairing key"))?;
     Aes256Gcm::new_from_slice(&bytes)
-        .map_err(|_| ApiError::bad_request("pairing code must contain 32 random bytes"))
+        .map_err(|_| ApiError::bad_request("pairing key must contain 32 random bytes"))
 }
 
 pub fn validate_key(key: &str) -> Result<(), ApiError> {
@@ -369,6 +380,32 @@ async fn dispatch(state: &AppState, request: Request) -> Result<Value, ApiError>
         (DaemonMode::Privileged, Request::SessionEnvironment { handle }) => {
             serde_json::to_value(state.session_environment(&handle).await?)
                 .map_err(|_| ApiError::internal("environment serialization failed"))
+        }
+        (DaemonMode::Privileged, Request::SessionsList) => {
+            Ok(json!(state.auth.lock().await.list()))
+        }
+        (DaemonMode::Privileged, Request::SessionRevoke { id }) => {
+            Box::pin(state.revoke_token_id(&id)).await?;
+            Ok(json!({"revoked":true}))
+        }
+        (
+            DaemonMode::Privileged,
+            Request::LogsPage {
+                kind,
+                before,
+                limit,
+            },
+        ) => {
+            if !(1..=100).contains(&limit) {
+                return Err(ApiError::bad_request(
+                    "log page limit must be between 1 and 100",
+                ));
+            }
+            state
+                .logs
+                .page(kind, before, limit)
+                .await
+                .map_err(|_| ApiError::internal("could not read privileged log"))
         }
         (DaemonMode::User, Request::Attach { handle }) => {
             let entered = state.attach_remote(&handle).await?;

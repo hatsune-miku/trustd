@@ -14,6 +14,7 @@ pub(crate) mod logs;
 pub(crate) mod management;
 pub mod mcp;
 mod mcp_text;
+pub mod pairing;
 pub mod paths;
 mod peer;
 pub mod process;

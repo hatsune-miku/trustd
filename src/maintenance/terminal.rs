@@ -264,17 +264,14 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     }
     let user = localshelld::config::Config::load(&state.user_config)?;
     terminal.say(&format!(
-        "系统和用户服务已启动。\n用户管理：http://localhost:{}/\n系统管理：http://localhost:{}/",
-        user.bind.port(),
-        user.privileged_daemon.port()
+        "系统和用户服务已启动并已自动配对。\n管理页：http://localhost:{}/",
+        user.bind.port()
     ))?;
-    terminal.say("首次安装或重新初始化后需在管理页完成配对，已有配对可继续使用。")?;
     // This optional, read-only step runs after successful service installation.
     // EOF here must not report that the already completed installation failed.
     if let Err(error) = ssh::guide(
         &mut terminal,
         user.bind,
-        user.privileged_daemon,
         std::env::var("SSH_CONNECTION").ok().as_deref(),
         std::env::var("USER").ok().as_deref(),
     ) {
@@ -352,7 +349,6 @@ mod tests {
         ssh::guide(
             &mut Terminal::open().unwrap(),
             "127.0.0.1:32120".parse().unwrap(),
-            "127.0.0.1:32119".parse().unwrap(),
             Some("192.0.2.10 54321 192.0.2.20 2222"),
             Some("miku"),
         )

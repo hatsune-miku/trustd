@@ -62,12 +62,12 @@ fn suggestion(connection: Option<&str>, user: Option<&str>) -> Option<(String, u
     Some((host, port(server_port)?))
 }
 
-fn command(target: &str, port: Option<u16>, user: SocketAddr, system: SocketAddr) -> String {
+/// Only the user daemon serves a management page; the paired privileged daemon
+/// is managed through it, so a single forwarded port is enough.
+fn command(target: &str, port: Option<u16>, user: SocketAddr) -> String {
     let mut command = String::from("ssh -N -o ExitOnForwardFailure=yes");
-    for endpoint in [system, user] {
-        // SocketAddr formats IPv6 with brackets for OpenSSH's -L syntax.
-        command.push_str(&format!(" -L '127.0.0.1:{}:{endpoint}'", endpoint.port()));
-    }
+    // SocketAddr formats IPv6 with brackets for OpenSSH's -L syntax.
+    command.push_str(&format!(" -L '127.0.0.1:{}:{user}'", user.port()));
     if let Some(port) = port {
         command.push_str(&format!(" -p {port}"));
     }
@@ -78,7 +78,6 @@ fn command(target: &str, port: Option<u16>, user: SocketAddr, system: SocketAddr
 pub(super) fn guide(
     prompts: &mut impl Prompts,
     user: SocketAddr,
-    system: SocketAddr,
     connection: Option<&str>,
     login: Option<&str>,
 ) -> Result<()> {
@@ -137,15 +136,8 @@ pub(super) fn guide(
         prompts.say("请输入 1–65535 之间的端口。")?;
     };
     prompts.say("在有浏览器的电脑上新开终端运行：")?;
-    prompts.say(&command(&target, selected_port, user, system))?;
-    prompts.say(&format!(
-        "用户管理：http://localhost:{}/\n系统管理：http://localhost:{}/",
-        user.port(),
-        system.port()
-    ))?;
-    prompts.say(&format!(
-        "首次配对：在用户管理页生成配对码，在系统管理页填写 {user} 与配对码。已有配对无需重建。"
-    ))?;
+    prompts.say(&command(&target, selected_port, user))?;
+    prompts.say(&format!("管理页：http://localhost:{}/", user.port()))?;
     prompts.say("保持 SSH 终端开启，按 Ctrl+C 关闭转发。管理页仍使用服务器的主密码登录。")?;
     prompts.say("若端口被占用，请换一台电脑，或手动停止占用端口的本机服务后重试；目前不支持更换本地转发端口。")?;
     Ok(())
@@ -167,7 +159,6 @@ mod tests {
         guide(
             &mut prompts,
             "127.0.0.1:32120".parse()?,
-            "127.0.0.1:32119".parse()?,
             connection,
             Some("miku"),
         )?;
@@ -178,9 +169,12 @@ mod tests {
     #[test]
     fn ssh_session_prefills_server_not_client_and_uses_actual_ports() {
         let output = run(&["", "", ""], Some(CONNECTION)).unwrap();
-        assert!(output.contains("ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:32119:127.0.0.1:32119' -L '127.0.0.1:32120:127.0.0.1:32120' -p 2222 'miku@192.0.2.20'"));
+        assert!(output.contains(
+            "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:32120:127.0.0.1:32120' -p 2222 'miku@192.0.2.20'"
+        ));
         assert!(!output.contains("192.0.2.10"));
-        assert!(output.contains("系统管理页填写 127.0.0.1:32120"));
+        assert!(!output.contains("32119"));
+        assert!(output.contains("管理页：http://localhost:32120/"));
         assert!(output.contains("目前不支持更换本地转发端口"));
     }
 
@@ -249,13 +243,8 @@ mod tests {
             Some((target.clone(), 22))
         );
         assert_eq!(
-            command(
-                &target,
-                None,
-                "[::1]:41020".parse().unwrap(),
-                "127.0.0.2:41019".parse().unwrap()
-            ),
-            "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:41019:127.0.0.2:41019' -L '127.0.0.1:41020:[::1]:41020' 'miku@2001:db8::20'"
+            command(&target, None, "[::1]:41020".parse().unwrap()),
+            "ssh -N -o ExitOnForwardFailure=yes -L '127.0.0.1:41020:[::1]:41020' 'miku@2001:db8::20'"
         );
     }
 }

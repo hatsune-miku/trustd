@@ -449,9 +449,7 @@ export function Maintenance({ token }: { token: string }) {
                         打开系统管理
                       </a>
                     </div>
-                    <p className="maintenance-note">
-                      首次安装或重新初始化后，在用户管理的桌面授权中生成配对码，再到系统管理完成配对。已有配对可继续使用。
-                    </p>
+                    <p className="maintenance-note">安装会自动配对用户进程与系统进程，已有配对会保留，不需要配对码。</p>
                     <p className="maintenance-note">
                       {info.platform === 'windows'
                         ? '开始菜单'

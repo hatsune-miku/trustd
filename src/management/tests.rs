@@ -576,3 +576,163 @@ async fn rejects_foreign_browser_origins_and_dns_rebinding_hosts() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test]
+async fn paired_privileged_daemon_is_managed_only_through_the_user_daemon() {
+    let root_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let user_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root_address = root_listener.local_addr().unwrap();
+    let user_address = user_listener.local_addr().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let hash = auth::hash_password(b"test").unwrap();
+    let root_config = Config {
+        password_hash: hash.clone(),
+        bind: root_address,
+        ..Config::default()
+    };
+    let user_config = Config {
+        password_hash: hash.clone(),
+        bind: user_address,
+        privileged_daemon: root_address,
+        ..Config::default()
+    };
+    let root_path = directory.path().join("root/config.toml");
+    let user_path = directory.path().join("user/config.toml");
+    root_config.save(&root_path).unwrap();
+    user_config.save(&user_path).unwrap();
+    // Pair exactly as the installer does: each daemon adopts its staged half.
+    let key = crate::pairing::ensure_user(&user_path, root_address).unwrap();
+    crate::pairing::provision(
+        &root_path,
+        &crate::pairing::Pairing {
+            key,
+            peer: user_address,
+        },
+    )
+    .unwrap();
+    let root = AppState::new(root_config, AuthManager::new(hash.clone(), None))
+        .with_storage(root_path)
+        .unwrap();
+    let user = AppState::user(user_config, AuthManager::new(hash, None))
+        .unwrap()
+        .with_storage(user_path)
+        .unwrap();
+    let root_app = router(root.clone());
+    let user_app = router(user.clone());
+    let servers = [
+        tokio::spawn({
+            let app = root_app.clone();
+            async move { axum::serve(root_listener, app).await.unwrap() }
+        }),
+        tokio::spawn({
+            let app = user_app.clone();
+            async move { axum::serve(user_listener, app).await.unwrap() }
+        }),
+    ];
+
+    // The privileged daemon has no management surface of its own.
+    let (status, error) = call(
+        &root_app,
+        "/v1/admin/login",
+        Some(json!({"credential":{"type":"password","value":"test"}})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("localhost:{}", user_address.port()))
+    );
+    let index = root_app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        index.headers()["location"],
+        format!("http://localhost:{}/", user_address.port()).as_str()
+    );
+
+    // Manual pairing codes no longer exist.
+    let session = login(&user_app, "test").await;
+    for path in [
+        "/v1/admin/pairing/new",
+        "/v1/admin/pairing/connect",
+        "/v1/admin/pairing/remove",
+    ] {
+        assert_eq!(
+            call(&user_app, path, Some(json!({})), Some(&session))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    // Root records and tokens are reachable from the single management page.
+    root.audit("fixture.privileged", json!({})).await;
+    let (status, page) = call(
+        &user_app,
+        "/v1/admin/logs?kind=audit&daemon=privileged",
+        None,
+        Some(&session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let has_fixture = |page: &Value| {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["event"] == "fixture.privileged")
+    };
+    assert!(has_fixture(&page));
+    let (_, local) = call(&user_app, "/v1/admin/logs?kind=audit", None, Some(&session)).await;
+    assert!(!has_fixture(&local));
+    root.auth.lock().await.issue_token(None).unwrap();
+    let id = root.auth.lock().await.list()[0].id.clone();
+    let (status, listed) = call(
+        &user_app,
+        "/v1/admin/sessions/list",
+        Some(json!({})),
+        Some(&session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let record = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(record["daemon"], "privileged");
+    let (status, revoked) = call(
+        &user_app,
+        "/v1/admin/sessions/revoke",
+        Some(json!({"id":id,"daemon":"privileged"})),
+        Some(&session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert!(root.auth.lock().await.list()[0].revoked);
+
+    for server in servers {
+        server.abort();
+    }
+    root.shutdown().await;
+    user.shutdown().await;
+}
+
+#[tokio::test]
+async fn unpaired_privileged_daemon_keeps_its_own_management_page() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = router(stored_state(directory.path()));
+    login(&app, "test").await;
+    let index = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+}

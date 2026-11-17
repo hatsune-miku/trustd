@@ -3,12 +3,13 @@ import { useEffect, useState } from 'react'
 import { Button } from '@a1knla/cakeui'
 
 import { Feedback } from '../../../Feedback'
-import { api } from '../../../api'
+import { type Settings, api } from '../../../api'
 import { useAction } from '../../../useAction'
 
 import './index.scss'
 
 type Kind = 'command' | 'audit'
+type Source = 'user' | 'privileged'
 type Entry = {
   timestamp: string
   event: string
@@ -20,12 +21,16 @@ type Page = { entries: Entry[]; next_before: number | null }
 
 export function Logs({ session }: { session: string }) {
   const [kind, setKind] = useState<Kind>('command')
+  const [source, setSource] = useState<Source>('user')
+  // Root/Administrator records are read through the paired user daemon.
+  const [paired, setPaired] = useState(false)
   const [entries, setEntries] = useState<Entry[]>([])
   const [before, setBefore] = useState<number | null>(null)
   const action = useAction()
 
   async function load(older = false) {
     const query = new URLSearchParams({ kind })
+    if (source === 'privileged') query.set('daemon', 'privileged')
     if (older && before !== null) query.set('before', String(before))
     const page = await api<Page>(`/v1/admin/logs?${query}`, undefined, session)
     setEntries((current) => (older ? [...current, ...page.entries] : page.entries))
@@ -33,10 +38,16 @@ export function Logs({ session }: { session: string }) {
   }
 
   useEffect(() => {
+    void api<Settings>('/v1/admin/settings', undefined, session)
+      .then((settings) => setPaired(settings.daemon === 'user' && Boolean(settings.paired_peer)))
+      .catch(() => setPaired(false))
+  }, [session])
+
+  useEffect(() => {
     setEntries([])
     setBefore(null)
     void action.run(() => load())
-  }, [session, kind])
+  }, [session, kind, source])
 
   return (
     <section className="logs-view">
@@ -64,6 +75,26 @@ export function Logs({ session }: { session: string }) {
           </Button>
         ))}
       </div>
+      {paired && (
+        <div className="logs-kinds" aria-label="日志来源">
+          {(
+            [
+              ['user', '当前用户'],
+              ['privileged', '管理员 / root'],
+            ] as const
+          ).map(([value, label]) => (
+            <Button
+              key={value}
+              variant={source === value ? 'primary' : 'ghost'}
+              aria-pressed={source === value}
+              disabled={action.busy}
+              onClick={() => setSource(value)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+      )}
       <Feedback {...action} />
       {!entries.length && !action.busy && <p className="empty-state">暂无日志。</p>}
       <div className="logs-entries">

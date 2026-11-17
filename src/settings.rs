@@ -54,7 +54,9 @@ impl Settings {
     }
 
     pub fn load(path: PathBuf, config: Config) -> anyhow::Result<Self> {
-        let saved: SavedSettings = storage::load_json(&path.with_extension("authorization.json"))?;
+        let mut saved: SavedSettings =
+            storage::load_json(&path.with_extension("authorization.json"))?;
+        crate::pairing::adopt(&path, &mut saved)?;
         let key_path = crate::config::seal_key_path(&path);
         if (!saved.secrets.is_empty() || saved.sync.is_some() || saved.telegram.is_some())
             && !key_path.exists()

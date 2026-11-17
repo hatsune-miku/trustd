@@ -46,7 +46,7 @@ fn read_plan(path: &Path, digest: &str) -> Result<Plan> {
         "installation plan changed or exceeds the size limit"
     );
     let plan: Plan = serde_json::from_slice(&bytes)?;
-    ensure!(plan.protocol == 2, "unsupported installation plan");
+    ensure!(plan.protocol == 3, "unsupported installation plan");
     ensure!(
         plan.system_bind.ip().is_loopback() && plan.system_bind.port() != 0,
         "invalid system endpoint"
@@ -200,6 +200,14 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
             }
         }
         verify_preserved_state(backup, &paths.config)?;
+        if let Some(pairing) = &plan.pairing {
+            localshelld::pairing::provision(&paths.config, pairing)?;
+            protect(
+                &localshelld::pairing::provision_path(&paths.config),
+                false,
+                false,
+            )?;
+        }
         super::super::install_system_at(&system_executable, &paths.config)?;
         super::super::installation::wait_healthy_version(
             config.bind,

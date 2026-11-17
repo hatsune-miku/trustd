@@ -175,12 +175,25 @@ def main():
     root_port, user_port = port(), port()
     while user_port == root_port:
         user_port = port()
+    root_url, user_url = f"http://127.0.0.1:{root_port}", f"http://127.0.0.1:{user_port}"
     processes = []
     clients = []
     with tempfile.TemporaryDirectory(prefix="localshelld-dual-") as directory:
         temp = Path(directory)
         password = "localshelld CI test password"
         credential = {"type": "password", "value": password}
+        configs = {}
+
+        def start(user):
+            listen = user_port if user else root_port
+            prefix = [] if user else ["sudo", "-n", "--"]
+            daemon = binary.with_name("trustd-user-headless" if user else "trustd-root")
+            process = subprocess.Popen([*prefix, str(daemon), "--config", str(configs[user])],
+                                       start_new_session=True, stdout=subprocess.DEVNULL)
+            processes.append((process, not user))
+            health = wait_ready(f"http://127.0.0.1:{listen}", process)
+            assert health["daemon"] == ("user" if user else "privileged")
+
         try:
             for user, listen in [(False, root_port), (True, user_port)]:
                 config = temp / ("user" if user else "root") / "config.toml"
@@ -191,15 +204,10 @@ def main():
                     f'bind = "127.0.0.1:{32120 if user else 32119}"', f'bind = "127.0.0.1:{listen}"'
                 ).replace('privileged_daemon = "127.0.0.1:32119"', f'privileged_daemon = "127.0.0.1:{root_port}"')
                 config.write_text(text)
-                prefix = [] if user else ["sudo", "-n", "--"]
-                daemon = binary.with_name("trustd-user-headless" if user else "trustd-root")
-                process = subprocess.Popen([*prefix, str(daemon), "--config", str(config)],
-                                           start_new_session=True, stdout=subprocess.DEVNULL)
-                processes.append((process, not user))
-                health = wait_ready(f"http://127.0.0.1:{listen}", process)
-                assert health["daemon"] == ("user" if user else "privileged")
-            root_url, user_url = f"http://127.0.0.1:{root_port}", f"http://127.0.0.1:{user_port}"
-            root_session = request(root_url, "/v1/admin/login", {"credential": credential})["session"]
+                configs[user] = config
+                start(user)
+            # An unpaired privileged daemon still has its own management page.
+            request(root_url, "/v1/admin/login", {"credential": credential})
             user_session = request(user_url, "/v1/admin/login", {"credential": credential})["session"]
             local = Agent(binary, temp / "local agent", f"127.0.0.1:{user_port}", user_url, user_session)
             clients.append(local)
@@ -209,17 +217,42 @@ def main():
             rejected = local.run(True)
             assert "error" in rejected or rejected.get("result", {}).get("isError"), rejected
             local.call("destroy")
-            # Pair only through authenticated human management.
-            pairing = request(user_url, "/v1/admin/pairing/new", {}, user_session)
-            request(root_url, "/v1/admin/pairing/connect", {
-                "code": pairing["code"], "user_daemon": f"127.0.0.1:{user_port}"
-            }, root_session)
-            for label, endpoint, base, session in [
-                ("paired user", f"127.0.0.1:{user_port}", user_url, user_session),
-                ("paired root", f"127.0.0.1:{root_port}", root_url, root_session),
+            local.close()
+            clients.remove(local)
+
+            # Pair exactly as the installer does: the login user stages its half
+            # and prints the key; root stages the other half; both adopt it at start.
+            stop_processes(processes)
+            processes.clear()
+            pairing = subprocess.run(
+                [str(binary), "pair-user", "--config", str(configs[True]),
+                 "--privileged-daemon", f"127.0.0.1:{root_port}"],
+                stdout=subprocess.PIPE, text=True, check=True,
+            ).stdout
+            assert json.loads(pairing)["peer"] == f"127.0.0.1:{user_port}"
+            subprocess.run(["sudo", "-n", "--", str(binary), "pair-system", "--config", str(configs[False])],
+                           input=pairing, text=True, check=True)
+            for user in (False, True):
+                start(user)
+                assert not configs[user].with_suffix(".pairing.json").exists()
+            user_session = request(user_url, "/v1/admin/login", {"credential": credential})["session"]
+            # The paired privileged daemon is managed only through the user daemon.
+            try:
+                request(root_url, "/v1/admin/login", {"credential": credential})
+                raise AssertionError("paired privileged daemon accepted a management login")
+            except urllib.error.HTTPError as error:
+                assert error.code == 409, error.code
+
+            def privileged_sessions():
+                records = request(user_url, "/v1/admin/sessions/list", {}, user_session)
+                return [r for r in records if r["daemon"] == "privileged"]
+
+            for label, endpoint in [
+                ("paired user", f"127.0.0.1:{user_port}"),
+                ("paired root", f"127.0.0.1:{root_port}"),
             ]:
-                previous = {r["id"] for r in request(root_url, "/v1/admin/sessions/list", {}, root_session)}
-                client = Agent(binary, temp / label, endpoint, base, session)
+                previous = {r["id"] for r in privileged_sessions()}
+                client = Agent(binary, temp / label, endpoint, user_url, user_session)
                 clients.append(client)
                 assert client.enter(sudo=True)["sudo_available"]
                 listing = request(user_url, "/v1/admin/agents", session=user_session)["agents"]
@@ -227,13 +260,14 @@ def main():
                 for sudo, uid in [(False, os.geteuid()), (True, 0)]:
                     result = client.run(sudo)
                     assert result["success"] and int(result["stdout"].strip()) == uid, result
-                records = request(root_url, "/v1/admin/sessions/list", {}, root_session)
-                created = [r for r in records if r["id"] not in previous]
+                created = [r for r in privileged_sessions() if r["id"] not in previous]
                 assert len(created) == 1, created
-                request(root_url, "/v1/admin/sessions/revoke", {"id": created[0]["id"]}, root_session)
+                request(user_url, "/v1/admin/sessions/revoke",
+                        {"id": created[0]["id"], "daemon": "privileged"}, user_session)
                 rejected = client.run(False)
                 assert "error" in rejected or rejected.get("result", {}).get("isError"), rejected
-            rejected = subprocess.run(["sudo", "-n", "--", str(binary.with_name("trustd-user-headless")), "--config", str(config)],
+            rejected = subprocess.run(["sudo", "-n", "--", str(binary.with_name("trustd-user-headless")),
+                                       "--config", str(configs[True])],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
             assert rejected.returncode != 0 and "non-elevated" in rejected.stderr
             print("Dual daemon identities verified: sudo=false is current user; sudo=true is root.")

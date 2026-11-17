@@ -1,6 +1,6 @@
 //! Human-facing management sessions and credential enrollment. Execution tokens
 //! cannot authenticate here; WebAuthn challenge state never leaves the server.
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use axum::{
     Json, Router,
@@ -19,7 +19,7 @@ use crate::{
     bridge,
     config::{load_or_create_seal_key, seal, seal_key_path},
     server::{ApiError, AppState, DaemonMode, strong_handle},
-    settings::{Pairing, StoredPasskey},
+    settings::StoredPasskey,
 };
 
 const SESSION_SECONDS: i64 = 600;
@@ -96,6 +96,7 @@ fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 async fn owner(state: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+    managed_by_user_daemon(state).await?;
     let bearer = bearer(headers)?;
     let mut management = state.management.lock().await;
     management.prune();
@@ -149,13 +150,43 @@ pub fn routes(state: AppState) -> Router<AppState> {
             post(authenticate_finish),
         )
         .route("/v1/admin/passkeys/remove", post(passkey_remove))
-        .route("/v1/admin/pairing/new", post(pairing_new))
-        .route("/v1/admin/pairing/connect", post(pairing_connect))
-        .route("/v1/admin/pairing/remove", post(pairing_remove))
         .route("/v1/admin/agents", get(agents))
         .route("/v1/admin/agents/policy", post(agent_policy))
         .route("/v1/admin/logs", get(logs))
-        .route_layer(axum::middleware::from_fn_with_state(state, audit_request))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_request,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            reject_paired_privileged,
+        ))
+}
+
+/// A paired privileged daemon has no management surface of its own: the single
+/// management page at the user daemon reaches it over the bridge.
+async fn managed_by_user_daemon(state: &AppState) -> Result<(), ApiError> {
+    if state.mode != DaemonMode::Privileged {
+        return Ok(());
+    }
+    match state.settings.lock().await.saved.pairing.as_ref() {
+        Some(pairing) => Err(ApiError::conflict(format!(
+            "this daemon is managed from the user management page at http://localhost:{}/",
+            pairing.peer.port()
+        ))),
+        None => Ok(()),
+    }
+}
+
+async fn reject_paired_privileged(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match managed_by_user_daemon(&state).await {
+        Ok(()) => next.run(request).await,
+        Err(error) => axum::response::IntoResponse::into_response(error),
+    }
 }
 
 async fn audit_request(
@@ -180,6 +211,9 @@ struct LogQuery {
     kind: crate::logs::Kind,
     before: Option<u64>,
     limit: Option<usize>,
+    /// `privileged` reads the paired root/Administrator daemon's records.
+    #[serde(default)]
+    daemon: Option<DaemonMode>,
 }
 
 async fn logs(
@@ -193,6 +227,22 @@ async fn logs(
         return Err(ApiError::bad_request(
             "log page limit must be between 1 and 100",
         ));
+    }
+    if query.daemon == Some(DaemonMode::Privileged) && state.mode == DaemonMode::User {
+        let pairing = state.pairing().await?;
+        return bridge::call(
+            &pairing,
+            DaemonMode::Privileged,
+            bridge::Request::LogsPage {
+                kind: query.kind,
+                before: query.before,
+                limit,
+            },
+            Some(Duration::from_secs(15)),
+            4 * 1024 * 1024,
+        )
+        .await
+        .map(Json);
     }
     state
         .logs
@@ -606,83 +656,6 @@ async fn passkey_remove(
     next.passkeys.retain(|key| key.id != body.id);
     settings.save(next).await?;
     Ok(Json(json!({"removed":true})))
-}
-
-async fn pairing_new(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    owner(&state, &headers).await?;
-    if state.mode != DaemonMode::User {
-        return Err(ApiError::bad_request(
-            "generate the pairing code in the user daemon management UI",
-        ));
-    }
-    let key = bridge::generate_key();
-    let mut settings = state.settings.lock().await;
-    let mut next = settings.saved.clone();
-    next.pairing = Some(Pairing {
-        key: key.clone(),
-        peer: state.config.privileged_daemon,
-    });
-    settings.save(next).await?;
-    Ok(Json(
-        json!({"code":key,"user_daemon":state.config.bind.to_string()}),
-    ))
-}
-
-#[derive(Deserialize)]
-struct Connect {
-    code: String,
-    user_daemon: SocketAddr,
-}
-
-async fn pairing_connect(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<Connect>,
-) -> Result<Json<Value>, ApiError> {
-    owner(&state, &headers).await?;
-    if state.mode != DaemonMode::Privileged {
-        return Err(ApiError::bad_request(
-            "complete pairing in the privileged daemon management UI",
-        ));
-    }
-    bridge::validate_key(&body.code)?;
-    let pairing = Pairing {
-        key: body.code,
-        peer: body.user_daemon,
-    };
-    let status: Value = bridge::call(
-        &pairing,
-        DaemonMode::User,
-        bridge::Request::Ping,
-        Some(Duration::from_secs(5)),
-        65_536,
-    )
-    .await?;
-    if status["daemon"] != "user" {
-        return Err(ApiError::bad_request("peer is not the user daemon"));
-    }
-    let mut settings = state.settings.lock().await;
-    let mut next = settings.saved.clone();
-    next.pairing = Some(pairing);
-    settings.save(next).await?;
-    Ok(Json(
-        json!({"paired":true,"desktop_available":status["desktop_available"]}),
-    ))
-}
-
-async fn pairing_remove(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    owner(&state, &headers).await?;
-    let mut settings = state.settings.lock().await;
-    let mut next = settings.saved.clone();
-    next.pairing = None;
-    settings.save(next).await?;
-    Ok(Json(json!({"paired":false})))
 }
 
 async fn agents(

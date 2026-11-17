@@ -89,7 +89,7 @@ impl Session {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonMode {
     User,
@@ -253,7 +253,7 @@ impl AppState {
 
     pub(crate) async fn pairing(&self) -> Result<Pairing, ApiError> {
         self.settings.lock().await.saved.pairing.clone().ok_or_else(|| ApiError::unavailable(
-            "desktop daemon is not paired; pair the user and privileged daemons in the management UI (or use the user daemon at port 32120 for current-user execution)"
+            "the user and privileged daemons are not paired; rerun installation (repair) to pair them automatically, or use the user daemon at port 32120 for current-user execution"
         ))
     }
 
@@ -1323,6 +1323,9 @@ struct AdminListBody {
 struct AdminRevokeBody {
     credential: Option<Credential>,
     id: String,
+    /// `privileged` revokes a token of the paired root/Administrator daemon.
+    #[serde(default)]
+    daemon: Option<DaemonMode>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -1330,7 +1333,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::management::routes(state.clone()))
         .merge(crate::api::routes())
         .merge(crate::remote::routes())
-        .route("/", get(crate::assets::serve))
+        .route("/", get(index))
         .route("/health", get(health))
         // AEAD/base64 expands a valid public JSON request beyond 2 MiB.
         .route(
@@ -1440,13 +1443,56 @@ async fn watch(
     Ok(Json(serde_json::json!({"valid": true})))
 }
 
+/// A paired privileged daemon has no management page of its own; send the owner
+/// to the single management page at the user daemon.
+async fn index(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if state.mode == DaemonMode::Privileged
+        && let Some(pairing) = state.settings.lock().await.saved.pairing.clone()
+    {
+        return axum::response::IntoResponse::into_response(axum::response::Redirect::temporary(
+            &format!("http://localhost:{}/", pairing.peer.port()),
+        ));
+    }
+    crate::assets::serve(uri).await
+}
+
+fn tagged(records: Vec<TokenRecord>, daemon: DaemonMode) -> Vec<serde_json::Value> {
+    records
+        .into_iter()
+        .map(|record| {
+            let mut value = serde_json::to_value(record).unwrap_or_default();
+            value["daemon"] = serde_json::json!(daemon);
+            value
+        })
+        .collect()
+}
+
 async fn list_tokens(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
     Json(body): Json<AdminListBody>,
-) -> Result<Json<Vec<TokenRecord>>, ApiError> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     crate::management::authorize(&state, &headers, body.credential.as_ref()).await?;
-    let records = state.auth.lock().await.list();
+    let mut records = tagged(state.auth.lock().await.list(), state.mode);
+    // The single management page also lists the paired privileged daemon's
+    // tokens. An unreachable privileged daemon must not hide local sessions.
+    if body.credential.is_none()
+        && state.mode == DaemonMode::User
+        && let Ok(pairing) = state.pairing().await
+        && let Ok(privileged) = bridge::call::<Vec<TokenRecord>>(
+            &pairing,
+            DaemonMode::Privileged,
+            bridge::Request::SessionsList,
+            Some(Duration::from_secs(15)),
+            1024 * 1024,
+        )
+        .await
+    {
+        records.extend(tagged(privileged, DaemonMode::Privileged));
+    }
     Ok(Json(records))
 }
 
@@ -1456,9 +1502,39 @@ async fn admin_revoke(
     Json(body): Json<AdminRevokeBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::management::authorize(&state, &headers, body.credential.as_ref()).await?;
-    state.auth.lock().await.revoke(&body.id)?;
-    state.destroy_sessions_for_token(&body.id).await;
+    if body.daemon == Some(DaemonMode::Privileged) && state.mode == DaemonMode::User {
+        if body.credential.is_some() {
+            return Err(ApiError::forbidden(
+                "privileged sessions are revoked from the management page",
+            ));
+        }
+        let pairing = state.pairing().await?;
+        return bridge::call(
+            &pairing,
+            DaemonMode::Privileged,
+            bridge::Request::SessionRevoke { id: body.id },
+            Some(Duration::from_secs(15)),
+            65_536,
+        )
+        .await
+        .map(Json);
+    }
+    state.revoke_token_id(&body.id).await?;
     Ok(Json(serde_json::json!({ "revoked": true })))
+}
+
+impl AppState {
+    /// Revoke by token record ID, as listed on the management page.
+    pub(crate) async fn revoke_token_id(&self, id: &str) -> Result<(), ApiError> {
+        self.auth.lock().await.revoke(id)?;
+        self.destroy_sessions_for_token(id).await;
+        self.audit(
+            "authorization.revoked",
+            serde_json::json!({"authorization_id":id}),
+        )
+        .await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,4 @@
-import { type FormEvent, useEffect, useState } from 'react'
-
-import { Button, Field, TextBox } from '@a1knla/cakeui'
+import { useEffect, useState } from 'react'
 
 import { TelegramSettings } from './components/TelegramSettings'
 
@@ -12,116 +10,33 @@ import './index.scss'
 
 export function DesktopSettings({ session }: { session: string }) {
   const [settings, setSettings] = useState<Settings | null>(null)
-  const [code, setCode] = useState('')
-  const [address, setAddress] = useState('127.0.0.1:32120')
   const action = useAction()
-  async function refresh() {
-    setSettings(await api<Settings>('/v1/admin/settings', undefined, session))
-  }
   useEffect(() => {
-    void action.run(refresh)
+    void action.run(async () => setSettings(await api<Settings>('/v1/admin/settings', undefined, session)))
   }, [session])
-  function pair(event: FormEvent) {
-    event.preventDefault()
-    void action.run(async () => {
-      await api('/v1/admin/pairing/connect', { code: code.trim(), user_daemon: address.trim() }, session)
-      setCode('')
-      await refresh()
-    }, '已完成可信配对。32119 的普通命令将由用户进程执行。')
-  }
   return (
     <div className="desktop-settings">
       <h2 className="section-title">桌面授权</h2>
       <p className="description">代理可请求本机弹窗授权。接受、拒绝由用户选择，忽略会等待至 600 秒超时。</p>
       <Feedback {...action} />
       <section className="desktop-section">
-        <h3 className="subsection-title">用户进程配对</h3>
-        {settings?.paired_peer && <p className="description">已配对：{settings.paired_peer}</p>}
-        {settings?.daemon === 'user' ? (
-          <div className="form-stack">
-            {!settings.desktop_available && (
-              <p className="desktop-warning">
-                此用户进程没有图形桌面。请在登录桌面中启动用户 daemon；无头模式无法显示授权弹窗。
-              </p>
-            )}
-            <p className="description">
-              生成配对码后，在管理员入口完成配对。该用户进程将能代表设备所有者确认管理员授权。
-            </p>
-            <div className="form-actions">
-              <Button
-                disabled={action.busy}
-                onClick={() =>
-                  void action.run(async () => {
-                    const result = await api<{ code: string }>('/v1/admin/pairing/new', {}, session)
-                    setCode(result.code)
-                    await refresh()
-                  })
-                }
-              >
-                生成配对码
-              </Button>
-            </div>
-            {code && (
-              <Field htmlFor="generated-pairing" label="配对码">
-                <TextBox id="generated-pairing" value={code} readOnly className="credential-value" />
-              </Field>
-            )}
-            {code && (
-              <Button onClick={() => void action.run(() => navigator.clipboard.writeText(code), '配对码已复制。')}>
-                复制配对码
-              </Button>
-            )}
-            <a className="content-link" href="http://localhost:32119/" target="_blank" rel="noreferrer">
-              打开管理员入口
-            </a>
-          </div>
-        ) : (
-          <form className="form-stack" onSubmit={pair}>
-            <p className="description">
-              先在{' '}
-              <a className="content-link" href="http://localhost:32120/" target="_blank" rel="noreferrer">
-                用户进程管理页
-              </a>{' '}
-              验证身份并生成配对码，再填写到这里。仅与自己信任的桌面进程配对。
-            </p>
-            <Field htmlFor="user-daemon-address" label="用户进程地址">
-              <TextBox
-                id="user-daemon-address"
-                required
-                value={address}
-                onChange={(event) => setAddress(event.currentTarget.value)}
-              />
-            </Field>
-            <Field htmlFor="pairing-code" label="配对码">
-              <TextBox
-                id="pairing-code"
-                required
-                value={code}
-                onChange={(event) => setCode(event.currentTarget.value)}
-              />
-            </Field>
-            <div className="form-actions">
-              <Button type="submit" disabled={action.busy}>
-                {settings?.paired_peer ? '重新配对' : '配对用户进程'}
-              </Button>
-            </div>
-          </form>
+        <h3 className="subsection-title">本机进程配对</h3>
+        {settings?.daemon === 'user' && !settings.desktop_available && (
+          <p className="desktop-warning">
+            此用户进程没有图形桌面。请在登录桌面中启动用户 daemon；无头模式无法显示授权弹窗。
+          </p>
         )}
-        {settings?.paired_peer && (
-          <Button
-            className="disconnect-button"
-            variant="ghost"
-            disabled={action.busy}
-            onClick={() =>
-              void action.run(async () => {
-                await api('/v1/admin/pairing/remove', {}, session)
-                setCode('')
-                await refresh()
-              }, '已取消此进程的配对。')
-            }
-          >
-            取消配对
-          </Button>
+        {settings?.paired_peer ? (
+          <p className="description pairing-status">
+            安装程序已自动完成配对：{settings.paired_peer}。管理员 / root
+            命令的授权也在这里确认，相关记录可在“日志”中切换查看。
+          </p>
+        ) : (
+          settings && (
+            <p className="description pairing-status">
+              尚未配对。以管理员身份重新运行安装（修复）会自动完成配对，已有配置和凭据保持不变。
+            </p>
+          )
         )}
       </section>
       <TelegramSettings session={session} />

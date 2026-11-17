@@ -58,6 +58,8 @@ struct Plan {
     owner: String,
     user_config: PathBuf,
     system_bind: std::net::SocketAddr,
+    /// Key and user daemon endpoint the privileged daemon adopts at startup.
+    pairing: Option<localshelld::pairing::Pairing>,
 }
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -442,8 +444,17 @@ fn execute(
     } else {
         None
     };
+    // Elevation approval already proves one owner controls both daemons, so the
+    // installer pairs them itself; reinstalling keeps a working key.
+    let pairing = match &user {
+        Some(user) if operation == Operation::Install => Some(localshelld::pairing::Pairing {
+            key: localshelld::pairing::ensure_user(&state.user_config, user.privileged_daemon)?,
+            peer: user.bind,
+        }),
+        _ => None,
+    };
     let plan = Plan {
-        protocol: 2,
+        protocol: 3,
         operation,
         binary_hash: state.binary_hash.clone(),
         binaries: state.binaries.clone(),
@@ -454,6 +465,7 @@ fn execute(
             format!("127.0.0.1:{}", localshelld::config::DEFAULT_PORT).parse()?,
             |value| value.privileged_daemon,
         ),
+        pairing,
     };
     let stage = tempfile::Builder::new()
         .prefix("trustd-maintenance-")
