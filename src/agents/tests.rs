@@ -260,24 +260,54 @@ async fn once_is_atomic_persisted_and_not_replayed_after_consumption() {
 
 #[tokio::test]
 async fn all_four_policies_and_unverified_callers_are_distinct_only_to_the_owner() {
+    let directory = tempfile::tempdir().unwrap();
     let (state, calls) = state(Choice::Accept, false);
+    let state = state
+        .with_storage(directory.path().join("config.toml"))
+        .unwrap();
     let agent = current_identity();
-    for (policy, choice, asked) in [
+    for (index, (policy, choice, asked)) in [
         (Policy::Trust, Choice::Accept, 0),
         (Policy::Deny, Choice::Deny, 0),
+        (Policy::Once, Choice::Accept, 0),
         (Policy::Ask, Choice::Accept, 1),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         calls.store(0, Ordering::SeqCst);
         save_policy(&state, &agent, policy).await;
+        let request = prompt();
+        let request_id = request.id.clone();
         assert_eq!(
             state
-                .authorize_agent(prompt(), Some(agent.clone()))
+                .authorize_agent(request, Some(agent.clone()))
                 .await
                 .unwrap()
                 .choice,
             choice
         );
         assert_eq!(calls.load(Ordering::SeqCst), asked);
+        let mut page = state
+            .logs
+            .page(crate::logs::Kind::Audit, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().len(), index + 1);
+        let entry = &mut page["entries"][0];
+        assert!(
+            entry
+                .as_object_mut()
+                .unwrap()
+                .remove("timestamp")
+                .unwrap()
+                .is_string()
+        );
+        assert_eq!(
+            *entry,
+            serde_json::json!({"request_id":request_id,"agent_path":agent.path,
+            "choice":choice,"event":"authorization.decision","daemon":"user"})
+        );
     }
     save_policy(&state, &agent, Policy::Trust).await;
     calls.store(0, Ordering::SeqCst);
@@ -296,7 +326,11 @@ async fn all_four_policies_and_unverified_callers_are_distinct_only_to_the_owner
 
 #[tokio::test]
 async fn remember_accept_adds_path_trust_and_does_not_limit_future_secret_keys() {
+    let directory = tempfile::tempdir().unwrap();
     let (state, calls) = state(Choice::Accept, true);
+    let state = state
+        .with_storage(directory.path().join("config.toml"))
+        .unwrap();
     let agent = current_identity();
     state
         .authorize_agent(prompt(), Some(agent.clone()))
@@ -309,6 +343,20 @@ async fn remember_accept_adds_path_trust_and_does_not_limit_future_secret_keys()
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let page = state
+        .logs
+        .page(crate::logs::Kind::Audit, None, 10)
+        .await
+        .unwrap();
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert_eq!(entry["event"], "authorization.decision");
+        assert_eq!(entry["choice"], serde_json::json!(Choice::Accept));
+        for field in ["source", "policy", "automatic", "remember"] {
+            assert!(entry.get(field).is_none());
+        }
+    }
     assert_eq!(
         state.settings.lock().await.saved.agent_policies[&path_id(&agent.path)].policy,
         Policy::Trust

@@ -110,4 +110,4 @@ HTTP/MCP 使用本机 loopback，配置验证限制 bind 和 daemon 间通信目
 - 输出是分别限额的 stdout/stderr 聚合响应，支持单次 stdin + EOF，不提供实时流、PTY 或后续输入。命令可运行至完成，客户端有独立超时；长任务管理由 harness 负责，不新增任务系统。
 - 各平台服务注册分别指向固定路径的专用 daemon；维护向导从临时目录运行，停止安装目录内的旧实例，再替换并启动完整套件。macOS 使用 `/Library/LaunchDaemons/dev.localshelld.plist`，`bootstrap system` 安装，`bootout` 卸载；配置和 seal key 保留。
 - Windows 使用 Job Object 清理进程树，Unix 清理可追踪后代和原始进程组。主动彻底脱离的 Unix daemon 不在回收保证内，这不是容器或作业调度器。刻意改写 `__localshelld_` 内部变量只会破坏自身会话，不构成额外提权。
-- 各 daemon 的配置目录保存 `command.log` 与 `audit.log`，格式为 JSON Lines。命令日志记录源码、执行身份与结果元数据，已知 handle 和注入凭据值使用占位符；审计日志记录授权、会话生命周期和管理操作。日志查看需要管理登录。
+- 各 daemon 的配置目录保存 `command.log` 与 `audit.log`，格式为 JSON Lines。命令日志记录源码、执行身份与结果元数据，已知 handle 和注入凭据值使用占位符；审计日志记录授权、会话生命周期和管理操作。每次审批统一写入一条 `authorization.decision`，手动操作、记住选择和路径授权策略使用相同格式，不包含处理来源、策略或记忆状态。日志查看需要管理登录。

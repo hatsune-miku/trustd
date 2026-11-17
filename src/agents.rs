@@ -410,12 +410,8 @@ impl AppState {
             };
             if let Some(choice) = choice {
                 drop(settings);
-                self.audit(
-                    "authorization.decision",
-                    serde_json::json!({"request_id":prompt.id,
-                    "agent_path":agent.path,"source":"policy","policy":policy,"choice":choice}),
-                )
-                .await;
+                self.record_authorization_decision(&prompt.id, Some(&agent.path), choice)
+                    .await;
                 return Ok(Decision {
                     choice,
                     remember: false,
@@ -425,8 +421,12 @@ impl AppState {
         }
         let request_id = prompt.id.clone();
         let decision = self.request_consent(prompt).await?;
-        self.audit("authorization.decision", serde_json::json!({"request_id":request_id,
-            "agent_path":agent.as_ref().map(|agent| &agent.path),"source":"interactive","choice":decision.choice})).await;
+        self.record_authorization_decision(
+            &request_id,
+            agent.as_ref().map(|agent| agent.path.as_str()),
+            decision.choice,
+        )
+        .await;
         // The checkbox means long-term trust, never a name-based remembered denial.
         if decision.choice == Choice::Accept
             && decision.remember
@@ -457,6 +457,19 @@ impl AppState {
             settings.save(next).await?;
         }
         Ok(decision)
+    }
+
+    async fn record_authorization_decision(
+        &self,
+        request_id: &str,
+        agent_path: Option<&str>,
+        choice: Choice,
+    ) {
+        self.audit(
+            "authorization.decision",
+            serde_json::json!({"request_id":request_id,"agent_path":agent_path,"choice":choice}),
+        )
+        .await;
     }
 
     pub(crate) async fn start_agent_worker(&self) {
