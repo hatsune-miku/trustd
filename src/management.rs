@@ -9,9 +9,9 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use localshelld_sync_protocol::owner::{SignedStatement, Statement};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use webauthn_rs::prelude::*;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -19,7 +19,6 @@ use crate::{
     bridge,
     config::{load_or_create_seal_key, seal, seal_key_path},
     server::{ApiError, AppState, DaemonMode, strong_handle},
-    settings::StoredPasskey,
 };
 
 const SESSION_SECONDS: i64 = 600;
@@ -31,18 +30,20 @@ enum Pending {
         owner: String,
         secret: Zeroizing<Vec<u8>>,
     },
-    Registration {
-        owner: String,
-        name: String,
-        state: PasskeyRegistration,
-    },
-    Authentication(PasskeyAuthentication),
+}
+
+/// A management login waiting for the owner's passkey on the backend.
+struct PendingLogin {
+    statement: String,
+    backend_id: String,
+    expires_at: i64,
 }
 
 #[derive(Default)]
 pub struct Management {
     sessions: HashMap<String, i64>,
     challenges: HashMap<String, (i64, Pending)>,
+    logins: HashMap<String, PendingLogin>,
 }
 
 impl Management {
@@ -50,6 +51,7 @@ impl Management {
         let now = Utc::now().timestamp();
         self.sessions.retain(|_, expiry| *expiry > now);
         self.challenges.retain(|_, (expiry, _)| *expiry > now);
+        self.logins.retain(|_, login| login.expires_at > now);
     }
 
     fn session(&mut self) -> Result<Value, ApiError> {
@@ -121,6 +123,8 @@ pub async fn authorize(
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/v1/admin/login", post(login))
+        .route("/v1/admin/login/passkey/start", post(passkey_login_start))
+        .route("/v1/admin/login/passkey/poll", post(passkey_login_poll))
         .route("/v1/admin/logout", post(logout))
         .route("/v1/admin/settings", get(settings))
         .route("/v1/admin/secrets", get(secrets))
@@ -139,17 +143,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/v1/admin/totp/start", post(totp_start))
         .route("/v1/admin/totp/finish", post(totp_finish))
         .route("/v1/admin/totp/remove", post(totp_remove))
-        .route("/v1/admin/passkeys/register/start", post(register_start))
-        .route("/v1/admin/passkeys/register/finish", post(register_finish))
-        .route(
-            "/v1/admin/passkeys/authenticate/start",
-            post(authenticate_start),
-        )
-        .route(
-            "/v1/admin/passkeys/authenticate/finish",
-            post(authenticate_finish),
-        )
-        .route("/v1/admin/passkeys/remove", post(passkey_remove))
         .route("/v1/admin/agents", get(agents))
         .route("/v1/admin/agents/policy", post(agent_policy))
         .route("/v1/admin/logs", get(logs))
@@ -344,8 +337,128 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<Login>,
 ) -> Result<Json<Value>, ApiError> {
-    state.authenticate(&body.credential).await?;
+    if matches!(body.credential.kind, auth::CredentialKind::Ticket) {
+        let config = state.settings.lock().await.config_path.clone();
+        if !config
+            .is_some_and(|config| crate::login::consume_ticket(&config, &body.credential.value))
+        {
+            return Err(AuthError::InvalidCredential.into());
+        }
+        state
+            .audit("management.login", json!({"method":"ticket"}))
+            .await;
+    } else if state.mode == DaemonMode::User {
+        // There is no static password: the owner's backend passkey signs in.
+        return Err(ApiError::bad_request(
+            "sign in with the owner's passkey; run `trustd login-url` if the backend is unreachable",
+        ));
+    } else {
+        state.authenticate(&body.credential).await?;
+    }
     Ok(Json(state.management.lock().await.session()?))
+}
+
+/// Ask the owner's passkey, on the backend, to sign a one-time login
+/// statement this daemon generated. The daemon verifies the signature itself.
+async fn passkey_login_start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    if state.mode != DaemonMode::User {
+        return Err(ApiError::bad_request(
+            "this daemon signs in with its Master Password",
+        ));
+    }
+    let device_id = state.remote.joined_device_id().await.ok_or_else(|| {
+        ApiError::unavailable(
+            "this device has not joined a backend; run `trustd join` or `trustd login-url`",
+        )
+    })?;
+    let statement = Statement::ManagementLogin {
+        device_id,
+        nonce: strong_handle(),
+        issued_at: Utc::now().timestamp(),
+    }
+    .to_text();
+    let started = state
+        .backend_post("signatures", json!({"statement":statement}))
+        .await?;
+    let backend = state.backend_url().await?;
+    let verification = started["verification_uri"].as_str().unwrap_or_default();
+    let (Some(id), Some(code)) = (started["id"].as_str(), started["code"].as_str()) else {
+        return Err(ApiError::unavailable("invalid backend signature response"));
+    };
+    // Never open an arbitrary backend-supplied URL.
+    if reqwest::Url::parse(verification)
+        .map(|url| url.origin().ascii_serialization())
+        .ok()
+        .as_deref()
+        != Some(backend.as_str())
+    {
+        return Err(ApiError::unavailable("invalid backend verification URL"));
+    }
+    let login_id = strong_handle();
+    let mut management = state.management.lock().await;
+    management.prune();
+    if management.logins.len() >= 16 {
+        return Err(ApiError::unavailable(
+            "too many pending logins; retry later",
+        ));
+    }
+    management.logins.insert(
+        login_id.clone(),
+        PendingLogin {
+            statement,
+            backend_id: id.into(),
+            expires_at: Utc::now().timestamp() + CHALLENGE_SECONDS,
+        },
+    );
+    Ok(Json(json!({
+        "login_id":login_id,"verification_uri":verification,"user_code":code,
+        "expires_in":CHALLENGE_SECONDS,"interval":2
+    })))
+}
+
+#[derive(Deserialize)]
+struct LoginPoll {
+    login_id: String,
+}
+async fn passkey_login_poll(
+    State(state): State<AppState>,
+    Json(body): Json<LoginPoll>,
+) -> Result<Json<Value>, ApiError> {
+    let (statement, backend_id) = {
+        let mut management = state.management.lock().await;
+        management.prune();
+        let login = management
+            .logins
+            .get(&body.login_id)
+            .ok_or_else(|| ApiError::bad_request("login request expired; start again"))?;
+        (login.statement.clone(), login.backend_id.clone())
+    };
+    let result = state
+        .backend_post("signatures/poll", json!({"id":backend_id}))
+        .await?;
+    if result["pending"] == true {
+        return Ok(Json(json!({"pending":true})));
+    }
+    let assertion = serde_json::from_value(result["assertion"].clone())
+        .map_err(|_| ApiError::unavailable("invalid backend signature"))?;
+    // Our own statement text, verified against the owner pinned at join.
+    let signed = SignedStatement {
+        statement,
+        assertion,
+    };
+    match state.remote.verify_owner_statement(&signed).await {
+        Ok(Statement::ManagementLogin { issued_at, .. })
+            if Utc::now().timestamp() - issued_at <= CHALLENGE_SECONDS => {}
+        _ => return Err(AuthError::InvalidCredential.into()),
+    }
+    let mut management = state.management.lock().await;
+    management.logins.remove(&body.login_id);
+    let session = management.session()?;
+    drop(management);
+    state
+        .audit("management.login", json!({"method":"owner_passkey"}))
+        .await;
+    Ok(Json(session))
 }
 
 async fn logout(
@@ -365,10 +478,8 @@ async fn settings(
     let settings = state.settings.lock().await;
     Ok(Json(json!({
         "daemon":state.mode, "totp_enabled":settings.config.totp_secret.is_some(),
-        "passkeys":settings.saved.passkeys.iter().map(|key| json!({"id":key.id,"name":key.name,"created_at":key.created_at})).collect::<Vec<_>>(),
         "paired_peer":settings.saved.pairing.as_ref().map(|pair| pair.peer.to_string()),
-        "desktop_available":state.consent.is_some(),
-        "passkey_origin":format!("http://localhost:{}",state.config.bind.port())
+        "desktop_available":state.consent.is_some()
     })))
 }
 
@@ -430,10 +541,7 @@ async fn totp_finish(
 ) -> Result<Json<Value>, ApiError> {
     let session = owner(&state, &headers).await?;
     let Pending::Totp { owner, secret } =
-        state.management.lock().await.take(&body.enrollment_id)?
-    else {
-        return Err(ApiError::bad_request("wrong enrollment type"));
-    };
+        state.management.lock().await.take(&body.enrollment_id)?;
     if owner != session {
         return Err(AuthError::InvalidCredential.into());
     }
@@ -472,190 +580,6 @@ async fn totp_remove(
     settings.save_config(config).await?;
     state.auth.lock().await.replace_totp(None);
     Ok(Json(json!({"enabled":false})))
-}
-
-fn webauthn(state: &AppState) -> Result<Webauthn, ApiError> {
-    let origin = Url::parse(&format!("http://localhost:{}", state.config.bind.port()))
-        .map_err(|_| ApiError::internal("invalid passkey origin"))?;
-    WebauthnBuilder::new("localhost", &origin)
-        .map_err(|_| ApiError::internal("WebAuthn initialization failed"))?
-        .rp_name("trustd")
-        .allow_any_port(false)
-        .build()
-        .map_err(|_| ApiError::internal("WebAuthn initialization failed"))
-}
-
-#[derive(Deserialize)]
-struct Name {
-    name: String,
-}
-
-async fn register_start(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<Name>,
-) -> Result<Json<Value>, ApiError> {
-    let owner = owner(&state, &headers).await?;
-    if body.name.trim().is_empty() || body.name.len() > 256 {
-        return Err(ApiError::bad_request(
-            "passkey name must contain 1–256 bytes",
-        ));
-    }
-    let mut settings = state.settings.lock().await;
-    if settings.saved.passkeys.len() >= 32 {
-        return Err(ApiError::bad_request("at most 32 passkeys are supported"));
-    }
-    let mut next = settings.saved.clone();
-    let user_id = *next.user_id.get_or_insert_with(uuid::Uuid::new_v4);
-    settings.save(next).await?;
-    let exclude = settings
-        .saved
-        .passkeys
-        .iter()
-        .map(|key| key.key.cred_id().clone())
-        .collect();
-    let account = if state.mode == DaemonMode::User {
-        "local-user"
-    } else {
-        "local-admin"
-    };
-    let (options, registration) = webauthn(&state)?
-        .start_passkey_registration(user_id, account, account, Some(exclude))
-        .map_err(|_| ApiError::internal("passkey registration could not start"))?;
-    drop(settings);
-    let id = state
-        .management
-        .lock()
-        .await
-        .insert(Pending::Registration {
-            owner,
-            name: body.name,
-            state: registration,
-        })?;
-    Ok(Json(json!({"challenge_id":id,"options":options})))
-}
-
-#[derive(Deserialize)]
-struct RegisterFinish {
-    challenge_id: String,
-    credential: RegisterPublicKeyCredential,
-}
-
-async fn register_finish(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<RegisterFinish>,
-) -> Result<Json<Value>, ApiError> {
-    let session = owner(&state, &headers).await?;
-    let Pending::Registration {
-        owner,
-        name,
-        state: registration,
-    } = state.management.lock().await.take(&body.challenge_id)?
-    else {
-        return Err(ApiError::bad_request("wrong challenge type"));
-    };
-    if owner != session {
-        return Err(AuthError::InvalidCredential.into());
-    }
-    let key = webauthn(&state)?
-        .finish_passkey_registration(&body.credential, &registration)
-        .map_err(|_| ApiError::forbidden("passkey registration verification failed"))?;
-    let mut settings = state.settings.lock().await;
-    if settings.saved.passkeys.len() >= 32 {
-        return Err(ApiError::bad_request("at most 32 passkeys are supported"));
-    }
-    if settings
-        .saved
-        .passkeys
-        .iter()
-        .any(|entry| entry.key.cred_id() == key.cred_id())
-    {
-        return Err(ApiError::bad_request("passkey is already registered"));
-    }
-    let mut next = settings.saved.clone();
-    next.passkeys.push(StoredPasskey {
-        id: uuid::Uuid::new_v4().to_string(),
-        name,
-        created_at: Utc::now().timestamp(),
-        key,
-    });
-    settings.save(next).await?;
-    Ok(Json(json!({"registered":true})))
-}
-
-async fn authenticate_start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let keys = state
-        .settings
-        .lock()
-        .await
-        .saved
-        .passkeys
-        .iter()
-        .map(|entry| entry.key.clone())
-        .collect::<Vec<_>>();
-    if keys.is_empty() {
-        return Err(ApiError::bad_request(
-            "no passkeys registered; sign in with Master Password or TOTP first",
-        ));
-    }
-    let (options, authentication) = webauthn(&state)?
-        .start_passkey_authentication(&keys)
-        .map_err(|_| ApiError::internal("passkey authentication could not start"))?;
-    let id = state
-        .management
-        .lock()
-        .await
-        .insert(Pending::Authentication(authentication))?;
-    Ok(Json(json!({"challenge_id":id,"options":options})))
-}
-
-#[derive(Deserialize)]
-struct AuthenticateFinish {
-    challenge_id: String,
-    credential: PublicKeyCredential,
-}
-
-async fn authenticate_finish(
-    State(state): State<AppState>,
-    Json(body): Json<AuthenticateFinish>,
-) -> Result<Json<Value>, ApiError> {
-    let Pending::Authentication(authentication) =
-        state.management.lock().await.take(&body.challenge_id)?
-    else {
-        return Err(ApiError::bad_request("wrong challenge type"));
-    };
-    let result = webauthn(&state)?
-        .finish_passkey_authentication(&body.credential, &authentication)
-        .map_err(|_| ApiError::forbidden("passkey authentication verification failed"))?;
-    let mut settings = state.settings.lock().await;
-    let mut next = settings.saved.clone();
-    let key = next
-        .passkeys
-        .iter_mut()
-        .find(|entry| entry.key.cred_id() == result.cred_id())
-        .ok_or_else(|| ApiError::forbidden("passkey was removed"))?;
-    key.key.update_credential(&result);
-    settings.save(next).await?;
-    Ok(Json(state.management.lock().await.session()?))
-}
-
-#[derive(Deserialize)]
-struct Id {
-    id: String,
-}
-
-async fn passkey_remove(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<Id>,
-) -> Result<Json<Value>, ApiError> {
-    owner(&state, &headers).await?;
-    let mut settings = state.settings.lock().await;
-    let mut next = settings.saved.clone();
-    next.passkeys.retain(|key| key.id != body.id);
-    settings.save(next).await?;
-    Ok(Json(json!({"removed":true})))
 }
 
 async fn agents(

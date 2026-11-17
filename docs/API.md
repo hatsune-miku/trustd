@@ -226,23 +226,27 @@ Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证�
 
 ### 管理登录与凭据设置
 
-`POST /v1/admin/login` 接收 `{"credential":...}`，返回 `{ "session":"...", "expires_at":... }`。管理 session 有效 10 分钟，仅供用户后台使用，不等同于执行 handle。下列已登录接口使用 `Authorization: Bearer <session>`。
+用户 daemon 没有静态密码，也没有本机（localhost）通行密钥。登录方式只有两种：
+
+- **主人的通行密钥**：`POST /v1/admin/login/passkey/start`（无需 session）要求本机已加入后端。daemon 生成一次性登录声明（`management_login`，含本机 device ID、随机 nonce 与时间），交给后端发起签名请求，返回 `login_id`、`verification_uri`、`user_code`、`expires_in` 和 `interval`。主人在后端页面核对验证码并按一次通行密钥。页面轮询 `POST /v1/admin/login/passkey/poll`，body `{"login_id":"..."}`：未确认时返回 `{"pending":true}`；确认后 daemon 用加入时固定的主人公钥验证签名、核对声明原文和 5 分钟有效期，再返回管理 session。同一次登录只能使用一次。
+- **本机一次性链接**：以 daemon 所属用户运行 `trustd login-url`，在配置旁写入 5 分钟内有效的一次性票据并打印 `http://localhost:<port>/#ticket=...`。打开后页面以 `{"credential":{"type":"ticket","value":"..."}}` 调用 `POST /v1/admin/login`。任何一次尝试都会删除票据。能运行此命令的进程本来就能读取该用户的配置和密钥，因此它不扩大访问范围；后端不可用时用于应急管理或加入后端。
+
+用户 daemon 拒绝 `password` 和 `totp` 登录。未配对的系统 daemon（仅安装系统服务时）仍使用 Master Password，可另加 TOTP；配对后系统 daemon 不提供管理登录。
+
+`POST /v1/admin/login` 返回 `{ "session":"...", "expires_at":... }`。管理 session 有效 10 分钟，仅供用户后台使用，不等同于执行 handle。下列已登录接口使用 `Authorization: Bearer <session>`。
 
 | 接口 | Body / 说明 |
 |---|---|
 | `POST /v1/admin/logout` | 清除本次管理 session |
-| `GET /v1/admin/settings` | TOTP 状态、通行密钥元数据、配对地址、桌面可用性 |
-| `POST /v1/admin/password` | `{"password":"..."}`，允许空字符串；成功后所有管理 session/challenge 失效 |
-| `POST /v1/admin/totp/start` | 返回 `enrollment_id`、`secret`、`uri`，5 分钟内确认 |
+| `GET /v1/admin/settings` | TOTP 状态、配对地址、桌面可用性 |
+| `POST /v1/admin/password` | 仅未配对的系统 daemon：`{"password":"..."}`；成功后所有管理 session/challenge 失效 |
+| `POST /v1/admin/totp/start` | 仅未配对的系统 daemon：返回 `enrollment_id`、`secret`、`uri`，5 分钟内确认 |
 | `POST /v1/admin/totp/finish` | `{"enrollment_id":"...","code":"123456"}` |
 | `POST /v1/admin/totp/remove` | 移除 TOTP，不撤销执行令牌 |
-| `POST /v1/admin/passkeys/register/start` | `{"name":"..."}`，返回 challenge ID 和 WebAuthn options |
-| `POST /v1/admin/passkeys/register/finish` | `{"challenge_id":"...","credential":<注册结果>}` |
-| `POST /v1/admin/passkeys/remove` | `{"id":"..."}` |
 | `GET /v1/admin/agents` | `agents` 列表：id、name、完整 path、processes、policy、revision |
 | `POST /v1/admin/agents/policy` | `{id, policy, revision, command_id}`；policy 为 once、trust、ask 或 deny |
 
-通行密钥登录使用 `/v1/admin/passkeys/authenticate/start` 和 `/finish`，无需已有 session；finish 接收 challenge ID 和 WebAuthn credential，验证成功后返回相同管理 session。challenge 在服务端保留 5 分钟且只能消费一次；注册 challenge 绑定发起它的管理 session。RP ID 固定为 `localhost`，origin 严格绑定当前 daemon 的 `http://localhost:<port>`，要求认证器 user verification。最多 32 个通行密钥，私钥始终留在认证器中。
+原 `/v1/admin/passkeys/*`（本机通行密钥）已移除，返回 404。
 
 Agent 由 daemon 主动发现；管理端不能提交任意路径注册 Agent。相同完整路径共享策略，不同路径分别管理。一次授权在允许前持久化消费；长期信任不限制以后请求的凭据 key。`command_id` 是幂等键，`revision` 防止旧页面覆盖新状态；可选 `expires_at_ms` 拒绝过期命令。配对后两端访问同一份用户 daemon 策略，修改策略不撤销已建立的会话。
 

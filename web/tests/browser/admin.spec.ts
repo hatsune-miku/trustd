@@ -4,20 +4,18 @@ import { type Page, expect, test } from '@playwright/test'
 
 async function login(page: Page) {
   await page.goto('/')
-  await expect(page.getByLabel('验证方式')).toHaveValue('passkey')
-  await page.getByLabel('验证方式').selectOption('password')
+  await expect(page.getByLabel('验证方式')).toHaveValue('password')
   await page.getByLabel('Master Password', { exact: true }).fill('browser test')
   await page.getByRole('button', { name: '验证身份', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible()
 }
 
-test('login defaults to passkey and keeps password and TOTP available', async ({ page }) => {
+test('an unpaired system daemon signs in with its password or TOTP, never a localhost passkey', async ({ page }) => {
   await page.goto('/')
   const method = page.getByLabel('验证方式')
-  await expect(method).toHaveValue('passkey')
-  await expect(method.locator('option').first()).toHaveAttribute('value', 'passkey')
-  await expect(page.getByRole('button', { name: '使用通行密钥验证' })).toBeVisible()
-  await expect(page.locator('#login-value')).toHaveCount(0)
+  await expect(method).toHaveValue('password')
+  await expect(method.locator('option[value="passkey"]')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '使用通行密钥登录' })).toHaveCount(0)
   await page.screenshot({ path: 'test-results/desktop-login.png', fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
@@ -26,17 +24,66 @@ test('login defaults to passkey and keeps password and TOTP available', async ({
   await expect(page.getByLabel('6 位动态码')).toHaveAttribute('inputmode', 'numeric')
   await method.selectOption('password')
   await expect(page.getByLabel('Master Password', { exact: true })).toBeVisible()
-  await page.reload()
-  await expect(page.getByLabel('验证方式')).toHaveValue('passkey')
 })
 
-test('passkey default keeps the localhost link when opened through an IP address', async ({ page }) => {
-  await page.goto('http://127.0.0.1:31819/')
-  await expect(page.getByLabel('验证方式')).toHaveValue('passkey')
-  await expect(page.getByRole('link', { name: '使用 localhost 打开通行密钥入口' })).toHaveAttribute(
-    'href',
-    'http://localhost:31819/'
+test('the user daemon signs in with the owner passkey on the backend or a local ticket', async ({ page }) => {
+  const logins: unknown[] = []
+  await page.route('**/health', async (route) => {
+    const response = await route.fetch()
+    await route.fulfill({ json: { ...(await response.json()), daemon: 'user' } })
+  })
+  await page.route('**/v1/admin/login/passkey/start', (route) =>
+    route.fulfill({
+      json: {
+        login_id: 'fixture-login',
+        verification_uri: 'https://backend.example/#sign=ABC123',
+        user_code: 'ABC123',
+        expires_in: 300,
+        interval: 2,
+      },
+    })
   )
+  let confirmed = false
+  await page.route('**/v1/admin/login/passkey/poll', (route) =>
+    route.fulfill({ json: confirmed ? { session: 'fixture-session', expires_at: 4102444800 } : { pending: true } })
+  )
+  await page.route('**/v1/admin/login', async (route) => {
+    logins.push(route.request().postDataJSON())
+    await route.fulfill({ json: { session: 'fixture-session', expires_at: 4102444800 } })
+  })
+  // The approval page opens in a new tab; record it instead of opening one.
+  await page.addInitScript(() => {
+    const opened: string[] = []
+    Object.assign(window, { openedTabs: opened })
+    window.open = () =>
+      ({
+        location: {
+          set href(value: string) {
+            opened.push(value)
+          },
+        },
+        close() {},
+      }) as unknown as Window
+  })
+  await page.goto('/')
+  await expect(page.getByText('trustd login-url')).toBeVisible({ timeout: 15000 })
+  await expect(page.getByLabel('验证方式')).toHaveCount(0)
+  await page.getByRole('button', { name: '使用通行密钥登录' }).click()
+  await expect(page.locator('.login-code')).toHaveText('ABC123', { timeout: 15000 })
+  expect(await page.evaluate(() => (window as unknown as { openedTabs: string[] }).openedTabs)).toEqual([
+    'https://backend.example/#sign=ABC123',
+  ])
+  confirmed = true
+  await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible({ timeout: 10000 })
+  expect(logins).toEqual([])
+  // The user daemon has no password, TOTP or localhost passkey to manage.
+  await expect(page.getByRole('button', { name: '验证方式', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '退出管理' }).click()
+  // A link from `trustd login-url` signs in once and clears the ticket.
+  await page.goto('/#ticket=fixture-ticket')
+  await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible({ timeout: 15000 })
+  expect(logins).toEqual([{ credential: { type: 'ticket', value: 'fixture-ticket' } }])
+  expect(new URL(page.url()).hash).toBe('')
 })
 
 test('path-scoped policies show full paths and replace token issuance', async ({ page }) => {
@@ -100,35 +147,6 @@ test('path-scoped policies show full paths and replace token issuance', async ({
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await expect(page.getByText(agents[1].path!, { exact: true })).toBeVisible()
   await page.screenshot({ path: 'test-results/mobile-agents.png', fullPage: true })
-})
-
-test('passkey registration and management authentication use real WebAuthn', async ({ page, context }) => {
-  const cdp = await context.newCDPSession(page)
-  await cdp.send('WebAuthn.enable')
-  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
-    options: {
-      protocol: 'ctap2',
-      transport: 'internal',
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  })
-  await login(page)
-  await page.getByRole('button', { name: '验证方式', exact: true }).click()
-  await page.getByLabel('名称', { exact: true }).fill('browser virtual passkey')
-  await page.getByRole('button', { name: '添加通行密钥' }).click()
-  await expect(page.getByText('通行密钥已添加。', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '退出管理' }).click()
-  await expect(page.getByLabel('验证方式')).toHaveValue('passkey')
-  await page.getByRole('button', { name: '使用通行密钥验证' }).click()
-  await expect(page.getByRole('heading', { name: 'Agent 授权' })).toBeVisible()
-  await page.getByRole('button', { name: '验证方式', exact: true }).click()
-  page.once('dialog', (dialog) => dialog.accept())
-  await page.getByRole('button', { name: '移除', exact: true }).click()
-  await expect(page.getByText('通行密钥已移除。', { exact: true })).toBeVisible()
-  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId })
 })
 
 test('mobile layout does not overflow and settings remain available', async ({ page }) => {

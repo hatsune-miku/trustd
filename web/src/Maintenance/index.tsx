@@ -17,6 +17,7 @@ type Job = {
   error: string | null
   completed: 'install' | 'uninstall' | 'powershell' | null
   agents: AgentResult[]
+  join: { uri: string; code: string } | null
 }
 type Info = {
   version: string
@@ -38,6 +39,9 @@ type Info = {
   system_url: string
   agents: Agent[]
   job: Job
+  joined: boolean
+  backend: string | null
+  device_name: string
 }
 
 const steps = ['检查安装', '安装选项', '安装服务', '完成']
@@ -48,6 +52,7 @@ const stages: Record<string, string> = {
   elevation: '等待系统授权并安装服务',
   user_service: '启动用户服务并验证安装',
   agents: '配置 AI agent',
+  join: '等待在后端批准此设备',
   failed: '安装未完成',
   done: '操作完成',
 }
@@ -55,15 +60,16 @@ const stages: Record<string, string> = {
 export function Maintenance({ token }: { token: string }) {
   const [info, setInfo] = useState<Info | null>(null)
   const [step, setStep] = useState(0)
-  const [password, setPassword] = useState('')
-  const [confirmation, setConfirmation] = useState('')
+  const [backend, setBackend] = useState('')
+  const [deviceName, setDeviceName] = useState('')
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
   const [closed, setClosed] = useState(false)
   const [selectedAgents, setSelectedAgents] = useState<string[]>([])
   const [replaceAgents, setReplaceAgents] = useState(false)
   const busy = sending || !!info?.job.running
-  const needsPassword = !!info && (info.system_initialized !== true || !info.user_initialized)
+  // There is no standalone mode: a device that has not joined names its backend.
+  const needsBackend = !!info && !info.joined
 
   async function refresh(signal?: AbortSignal) {
     try {
@@ -98,12 +104,15 @@ export function Maintenance({ token }: { token: string }) {
       await api(
         `/setup/v1/${operation}`,
         operation === 'install'
-          ? { password: needsPassword ? password : null, agents: selectedAgents, replace_agents: replaceAgents }
+          ? {
+              backend: needsBackend ? backend : null,
+              device_name: needsBackend ? deviceName || info?.device_name : null,
+              agents: selectedAgents,
+              replace_agents: replaceAgents,
+            }
           : {},
         token
       )
-      setPassword('')
-      setConfirmation('')
       setStep(2)
       await refresh()
     } catch (cause) {
@@ -115,10 +124,6 @@ export function Maintenance({ token }: { token: string }) {
 
   function install(event: FormEvent) {
     event.preventDefault()
-    if (password !== confirmation) {
-      setError('两次输入的密码不一致。')
-      return
-    }
     void begin('install')
   }
 
@@ -287,36 +292,37 @@ export function Maintenance({ token }: { token: string }) {
               </>
             ) : step === 1 ? (
               <form className="maintenance-form" onSubmit={install}>
-                <h2 className="section-title">{needsPassword ? '初始化管理密码' : '修复或更新安装'}</h2>
-                {needsPassword ? (
+                <h2 className="section-title">{needsBackend ? '加入后端' : '修复或更新安装'}</h2>
+                {needsBackend ? (
                   <>
                     <p className="description">
-                      提权后会优先恢复有效备份；没有备份时使用此密码补建缺失配置。已有配置使用原密码。
+                      安装后，此设备加入你的后端：在后端页面按一次通行密钥批准即可，同一主人的设备会自动互相信任。管理页也使用该通行密钥登录，不再设置主密码。
                     </p>
-                    <Field htmlFor="setup-password" label="主密码">
+                    <Field htmlFor="setup-backend" label="后端地址">
                       <TextBox
-                        id="setup-password"
-                        type="text"
+                        id="setup-backend"
+                        type="url"
                         autoComplete="off"
-                        maxLength={4096}
-                        value={password}
-                        onChange={(event) => setPassword(event.currentTarget.value)}
+                        placeholder="https://trustd.example.com"
+                        required
+                        value={backend}
+                        onChange={(event) => setBackend(event.currentTarget.value)}
                       />
                     </Field>
-                    <Field htmlFor="setup-confirmation" label="确认主密码">
+                    <Field htmlFor="setup-device-name" label="设备名称">
                       <TextBox
-                        id="setup-confirmation"
-                        type="text"
-                        autoComplete="off"
-                        maxLength={4096}
-                        value={confirmation}
-                        onChange={(event) => setConfirmation(event.currentTarget.value)}
+                        id="setup-device-name"
+                        maxLength={80}
+                        placeholder={info.device_name}
+                        value={deviceName}
+                        onChange={(event) => setDeviceName(event.currentTarget.value)}
                       />
                     </Field>
                   </>
                 ) : (
                   <p className="description">
-                    使用当前版本重新安装服务、迁移旧目录并修复目录权限。管理密码和凭据保持不变。
+                    此设备已加入 {info.backend}
+                    。将使用当前版本重新安装服务、迁移旧目录并修复目录权限，授权配置和凭据保持不变。
                   </p>
                 )}
                 <fieldset className="maintenance-agent-options" disabled={busy}>
@@ -400,7 +406,21 @@ export function Maintenance({ token }: { token: string }) {
                     </footer>
                   </>
                 )}
-                {busy && <p className="maintenance-note">请在系统授权窗口中确认。</p>}
+                {busy && info.job.join && (
+                  <div className="maintenance-join">
+                    <span className="maintenance-join-code">{info.job.join.code}</span>
+                    <a
+                      className="maintenance-management-link"
+                      href={info.job.join.uri}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      打开后端，用通行密钥批准此设备
+                    </a>
+                    <p className="maintenance-note">也可以在手机等其他设备上打开此链接。</p>
+                  </div>
+                )}
+                {busy && !info.job.join && <p className="maintenance-note">请在系统授权窗口中确认。</p>}
               </>
             ) : (
               <>
@@ -438,18 +458,12 @@ export function Maintenance({ token }: { token: string }) {
                     )}
                     <div className="maintenance-links">
                       <a className="maintenance-management-link" href={info.user_url} target="_blank" rel="noreferrer">
-                        打开用户管理
-                      </a>
-                      <a
-                        className="maintenance-management-link"
-                        href={info.system_url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        打开系统管理
+                        打开管理页
                       </a>
                     </div>
-                    <p className="maintenance-note">安装会自动配对用户进程与系统进程，已有配对会保留，不需要配对码。</p>
+                    <p className="maintenance-note">
+                      安装已自动配对用户进程与系统进程，并加入后端。管理页使用后端的通行密钥登录。
+                    </p>
                     <p className="maintenance-note">
                       {info.platform === 'windows'
                         ? '开始菜单'

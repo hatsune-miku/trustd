@@ -11,3 +11,15 @@
     padding: 26px 20px;
   }
 }
+.login-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.login-code {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  overflow-wrap: anywhere;
+}

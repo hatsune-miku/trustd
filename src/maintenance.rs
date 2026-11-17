@@ -65,7 +65,12 @@ struct Plan {
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 struct InstallRequest {
-    password: Option<String>,
+    /// The owner's backend this device joins after installation. Required
+    /// until the device has joined; there is no standalone mode.
+    #[serde(default)]
+    backend: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
     #[serde(default)]
     agents: Vec<String>,
     #[serde(default)]
@@ -79,6 +84,8 @@ struct Job {
     error: Option<String>,
     completed: Option<String>,
     agents: Vec<agents::Outcome>,
+    /// Approval link and code while waiting for the owner to approve the join.
+    join: Option<Value>,
 }
 
 struct Inner {
@@ -226,6 +233,17 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
     assets::serve(uri).await
 }
 
+/// Whether the user daemon has joined a backend, and which one.
+fn joined(user_config: &Path) -> (bool, Option<String>) {
+    let read = |extension: &str| -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(user_config.with_extension(extension)).ok()?).ok()
+    };
+    let owner = read("remote.json").is_some_and(|remote| !remote["owner"].is_null());
+    let backend = read("authorization.json")
+        .and_then(|saved| saved["sync"]["url"].as_str().map(str::to_owned));
+    (owner && backend.is_some(), backend)
+}
+
 fn snapshot(state: &Inner) -> Result<Value> {
     let registration = super::update::service::registration()?;
     // A non-elevated wizard may be unable to inspect protected system state.
@@ -259,6 +277,9 @@ fn snapshot(state: &Inner) -> Result<Value> {
         "system_url": format!("http://localhost:{}/", user.as_ref().map_or(localshelld::config::DEFAULT_PORT, |value| value.privileged_daemon.port())),
         "job": job,
         "agents": state.agents,
+        "joined": joined(&state.user_config).0,
+        "backend": joined(&state.user_config).1,
+        "device_name": super::joining::device_name(),
     }))
 }
 
@@ -284,7 +305,7 @@ async fn status(State(state): State<App>) -> Result<Json<Value>, ApiError> {
 fn start_job(
     state: App,
     operation: Operation,
-    password: Zeroizing<Option<String>>,
+    join: Option<(String, Option<String>)>,
     selected: Vec<String>,
     replace_agents: bool,
 ) -> Result<Json<Value>, ApiError> {
@@ -308,19 +329,31 @@ fn start_job(
         } else {
             elevation
         };
-        let result = execute(
-            &state,
-            operation,
-            password,
-            &selected,
-            replace_agents,
-            elevation,
-        );
+        let result =
+            execute(&state, operation, &selected, replace_agents, elevation).and_then(|outcomes| {
+                if let Some((url, name)) = join {
+                    set_stage(&state, "join");
+                    let job = &state.job;
+                    super::joining::join_with(
+                        url.clone(),
+                        name,
+                        Some(state.user_config.clone()),
+                        |uri, code| {
+                            job.lock().unwrap().join = Some(json!({"uri":uri,"code":code}));
+                        },
+                    )
+                    .with_context(|| {
+                        format!("服务已安装，但未加入后端；可在终端运行 trustd join {url} 重试")
+                    })?;
+                }
+                Ok(outcomes)
+            });
         *state.job.lock().unwrap() = Job {
             running: false,
             stage: if result.is_ok() { "done" } else { "failed" }.into(),
             error: result.as_ref().err().map(|error| format!("{error:#}")),
             agents: result.as_ref().ok().cloned().unwrap_or_default(),
+            join: None,
             completed: result.ok().map(|_| {
                 if operation == Operation::Install {
                     "install"
@@ -341,17 +374,34 @@ async fn install(
 ) -> Result<Json<Value>, ApiError> {
     agents::validate(&body.agents, &state.agents)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if body
-        .password
-        .as_ref()
-        .is_some_and(|value| value.len() > 4096)
-    {
-        return Err(ApiError::bad_request("password is too long"));
-    }
+    let backend = body
+        .backend
+        .take()
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty());
+    let join = match backend {
+        Some(url) => {
+            if !(url.starts_with("https://") || url.starts_with("http://localhost")) {
+                return Err(ApiError::bad_request("后端地址需要使用 HTTPS。"));
+            }
+            Some((
+                url,
+                body.device_name
+                    .take()
+                    .filter(|name| !name.trim().is_empty()),
+            ))
+        }
+        None if joined(&state.user_config).0 => None,
+        None => {
+            return Err(ApiError::bad_request(
+                "请填写后端地址：安装后此设备需要加入后端。",
+            ));
+        }
+    };
     start_job(
         state,
         Operation::Install,
-        Zeroizing::new(body.password.take()),
+        join,
         std::mem::take(&mut body.agents),
         body.replace_agents,
     )
@@ -360,13 +410,7 @@ async fn uninstall(
     State(state): State<App>,
     Json(_): Json<serde_json::Map<String, Value>>,
 ) -> Result<Json<Value>, ApiError> {
-    start_job(
-        state,
-        Operation::Uninstall,
-        Zeroizing::new(None),
-        vec![],
-        false,
-    )
+    start_job(state, Operation::Uninstall, None, vec![], false)
 }
 async fn close(
     State(state): State<App>,
@@ -382,7 +426,6 @@ async fn close(
 fn execute(
     state: &Inner,
     operation: Operation,
-    mut password: Zeroizing<Option<String>>,
     selected: &[String],
     replace_agents: bool,
     elevation: platform::Elevation,
@@ -410,16 +453,11 @@ fn execute(
         operation == Operation::Uninstall || shell.is_file(),
         "请先安装系统级 PowerShell 7，再刷新环境检查。"
     );
-    // Some("") is an explicitly chosen empty password; None means preserve.
-    let password_hash = password
-        .as_ref()
-        .map(|value| localshelld::auth::hash_password(value.as_bytes()))
-        .transpose()?;
-    password.zeroize();
+    // There is no static password: the user daemon signs in with the owner's
+    // backend passkey, and the paired privileged daemon has no login at all.
+    let password_hash = None;
     if operation == Operation::Install && !state.user_config.try_exists()? {
-        let hash = password_hash.clone().context("请设置初始化主密码。")?;
         let config = Config {
-            password_hash: hash,
             bind: format!("127.0.0.1:{}", localshelld::config::USER_PORT).parse()?,
             shell: shell.to_string_lossy().into_owned(),
             user_headless: Some(state.user_headless),

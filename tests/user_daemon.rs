@@ -191,11 +191,11 @@ async fn verify_user_daemon(headless: bool) {
     assert!(page.contains("本机授权管理"));
     assert!(page.contains("/assets/"));
     let approval_base = base.clone();
-    let entered = tokio::task::spawn_blocking(move || {
-        support::authorize(&approval_base, "localshelld integration test password")
-    })
-    .await
-    .unwrap();
+    let config_path = path.clone();
+    let entered =
+        tokio::task::spawn_blocking(move || support::authorize(&approval_base, &config_path))
+            .await
+            .unwrap();
     if cfg!(windows) {
         assert_eq!(entered["privilege_levels"], json!(["current-user"]));
     } else {

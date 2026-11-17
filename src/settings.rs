@@ -2,7 +2,6 @@
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
-use webauthn_rs::prelude::Passkey;
 
 use crate::{config::Config, server::ApiError, storage};
 
@@ -21,16 +20,7 @@ pub struct SavedSettings {
     pub sync: Option<crate::sync::SavedSync>,
     pub telegram: Option<crate::config::SealedSecret>,
     pub pairing: Option<Pairing>,
-    pub passkeys: Vec<StoredPasskey>,
     pub user_id: Option<uuid::Uuid>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct StoredPasskey {
-    pub id: String,
-    pub name: String,
-    pub created_at: i64,
-    pub key: Passkey,
 }
 
 pub struct Settings {

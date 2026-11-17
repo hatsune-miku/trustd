@@ -112,7 +112,7 @@ async fn setup_surface_is_bounded_and_has_no_shell_or_daemon_routes() {
                 .header("authorization", "Bearer fixture-token")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    "{{\"password\":\"{}\"}}",
+                    "{{\"backend\":\"https://{}\"}}",
                     "x".repeat(9000)
                 )))
                 .unwrap(),
@@ -127,7 +127,9 @@ async fn setup_surface_is_bounded_and_has_no_shell_or_daemon_routes() {
                 .header("host", "127.0.0.1:31991")
                 .header("authorization", "Bearer fixture-token")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"password":"test","command":"arbitrary"}"#))
+                .body(Body::from(
+                    r#"{"backend":"https://backend.example","command":"arbitrary"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -140,16 +142,7 @@ async fn setup_surface_is_bounded_and_has_no_shell_or_daemon_routes() {
 async fn active_installation_cannot_be_closed_or_started_twice() {
     let state = fixture();
     state.busy.store(true, Ordering::SeqCst);
-    assert!(
-        start_job(
-            state.clone(),
-            Operation::Install,
-            Zeroizing::new(None),
-            vec![],
-            false
-        )
-        .is_err()
-    );
+    assert!(start_job(state.clone(), Operation::Install, None, vec![], false).is_err());
     let response = router(state)
         .oneshot(
             Request::post("/setup/v1/close")
@@ -233,7 +226,7 @@ async fn unknown_agent_is_rejected_before_installation_starts() {
                 .header("authorization", "Bearer fixture-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"password":null,"agents":["../../arbitrary"]}"#,
+                    r#"{"backend":"https://backend.example","agents":["../../arbitrary"]}"#,
                 ))
                 .unwrap(),
         )
@@ -241,4 +234,28 @@ async fn unknown_agent_is_rejected_before_installation_starts() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!state.busy.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn installation_requires_an_https_backend_until_the_device_has_joined() {
+    for body in [
+        r#"{}"#,
+        r#"{"backend":"  "}"#,
+        r#"{"backend":"http://backend.example"}"#,
+    ] {
+        let state = fixture();
+        let response = router(state.clone())
+            .oneshot(
+                Request::post("/setup/v1/install")
+                    .header("host", "127.0.0.1:31991")
+                    .header("authorization", "Bearer fixture-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert!(!state.busy.load(Ordering::SeqCst));
+    }
 }

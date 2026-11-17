@@ -42,7 +42,7 @@ Windows 的管理员后端使用配对用户进程的 linked elevated token，�
 
 ### 授权与显示分层
 
-- `auth`：Master/TOTP、运行期执行令牌；`management`：10 分钟管理会话、WebAuthn 和凭据设置。
+- `auth`：未配对系统端的 Master/TOTP、运行期执行令牌；`management`：10 分钟管理会话。用户 daemon 以主人在后端的通行密钥登录（本机生成一次性声明，自行验证签名），应急时使用 `trustd login-url` 的一次性票据（`login`）。
 - `settings` / `storage`：原子、受 ACL 保护的配置写入，以及独立的 `config.authorization.json`。后者保存配对共享密钥、通行密钥公钥/元数据、用户 UUID、按程序路径保存的授权策略、加密后的环境变量凭据；备份或迁移时需同时保留它、原配置和 seal key。
 - `agents`：主动扫描当前用户的已知进程名，用操作系统连接归属和进程祖先核验完整路径。不同路径独立管理，同路径多个进程共享策略；无法核验时只允许当次人工决定。
 - `consent`：最多 8 个 pending 请求、600 秒截止时间、取消清理与进程内一次性决策回调；`server` 统一决定权限与创建会话。

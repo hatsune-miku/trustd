@@ -3,10 +3,8 @@ export type LoginResult = { session: string; expires_at: number }
 export type Settings = {
   daemon: 'user' | 'privileged'
   totp_enabled: boolean
-  passkeys: { id: string; name: string; created_at: number }[]
   paired_peer: string | null
   desktop_available: boolean
-  passkey_origin: string
 }
 export type SessionRecord = {
   id: string

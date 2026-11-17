@@ -868,3 +868,173 @@ fn production_origin_requires_https_and_no_extra_url_parts() {
         assert!(App::open(directory.path(), origin).is_err());
     }
 }
+
+#[tokio::test]
+async fn devices_request_owner_signatures_only_about_themselves() {
+    let (_directory, state, app, browser, _) = setup().await;
+    let (passkey, owner) = initialize_owner(&state).await;
+    let laptop = trustd_remote::Identity::generate().unwrap();
+    let server = trustd_remote::Identity::generate().unwrap();
+    let joined = join(
+        &app,
+        &state,
+        &passkey,
+        &owner,
+        &device_statement(&laptop, "Laptop"),
+    )
+    .await;
+    let other = join(
+        &app,
+        &state,
+        &passkey,
+        &owner,
+        &device_statement(&server, "Server"),
+    )
+    .await;
+    let token = joined.tokens.access_token.clone();
+    let login = |identity: &trustd_remote::Identity| {
+        Statement::ManagementLogin {
+            device_id: identity.id().unwrap(),
+            nonce: "fixture-nonce-0123456789".into(),
+            issued_at: Utc::now().timestamp(),
+        }
+        .to_text()
+    };
+    // Browser sessions, statements about another device and roster-changing
+    // statements cannot be requested.
+    for (body, bearer, expected) in [
+        (
+            json!({"statement":login(&laptop)}),
+            browser.access_token.as_str(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            json!({"statement":login(&server)}),
+            token.as_str(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            json!({"statement":Statement::DeviceRevoke{device_id:server.id().unwrap(),issued_at:Utc::now().timestamp()}.to_text()}),
+            token.as_str(),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/sync/v1/signatures",
+                Some(body),
+                Some(bearer)
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    let statement = login(&laptop);
+    let (status, started) = call(
+        &app,
+        "POST",
+        "/sync/v1/signatures",
+        Some(json!({"statement":statement})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let id = json!({"id":started["id"]});
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/signatures/poll",
+            Some(id.clone()),
+            Some(&token)
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    let code = json!({"user_code":started["code"]});
+    let (_, inspected) = call(
+        &app,
+        "POST",
+        "/sync/v1/signatures/inspect",
+        Some(code.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(inspected["statement"], statement.as_str());
+    assert_eq!(inspected["device_name"], "Laptop");
+    let mut forged = code.clone();
+    forged["assertion"] = json!(Authenticator::new(b"owner-passkey").assert(
+        &owner,
+        &owner::challenge(&statement),
+        0x05
+    ));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/signatures/approve",
+            Some(forged),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut approval = code;
+    approval["assertion"] = json!(passkey.assert(&owner, &owner::challenge(&statement), 0x05));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/signatures/approve",
+            Some(approval),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // Another device cannot collect it; the requesting device collects it once.
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/signatures/poll",
+            Some(id.clone()),
+            Some(&other.tokens.access_token)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/sync/v1/signatures/poll",
+        Some(id.clone()),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let signed = SignedStatement {
+        statement: statement.clone(),
+        assertion: serde_json::from_value(result["assertion"].clone()).unwrap(),
+    };
+    signed.verify(&owner, &owner.keys).unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/signatures/poll",
+            Some(id),
+            Some(&token)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}

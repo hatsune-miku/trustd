@@ -620,6 +620,24 @@ impl AppState {
         }
     }
 
+    /// POST to this device's backend with its own session.
+    pub(crate) async fn backend_post(&self, path: &str, body: Value) -> Result<Value, ApiError> {
+        self.telegram_cloud_request(path, body, Duration::from_secs(15))
+            .await
+    }
+
+    /// The origin of the backend this device joined.
+    pub(crate) async fn backend_url(&self) -> Result<String, ApiError> {
+        self.settings
+            .lock()
+            .await
+            .saved
+            .sync
+            .as_ref()
+            .map(|sync| sync.url.clone())
+            .ok_or_else(|| ApiError::unavailable("this device has not joined a backend"))
+    }
+
     /// Fetch the owner's statements and adopt them after local verification.
     async fn refresh_roster(&self, url: &str, access_token: &str) -> anyhow::Result<()> {
         // Only a device that verified its own join has an owner to check against.

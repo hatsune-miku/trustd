@@ -515,44 +515,6 @@ async fn agent_policy_is_authenticated_versioned_and_persisted() {
 }
 
 #[tokio::test]
-async fn passkey_registration_requires_login_and_keeps_state_server_side() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = stored_state(directory.path());
-    let app = router(state.clone());
-    assert_eq!(
-        call(
-            &app,
-            "/v1/admin/passkeys/register/start",
-            Some(json!({"name":"test"})),
-            None
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let session = login(&app, "test").await;
-    let (status, body) = call(
-        &app,
-        "/v1/admin/passkeys/register/start",
-        Some(json!({"name":"test"})),
-        Some(&session),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["options"]["publicKey"]["rp"]["id"], "localhost");
-    assert_eq!(
-        body["options"]["publicKey"]["authenticatorSelection"]["userVerification"],
-        "required"
-    );
-    assert!(body.get("state").is_none());
-    let challenge = body["challenge_id"].as_str().unwrap();
-    assert!(state.management.lock().await.take(challenge).is_ok());
-    assert!(state.management.lock().await.take(challenge).is_err());
-    let origins = webauthn(&state).unwrap().get_allowed_origins().to_vec();
-    assert_eq!(origins[0].as_str(), "http://localhost:32119/");
-}
-
-#[tokio::test]
 async fn rejects_foreign_browser_origins_and_dns_rebinding_hosts() {
     let app = router(AppState::new(
         Config::default(),
@@ -615,7 +577,7 @@ async fn paired_privileged_daemon_is_managed_only_through_the_user_daemon() {
         .unwrap();
     let user = AppState::user(user_config, AuthManager::new(hash, None))
         .unwrap()
-        .with_storage(user_path)
+        .with_storage(user_path.clone())
         .unwrap();
     let root_app = router(root.clone());
     let user_app = router(user.clone());
@@ -657,7 +619,7 @@ async fn paired_privileged_daemon_is_managed_only_through_the_user_daemon() {
     );
 
     // Manual pairing codes no longer exist.
-    let session = login(&user_app, "test").await;
+    let session = ticket_login(&user_app, &user_path).await;
     for path in [
         "/v1/admin/pairing/new",
         "/v1/admin/pairing/connect",
@@ -735,4 +697,78 @@ async fn unpaired_privileged_daemon_keeps_its_own_management_page() {
         .await
         .unwrap();
     assert_eq!(index.status(), StatusCode::OK);
+}
+
+async fn ticket_login(app: &Router, config: &std::path::Path) -> String {
+    let ticket = crate::login::write_ticket(config).unwrap();
+    let (status, body) = call(
+        app,
+        "/v1/admin/login",
+        Some(json!({"credential":{"type":"ticket","value":ticket}})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["session"].as_str().unwrap().into()
+}
+
+#[tokio::test]
+async fn user_daemon_has_no_static_password_and_tickets_are_single_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = Config {
+        bind: "127.0.0.1:32120".parse().unwrap(),
+        ..Config::default()
+    };
+    config.save(&path).unwrap();
+    let state = AppState::user(config, AuthManager::new(String::new(), None))
+        .unwrap()
+        .with_storage(path.clone())
+        .unwrap();
+    let app = router(state);
+    for kind in ["password", "totp"] {
+        assert_eq!(
+            call(
+                &app,
+                "/v1/admin/login",
+                Some(json!({"credential":{"type":kind,"value":"anything"}})),
+                None
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // A device that has not joined a backend cannot start a passkey login.
+    assert_eq!(
+        call(&app, "/v1/admin/login/passkey/start", Some(json!({})), None)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let ticket = crate::login::write_ticket(&path).unwrap();
+    let body = json!({"credential":{"type":"ticket","value":ticket}});
+    assert_eq!(
+        call(&app, "/v1/admin/login", Some(body.clone()), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, "/v1/admin/login", Some(body), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Localhost passkeys are gone; the owner's backend passkey replaces them.
+    let session = ticket_login(&app, &path).await;
+    assert_eq!(
+        call(
+            &app,
+            "/v1/admin/passkeys/register/start",
+            Some(json!({"name":"x"})),
+            Some(&session)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
 }

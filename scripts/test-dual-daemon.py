@@ -35,6 +35,14 @@ def request(base, path, body=None, session=None):
         return json.load(response)
 
 
+def ticket_login(binary, base, config):
+    """The user daemon has no static password; `trustd login-url` signs in locally."""
+    url = subprocess.run([str(binary), "login-url", "--config", str(config)],
+                         stdout=subprocess.PIPE, text=True, check=True).stdout.strip()
+    ticket = url.split("#ticket=", 1)[1]
+    return request(base, "/v1/admin/login", {"credential": {"type": "ticket", "value": ticket}})["session"]
+
+
 def wait_ready(base, process):
     for _ in range(100):
         if process.poll() is not None:
@@ -208,7 +216,7 @@ def main():
                 start(user)
             # An unpaired privileged daemon still has its own management page.
             request(root_url, "/v1/admin/login", {"credential": credential})
-            user_session = request(user_url, "/v1/admin/login", {"credential": credential})["session"]
+            user_session = ticket_login(binary, user_url, configs[True])
             local = Agent(binary, temp / "local agent", f"127.0.0.1:{user_port}", user_url, user_session)
             clients.append(local)
             assert not local.enter()["sudo_available"]
@@ -235,7 +243,7 @@ def main():
             for user in (False, True):
                 start(user)
                 assert not configs[user].with_suffix(".pairing.json").exists()
-            user_session = request(user_url, "/v1/admin/login", {"credential": credential})["session"]
+            user_session = ticket_login(binary, user_url, configs[True])
             # The paired privileged daemon is managed only through the user daemon.
             try:
                 request(root_url, "/v1/admin/login", {"credential": credential})

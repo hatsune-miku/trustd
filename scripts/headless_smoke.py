@@ -70,7 +70,12 @@ def main():
                         time.sleep(0.1)
                 assert health["status"] == "ok" and health["daemon"] == "user", health
                 assert b"<html" in request("/").lower(), "management UI must remain embedded"
-                session = json.loads(request("/v1/admin/login", {"credential": {"type": "password", "value": password}}))["session"]
+                # The user daemon has no static password; sign in with a local ticket.
+                url = subprocess.run([str(bundle / "trustd"), "login-url", "--config", str(config)],
+                                     env=env, stdout=subprocess.PIPE, text=True, check=True,
+                                     **identity).stdout.strip()
+                ticket = url.split("#ticket=", 1)[1]
+                session = json.loads(request("/v1/admin/login", {"credential": {"type": "ticket", "value": ticket}}))["session"]
                 settings = json.loads(request("/v1/admin/settings", session=session))
                 assert settings["desktop_available"] is False, settings
                 print("Headless user daemon, management page and authenticated settings: OK")

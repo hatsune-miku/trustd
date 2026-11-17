@@ -7,7 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn authorize(base: &str, password: &str) -> Value {
+/// Sign in with a single-use ticket for the user daemon configured at `config`.
+pub fn authorize(base: &str, config: &std::path::Path) -> Value {
+    let ticket = localshelld::login::write_ticket(config).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let executable = directory
         .path()
@@ -38,7 +40,7 @@ pub fn authorize(base: &str, password: &str) -> Value {
         .unwrap();
     let login: Value = http
         .post(format!("{base}/v1/admin/login"))
-        .json(&json!({"credential":{"type":"password","value":password}}))
+        .json(&json!({"credential":{"type":"ticket","value":ticket}}))
         .send()
         .unwrap()
         .error_for_status()

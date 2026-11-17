@@ -184,6 +184,32 @@ impl Runtime {
             .context("device is not in the owner's roster")
     }
 
+    /// This device's ID once it has joined a backend.
+    pub(crate) async fn joined_device_id(&self) -> Option<String> {
+        let saved = self.saved.lock().await;
+        let saved = saved.as_ref()?;
+        saved.owner.as_ref()?;
+        saved.identity.id().ok()
+    }
+
+    /// Verify an owner-signed statement against the owner pinned at join and
+    /// the keys trusted by the verified roster.
+    pub(crate) async fn verify_owner_statement(
+        &self,
+        signed: &SignedStatement,
+    ) -> Result<owner::Statement> {
+        let saved = self.saved.lock().await;
+        let saved = saved
+            .as_ref()
+            .context("this device has not joined a backend")?;
+        let pinned = saved
+            .owner
+            .as_ref()
+            .context("this device has not joined a backend")?;
+        let keys = owner::roster(pinned, &saved.statements).keys;
+        Ok(signed.verify(pinned, &keys)?)
+    }
+
     /// Whether this device joined a backend and pinned its owner.
     pub(crate) async fn joined(&self) -> bool {
         self.saved

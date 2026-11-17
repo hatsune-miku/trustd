@@ -43,6 +43,8 @@ pub struct Credential {
 pub enum CredentialKind {
     Password,
     Totp,
+    /// Single-use ticket from `trustd login-url`; checked by management.
+    Ticket,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +98,7 @@ impl AuthManager {
                 .as_ref()
                 .and_then(|secret| create_totp(secret).ok())
                 .is_some_and(|totp| totp.check_current(credential.value.trim()).unwrap_or(false)),
+            CredentialKind::Ticket => false,
         };
         if valid {
             self.failed_attempts.clear();

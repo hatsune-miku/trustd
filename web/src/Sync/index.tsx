@@ -15,12 +15,13 @@ type Tokens = { access_token: string; expires_at: number }
 type Prepared = { statement: string; challenge: string; rp_id: string; allow_credentials: string[] }
 type Registered = Tokens & { endorse?: Prepared }
 type JoinRequest = Prepared & { name: string; device_id: string; user_code: string; approved: boolean }
+type SignRequest = Prepared & { device_name: string; device_id: string; user_code: string; approved: boolean }
 type Passkey = { id: string; name: string; trusted: boolean }
 type Device = { name: string; approved_at: number }
 type Roster = { devices: Record<string, Device> }
 
-function joinCode() {
-  return new URLSearchParams(location.hash.slice(1)).get('join') ?? ''
+function fragment(name: string) {
+  return new URLSearchParams(location.hash.slice(1)).get(name) ?? ''
 }
 
 /** Have the owner's passkey sign a prepared statement (one tap). */
@@ -40,15 +41,20 @@ export function Sync() {
   const [login, setLogin] = useState<Tokens | null>(null)
   const [bootstrap, setBootstrap] = useState('')
   const [name, setName] = useState('我的通行密钥')
-  const [code, setCode] = useState(joinCode)
+  const [code, setCode] = useState(() => fragment('join'))
+  const [signCode, setSignCode] = useState(() => fragment('sign'))
   const [request, setRequest] = useState<JoinRequest | null>(null)
+  const [signature, setSignature] = useState<SignRequest | null>(null)
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
   const [roster, setRoster] = useState<Roster | null>(null)
   const action = useAction()
 
   useEffect(() => {
     void action.run(async () => setInfo(await api<Info>('/sync/v1/info')))
-    const changed = () => setCode(joinCode())
+    const changed = () => {
+      setCode(fragment('join'))
+      setSignCode(fragment('sign'))
+    }
     window.addEventListener('hashchange', changed)
     return () => window.removeEventListener('hashchange', changed)
   }, [])
@@ -57,6 +63,13 @@ export function Sync() {
     if (code)
       void action.run(async () => setRequest(await api<JoinRequest>('/sync/v1/device/inspect', { user_code: code })))
   }, [code])
+  useEffect(() => {
+    setSignature(null)
+    if (signCode)
+      void action.run(async () =>
+        setSignature(await api<SignRequest>('/sync/v1/signatures/inspect', { user_code: signCode }))
+      )
+  }, [signCode])
   useEffect(() => {
     if (!login) return
     const timer = window.setTimeout(
@@ -130,6 +143,15 @@ export function Sync() {
     }, '设备已加入，可以回到该设备继续。')
   }
 
+  function confirmLogin() {
+    if (!signature) return
+    void action.run(async () => {
+      await api('/sync/v1/signatures/approve', { user_code: signature.user_code, assertion: await sign(signature) })
+      setSignature({ ...signature, approved: true })
+      history.replaceState(null, '', location.pathname)
+    }, '已确认登录，可以回到设备的管理页。')
+  }
+
   function signed(kind: 'device_revoke' | 'passkey_add' | 'passkey_remove', body: object, done: string) {
     void action.run(async () => {
       await submit(await api<Prepared>('/sync/v1/statements/prepare', { kind, ...body }, login?.access_token))
@@ -176,6 +198,20 @@ export function Sync() {
                 </p>
                 <Button variant="primary" onClick={approve} disabled={action.busy || request.approved}>
                   {request.approved ? '已批准' : '批准此设备'}
+                </Button>
+              </div>
+            </section>
+          )}
+          {signature && (
+            <section className="sync-section sync-join">
+              <h2 className="section-title">确认登录设备管理页</h2>
+              <div className="sync-device">
+                <strong className="sync-device-name">{signature.device_name}</strong>
+                <span className="sync-device-code">{signature.user_code}</span>
+                <code className="sync-device-id">{signature.device_id}</code>
+                <p className="sync-device-hint">核对设备管理页显示的验证码。确认后，该设备的管理页登录 10 分钟。</p>
+                <Button variant="primary" onClick={confirmLogin} disabled={action.busy || signature.approved}>
+                  {signature.approved ? '已确认' : '确认登录'}
                 </Button>
               </div>
             </section>

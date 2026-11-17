@@ -4,7 +4,6 @@ mod ssh;
 
 use super::agents;
 use anyhow::Result;
-use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
 use anyhow::{Context, bail, ensure};
@@ -27,11 +26,12 @@ fn select_terminal(explicit: bool, no_open: bool, display: bool, wayland: bool) 
 trait Prompts {
     fn say(&mut self, message: &str) -> Result<()>;
     fn line(&mut self, prompt: &str) -> Result<String>;
-    fn password(&mut self, prompt: &str) -> Result<Zeroizing<String>>;
 }
 
 struct Options {
-    password: Zeroizing<Option<String>>,
+    /// The owner's backend to join after installation; none once joined.
+    backend: Option<String>,
+    device_name: Option<String>,
     agents: Vec<String>,
     replace_agents: bool,
 }
@@ -73,26 +73,33 @@ fn selection(input: &str, catalog: &[agents::Agent]) -> Result<Vec<String>> {
 
 fn collect(
     prompts: &mut impl Prompts,
-    needs_password: bool,
+    joined: Option<&str>,
+    default_name: &str,
     catalog: &[agents::Agent],
 ) -> Result<Option<Options>> {
-    let password = if needs_password {
-        prompts.say("设置用于补建缺失配置的主密码；安装时会优先恢复有效备份。")?;
-        loop {
-            let first = prompts.password("主密码：")?;
-            let second = prompts.password("再次输入：")?;
-            if first.len() > 4096 {
-                prompts.say("主密码不能超过 4096 字节。")?;
-            } else if *first != *second {
-                prompts.say("两次密码不一致，请重试。")?;
-            } else if !first.is_empty() || confirm(prompts, "主密码为空，确认使用空密码？")?
-            {
-                break Zeroizing::new(Some(first.to_string()));
-            }
-        }
+    // There is no standalone mode: a device that has not joined must name its
+    // owner's backend. No password is set; the owner's passkey signs in.
+    let (backend, device_name) = if let Some(url) = joined {
+        prompts.say(&format!("已加入后端 {url}，保留现有授权配置。"))?;
+        (None, None)
     } else {
-        prompts.say("保留现有主密码和授权配置。")?;
-        Zeroizing::new(None)
+        prompts.say("安装后，此设备将加入你的后端，由通行密钥批准。")?;
+        let url = loop {
+            let input = prompts.line("后端地址（https://…）：")?;
+            let input = input.trim().trim_end_matches('/');
+            if input.starts_with("https://") || input.starts_with("http://localhost") {
+                break input.to_owned();
+            }
+            prompts.say("请输入以 https:// 开头的后端地址。")?;
+        };
+        let name = prompts.line(&format!("设备名称 [{default_name}]："))?;
+        let name = name.trim();
+        let name = if name.is_empty() {
+            default_name.to_owned()
+        } else {
+            name.chars().take(80).collect()
+        };
+        (Some(url), Some(name))
     };
     prompts.say("选择要接入的 AI 客户端：")?;
     for (index, agent) in catalog.iter().enumerate() {
@@ -123,7 +130,8 @@ fn collect(
         return Ok(None);
     }
     Ok(Some(Options {
-        password,
+        backend,
+        device_name,
         agents: selected,
         replace_agents,
     }))
@@ -166,25 +174,6 @@ impl Prompts for Terminal {
         write!(self.output, "{prompt}")?;
         self.output.flush()?;
         super::super::read_input_line(&mut self.input).context("终端输入已结束。")
-    }
-
-    fn password(&mut self, prompt: &str) -> Result<Zeroizing<String>> {
-        use nix::sys::signal::{SigSet, SigmaskHow, Signal};
-
-        struct RestoreMask(SigSet);
-        impl Drop for RestoreMask {
-            fn drop(&mut self) {
-                let _ = self.0.thread_set_mask();
-            }
-        }
-
-        // rpassword raises a thread-directed SIGINT for Ctrl+C before its raw
-        // terminal guard drops. Defer that signal on this synchronous thread
-        // until rpassword has restored echo; then restore the original mask.
-        let mut signals = SigSet::empty();
-        signals.add(Signal::SIGINT);
-        let _restore = RestoreMask(signals.thread_swap_mask(SigmaskHow::SIG_BLOCK)?);
-        Ok(Zeroizing::new(rpassword::prompt_password(prompt)?))
     }
 }
 
@@ -229,9 +218,12 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
         state.paths.config.display(),
         state.user_config.display()
     ))?;
+    let _ = system_initialized;
+    let (joined, backend) = super::joined(&state.user_config);
     let Some(options) = collect(
         &mut terminal,
-        !system_initialized || !state.user_config.try_exists()?,
+        backend.as_deref().filter(|_| joined),
+        &super::super::joining::device_name(),
         &state.agents,
     )?
     else {
@@ -241,7 +233,6 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
     let outcomes = execute(
         &state,
         Operation::Install,
-        options.password,
         &options.agents,
         options.replace_agents,
         platform::Elevation::Terminal,
@@ -260,6 +251,23 @@ pub(crate) fn run(mode: Option<bool>) -> Result<()> {
         }
         if let Some(backup) = outcome.backup {
             terminal.say(&format!("备份：{}", backup.display()))?;
+        }
+    }
+    if let Some(url) = options.backend {
+        terminal.say("在任意浏览器（例如手机）打开下列链接，按一次通行密钥批准此设备：")?;
+        let joined = super::super::joining::join_with(
+            url.clone(),
+            options.device_name,
+            Some(state.user_config.clone()),
+            |uri, code| {
+                let _ = terminal.say(&format!("{uri}\n验证码：{code}"));
+            },
+        );
+        match joined {
+            Ok(()) => terminal.say("已加入后端，此设备与你的其他设备互相信任。")?,
+            Err(error) => terminal.say(&format!(
+                "服务已安装，但未加入后端：{error:#}\n可稍后运行 trustd join {url} 重试。"
+            ))?,
         }
     }
     let user = localshelld::config::Config::load(&state.user_config)?;
@@ -290,7 +298,6 @@ mod tests {
 
     pub(super) struct Scripted {
         pub(super) lines: VecDeque<&'static str>,
-        pub(super) passwords: VecDeque<&'static str>,
         pub(super) output: String,
     }
 
@@ -303,12 +310,6 @@ mod tests {
             self.lines
                 .pop_front()
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("EOF"))
-        }
-        fn password(&mut self, _: &str) -> Result<Zeroizing<String>> {
-            self.passwords
-                .pop_front()
-                .map(|p| Zeroizing::new(p.to_owned()))
                 .ok_or_else(|| anyhow::anyhow!("EOF"))
         }
     }
@@ -332,8 +333,9 @@ mod tests {
         // Exercise real /dev/tty and password echo handling, but never execute
         // installation, elevation, configuration writes or service management.
         let mut terminal = Terminal::open().unwrap();
-        if let Some(options) = collect(&mut terminal, true, &catalog()).unwrap() {
-            assert_eq!(options.password.as_deref(), Some(" test-终端 "));
+        if let Some(options) = collect(&mut terminal, None, "fixture-host", &catalog()).unwrap() {
+            assert_eq!(options.backend.as_deref(), Some("https://backend.example"));
+            assert_eq!(options.device_name.as_deref(), Some("tty 设备"));
             assert_eq!(options.agents, ["codex"]);
             assert!(!options.replace_agents);
             terminal.say("TTY_FIXTURE_CONFIRMED").unwrap();
@@ -384,28 +386,44 @@ mod tests {
     }
 
     #[test]
-    fn new_installation_retries_mismatch_and_preserves_password_whitespace() {
+    fn new_installation_requires_a_backend_and_defaults_the_device_name() {
         let mut prompt = Scripted {
-            lines: ["1,2", "n", "y"].into(),
-            passwords: ["wrong", "different", "  secret ", "  secret "].into(),
+            lines: [
+                "ftp://backend",
+                "https://backend.example/",
+                "",
+                "1,2",
+                "n",
+                "y",
+            ]
+            .into(),
             output: String::new(),
         };
-        let options = collect(&mut prompt, true, &catalog()).unwrap().unwrap();
-        assert_eq!(options.password.as_deref(), Some("  secret "));
+        let options = collect(&mut prompt, None, "fixture-host", &catalog())
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.backend.as_deref(), Some("https://backend.example"));
+        assert_eq!(options.device_name.as_deref(), Some("fixture-host"));
         assert_eq!(options.agents, ["codex", "gemini"]);
         assert!(!options.replace_agents);
-        assert!(!prompt.output.contains("secret"));
+        assert!(prompt.output.contains("https://"));
     }
 
     #[test]
-    fn repair_keeps_password_and_requires_explicit_replacement_consent() {
+    fn repair_of_a_joined_device_skips_the_backend_and_requires_replacement_consent() {
         let mut prompt = Scripted {
             lines: ["0", "2", "y", "y"].into(),
-            passwords: [].into(),
             output: String::new(),
         };
-        let options = collect(&mut prompt, false, &catalog()).unwrap().unwrap();
-        assert!(options.password.is_none());
+        let options = collect(
+            &mut prompt,
+            Some("https://backend.example"),
+            "fixture-host",
+            &catalog(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(options.backend.is_none());
         assert_eq!(options.agents, ["gemini"]);
         assert!(options.replace_agents);
     }
@@ -414,27 +432,14 @@ mod tests {
     fn default_confirmation_and_eof_do_not_authorize_installation() {
         let mut prompt = Scripted {
             lines: ["", ""].into(),
-            passwords: [].into(),
             output: String::new(),
         };
-        assert!(collect(&mut prompt, false, &catalog()).unwrap().is_none());
-        assert!(collect(&mut prompt, false, &catalog()).is_err());
-    }
-
-    #[test]
-    fn empty_password_requires_separate_confirmation() {
-        let mut prompt = Scripted {
-            lines: ["y", "", "y"].into(),
-            passwords: ["", ""].into(),
-            output: String::new(),
-        };
-        assert_eq!(
-            collect(&mut prompt, true, &catalog())
+        let joined = Some("https://backend.example");
+        assert!(
+            collect(&mut prompt, joined, "fixture-host", &catalog())
                 .unwrap()
-                .unwrap()
-                .password
-                .as_deref(),
-            Some("")
+                .is_none()
         );
+        assert!(collect(&mut prompt, joined, "fixture-host", &catalog()).is_err());
     }
 }

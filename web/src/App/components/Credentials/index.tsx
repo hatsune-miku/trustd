@@ -3,8 +3,7 @@ import { type FormEvent, useEffect, useState } from 'react'
 import { Button, Field, TextBox } from '@a1knla/cakeui'
 
 import { Feedback } from '../../../Feedback'
-import { type Settings, api, dateTime } from '../../../api'
-import { registerPasskey } from '../../../passkeys'
+import { type Settings, api } from '../../../api'
 import { useAction } from '../../../useAction'
 
 import './index.scss'
@@ -17,7 +16,6 @@ export function Credentials({ session, onPasswordChanged }: { session: string; o
   const [confirmation, setConfirmation] = useState('')
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
   const [code, setCode] = useState('')
-  const [name, setName] = useState('')
   const action = useAction()
   async function refresh() {
     setSettings(await api<Settings>('/v1/admin/settings', undefined, session))
@@ -43,18 +41,10 @@ export function Credentials({ session, onPasswordChanged }: { session: string; o
       await refresh()
     }, 'Authenticator 已启用。')
   }
-  function addPasskey(event: FormEvent) {
-    event.preventDefault()
-    void action.run(async () => {
-      await registerPasskey(name, session)
-      setName('')
-      await refresh()
-    }, '通行密钥已添加。')
-  }
   return (
     <div className="credentials-view">
       <h2 className="section-title">验证方式</h2>
-      <p className="description">任一已启用的方式都可用于登录管理页面。</p>
+      <p className="description">未配对的系统进程使用 Master Password 登录，可另加 Authenticator 动态码。</p>
       <Feedback {...action} />
       <section className="credential-section">
         <h3 className="subsection-title">Master Password</h3>
@@ -149,59 +139,6 @@ export function Credentials({ session, onPasswordChanged }: { session: string; o
             </div>
           </form>
         )}
-      </section>
-      <section className="credential-section">
-        <h3 className="subsection-title">通行密钥</h3>
-        {location.hostname !== 'localhost' && (
-          <p className="description">
-            通行密钥需要从{' '}
-            <a className="content-link" href={`http://localhost:${location.port}/`}>
-              localhost 入口
-            </a>{' '}
-            使用。
-          </p>
-        )}
-        <form className="form-stack" onSubmit={addPasskey}>
-          <Field htmlFor="passkey-name" label="名称">
-            <TextBox
-              id="passkey-name"
-              placeholder="例如：这台电脑"
-              required
-              maxLength={80}
-              value={name}
-              onChange={(event) => setName(event.currentTarget.value)}
-            />
-          </Field>
-          <div className="form-actions">
-            <Button type="submit" disabled={action.busy}>
-              添加通行密钥
-            </Button>
-          </div>
-        </form>
-        <ul className="passkey-list">
-          {settings?.passkeys.map((key) => (
-            <li key={key.id} className="passkey-row">
-              <div className="passkey-details">
-                <span>{key.name}</span>
-                <span className="passkey-date">添加于 {dateTime(key.created_at)}</span>
-              </div>
-              <Button
-                variant="ghost"
-                disabled={action.busy}
-                onClick={() =>
-                  void action.run(async () => {
-                    if (!window.confirm(`移除通行密钥“${key.name}”？`)) return
-                    await api('/v1/admin/passkeys/remove', { id: key.id }, session)
-                    await refresh()
-                  }, '通行密钥已移除。')
-                }
-              >
-                移除
-              </Button>
-            </li>
-          ))}
-        </ul>
-        {settings?.passkeys.length === 0 && <p className="empty-state">尚未添加通行密钥。</p>}
       </section>
     </div>
   )

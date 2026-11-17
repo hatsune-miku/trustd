@@ -61,6 +61,13 @@ pub enum Statement {
         credential_id: Base64UrlSafeData,
         issued_at: i64,
     },
+    /// One-time login to a device's management page. Never stored in the
+    /// roster; the device checks its own nonce and the statement's age.
+    ManagementLogin {
+        device_id: String,
+        nonce: String,
+        issued_at: i64,
+    },
 }
 
 /// Statement text exactly as signed, with the owner's WebAuthn assertion.
@@ -89,6 +96,13 @@ pub fn device_id(public_key: &str) -> Result<String> {
         return Err(Error("invalid device public key"));
     }
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn valid_device_id(id: &str) -> Result<()> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error("invalid device ID"));
+    }
+    Ok(())
 }
 
 /// The WebAuthn challenge that signs `statement`.
@@ -121,9 +135,15 @@ impl Statement {
                     return Err(Error("device name must contain 1–80 printable bytes"));
                 }
             }
-            Self::DeviceRevoke { device_id: id, .. } => {
-                if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Err(Error("invalid device ID"));
+            Self::DeviceRevoke { device_id: id, .. } => valid_device_id(id)?,
+            Self::ManagementLogin {
+                device_id: id,
+                nonce,
+                ..
+            } => {
+                valid_device_id(id)?;
+                if nonce.len() < 16 || nonce.len() > 128 {
+                    return Err(Error("invalid login nonce"));
                 }
             }
             Self::PasskeyAdd { .. } | Self::PasskeyRemove { .. } => {}
@@ -250,6 +270,8 @@ pub fn roster(owner: &Owner, statements: &[SignedStatement]) -> Roster {
                     keys.retain(|k| k.credential_id != credential_id);
                 }
             }
+            // Login proofs are one-time and never change the roster.
+            Statement::ManagementLogin { .. } => {}
         }
     }
     approved.retain(|id, _| !revoked.contains(id));

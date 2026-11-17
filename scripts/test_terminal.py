@@ -91,31 +91,29 @@ class TerminalTests(unittest.TestCase):
                 os.waitpid(pid, 0)
             os.close(master)
 
-    def test_password_hidden_and_controlling_terminal_used_with_piped_stdin(self):
+    def test_backend_prompts_use_the_controlling_terminal_with_piped_stdin(self):
         for piped_stdin in (False, True):
             with self.subTest(piped_stdin=piped_stdin):
                 code, output = self.interact([
-                    ("主密码：", " test-终端 \n".encode(), True),
-                    ("再次输入：", " test-终端 \n".encode(), True),
+                    ("后端地址（https://…）：", b"https://backend.example\n", False),
+                    ("设备名称 [fixture-host]：", "tty 设备\n".encode(), False),
                     ("直接回车跳过：", b"1\n", False),
                     ("原配置会备份。 [y/N]：", b"n\n", False),
                     ("并写入所选客户端配置？ [y/N]：", b"y\n", False),
                 ], piped_stdin=piped_stdin)
                 self.assertEqual(code, 0, output)
                 self.assertIn("TTY_FIXTURE_CONFIRMED", output)
-                self.assertNotIn("test-终端", output)
                 self.assertNotIn("pipeline contents", output)
 
     def test_default_confirmation_cancels(self):
         code, output = self.interact([
-            ("主密码：", b"private\n", True),
-            ("再次输入：", b"private\n", True),
+            ("后端地址（https://…）：", b"https://backend.example\n", False),
+            ("设备名称 [fixture-host]：", b"\n", False),
             ("直接回车跳过：", b"\n", False),
             ("并写入所选客户端配置？ [y/N]：", b"\n", False),
         ])
         self.assertEqual(code, 0, output)
         self.assertIn("TTY_FIXTURE_CANCELLED", output)
-        self.assertNotIn("private", output)
 
     def test_ssh_guide_prefills_session_and_prints_local_command(self):
         code, output = self.interact([
@@ -131,13 +129,13 @@ class TerminalTests(unittest.TestCase):
         self.assertNotIn("32119", output)
         self.assertNotIn("pipeline contents", output)
 
-    def test_password_eof_restores_echo_without_confirming(self):
-        code, output = self.interact([("主密码：", b"\x04", True)])
+    def test_eof_cancels_without_confirming(self):
+        code, output = self.interact([("后端地址（https://…）：", b"\x04", False)])
         self.assertNotEqual(code, 0, output)
         self.assertNotIn("TTY_FIXTURE_CONFIRMED", output)
 
-    def test_password_interrupt_restores_echo(self):
-        code, output = self.interact([("主密码：", b"\x03", True)])
+    def test_interrupt_cancels_without_confirming(self):
+        code, output = self.interact([("后端地址（https://…）：", b"\x03", False)])
         self.assertNotEqual(code, 0, output)
         self.assertNotIn("TTY_FIXTURE_CONFIRMED", output)
 

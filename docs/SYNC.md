@@ -160,6 +160,10 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 
 `POST /session/revoke`，body `{"id":""}` 撤销调用者自己的会话，用于浏览器退出登录或设备离开后端。
 
+## 签名请求
+
+设备可以请主人签署关于自己的一次性声明，目前用于管理页登录（`management_login`）。设备以自己的会话 `POST /signatures`，body `{"statement":"..."}`，只能请求关于本机 device ID 的声明，返回私有的 `id`、给页面用的 `code` 和 `verification_uri`（`https://sync.example.com/#sign=<CODE>`），5 分钟内有效。页面 `POST /signatures/inspect`（无需登录）显示设备名称与待签名原文，主人签名后 `POST /signatures/approve`。设备 `POST /signatures/poll`，body `{"id":"..."}` 取回断言，只有发起请求的设备能取回，且只能取回一次。设备自行验证签名与声明原文；后端只做转发。
+
 ## 设备中转
 
 后端同时提供设备之间的加密中转：`GET /v2/relay/<device_id>`（WebSocket），`Authorization: Bearer <access_token>`。只有名册中的设备、使用绑定到自己的有效会话才能连接；心跳时重新检查名册与会话，被撤销的设备会被断开。设备之间使用 Noise IK 端到端加密，公钥来自已验证的名册，中转只能看到密文、设备 ID 和流量大小。

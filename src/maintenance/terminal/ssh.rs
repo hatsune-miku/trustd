@@ -153,7 +153,6 @@ mod tests {
     fn run(lines: &[&'static str], connection: Option<&str>) -> Result<String> {
         let mut prompts = Scripted {
             lines: lines.iter().copied().collect(),
-            passwords: [].into(),
             output: String::new(),
         };
         guide(

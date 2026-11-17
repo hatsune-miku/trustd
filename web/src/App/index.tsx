@@ -71,7 +71,7 @@ export function App() {
           </div>
         )}
         {!login ? (
-          <Login onLogin={signedIn} scope={scope} />
+          <Login onLogin={signedIn} scope={scope} daemon={health?.daemon} />
         ) : (
           <div className="workspace-body">
             <nav className="workspace-nav" aria-label="授权管理">
@@ -81,7 +81,7 @@ export function App() {
                 ['logs', '日志'],
                 ...(health?.daemon === 'user' ? [['remote', '远端主机']] : []),
                 ['secrets', '凭据'],
-                ['credentials', '验证方式'],
+                ...(health?.daemon === 'privileged' ? [['credentials', '验证方式']] : []),
                 ['desktop', '桌面授权'],
               ].map(([id, label]) => (
                 <Button

@@ -17,6 +17,29 @@ fn daemon(directory: &Path) -> AppState {
         .unwrap()
 }
 
+async fn local(app: &axum::Router, path: &str, body: Value) -> (u16, Value) {
+    use tower::ServiceExt;
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::post(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 /// What the owner does on the approval page: read the exact statement and
 /// sign it with the passkey. No login is needed for this single tap.
 async fn approve(url: &str, passkey: &Authenticator, owner: &owner::Owner, user_code: &str) {
@@ -126,6 +149,48 @@ async fn devices_join_with_one_owner_signature_and_reach_each_other_over_the_bac
         .await
         .unwrap();
     assert_eq!(info["platform"], std::env::consts::OS);
+
+    // Management login: the daemon has its own one-time statement signed by
+    // the owner's passkey on the backend, and verifies the signature itself.
+    let app = crate::server::router(laptop.clone());
+    let (status, started) = local(&app, "/v1/admin/login/passkey/start", json!({})).await;
+    assert_eq!(status, 200, "{started}");
+    let poll = json!({"login_id":started["login_id"]});
+    assert_eq!(
+        local(&app, "/v1/admin/login/passkey/poll", poll.clone())
+            .await
+            .1["pending"],
+        true
+    );
+    let client = reqwest::Client::new();
+    let inspected: Value = client
+        .post(format!("{url}/sync/v1/signatures/inspect"))
+        .json(&json!({"user_code":started["user_code"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let statement = inspected["statement"].as_str().unwrap();
+    assert!(statement.contains("management_login"));
+    let response = client
+        .post(format!("{url}/sync/v1/signatures/approve"))
+        .json(&json!({"user_code":started["user_code"],
+            "assertion":passkey.assert(&owner, &owner::challenge(statement), 0x05)}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let (status, session) = local(&app, "/v1/admin/login/passkey/poll", poll.clone()).await;
+    assert_eq!(status, 200, "{session}");
+    assert!(session["session"].is_string());
+    // The same login cannot be used twice.
+    assert_eq!(
+        local(&app, "/v1/admin/login/passkey/poll", poll).await.0,
+        400
+    );
+
     for (_, state) in &devices {
         state.shutdown().await;
     }

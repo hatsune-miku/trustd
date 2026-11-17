@@ -163,7 +163,7 @@ fn elevated_daemon_supervises_only_a_medium_same_user_child() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    let entered = support::authorize(&base, "disposable elevation fixture");
+    let entered = support::authorize(&base, &path);
     assert_eq!(entered["privilege_levels"], json!(["current-user"]));
     let handle = entered["handle"].as_str().unwrap();
     let result: Value = http.post(format!("{base}/v1/commands/run"))

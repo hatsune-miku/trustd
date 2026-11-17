@@ -23,6 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 mod bundle;
 mod installation;
+mod joining;
 #[cfg(any(target_os = "macos", test))]
 mod launchd;
 mod maintenance;
@@ -110,6 +111,22 @@ enum CommandKind {
         privileged_daemon: std::net::SocketAddr,
         #[arg(long)]
         start: bool,
+    },
+    /// Join this device to the owner's backend; the owner approves with one passkey tap.
+    Join {
+        /// Backend origin, for example https://trustd.example.com
+        url: String,
+        /// Device name shown to the owner (defaults to the host name).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Print a single-use management login link for this user's daemon, for
+    /// when the backend passkey login is unavailable.
+    LoginUrl {
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Internal installation step run as the login user: stage the user half of
     /// daemon pairing and print it as JSON for the privileged half.
@@ -309,6 +326,20 @@ async fn run_command(command: CommandKind) -> Result<()> {
             tokio::task::spawn_blocking(move || {
                 require_user()?;
                 installation::setup_user(config, Some(privileged_daemon), start)
+            })
+            .await?
+        }
+        CommandKind::Join { url, name, config } => {
+            tokio::task::spawn_blocking(move || {
+                require_user()?;
+                joining::join(url, name, config)
+            })
+            .await?
+        }
+        CommandKind::LoginUrl { config } => {
+            tokio::task::spawn_blocking(move || {
+                require_user()?;
+                joining::login_url(config)
             })
             .await?
         }

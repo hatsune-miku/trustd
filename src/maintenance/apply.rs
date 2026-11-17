@@ -118,12 +118,6 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
             config.bind == plan.system_bind,
             "system and user endpoints differ; existing configuration was not overwritten"
         );
-    } else {
-        ensure!(
-            plan.password_hash.is_some(),
-            "system configuration is missing at {}; provide an initialization Master Password in the maintenance wizard",
-            paths.config.display()
-        );
     }
     prepare_directory(&paths.program, true)?;
     prepare_directory(&paths.data, false)?;
@@ -180,11 +174,9 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         let mut config = if paths.config.try_exists()? {
             Config::load(&paths.config)?
         } else {
+            // A paired privileged daemon has no management login of its own.
             Config {
-                password_hash: plan
-                    .password_hash
-                    .clone()
-                    .context("missing initial password verifier")?,
+                password_hash: plan.password_hash.clone().unwrap_or_default(),
                 bind: plan.system_bind,
                 ..Config::default()
             }

@@ -73,10 +73,11 @@ test('remote task errors, credential-only sessions, Codex approval and event pag
       }
     await route.fulfill({ json: result })
   })
-  await page.goto('/')
-  await page.getByLabel('验证方式').selectOption('password')
-  await page.getByLabel('Master Password', { exact: true }).fill('browser test')
-  await page.getByRole('button', { name: '验证身份', exact: true }).click()
+  // A user daemon has no password; sign in through a `trustd login-url` link.
+  await page.route('**/v1/admin/login', (route) =>
+    route.fulfill({ json: { session: 'fixture-session', expires_at: 4102444800 } })
+  )
+  await page.goto('/#ticket=fixture-ticket')
   await page.getByRole('button', { name: '远端主机', exact: true }).click()
   await page.getByRole('button', { name: '连接', exact: true }).click()
   await expect(page.locator('.remote-task')).toContainText('Out-File: output path could not be resolved')

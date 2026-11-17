@@ -73,9 +73,20 @@ struct Device {
     last_poll: i64,
     approval: Option<SignedStatement>,
 }
+/// A device asking the owner to sign one of its own statements, such as a
+/// management login. The device verifies the returned assertion itself.
+struct SignatureRequest {
+    code: String,
+    device_id: String,
+    device_name: String,
+    statement: String,
+    expires_at: i64,
+    assertion: Option<PublicKeyCredential>,
+}
 struct Pending {
     challenges: HashMap<String, (i64, Challenge)>,
     devices: HashMap<String, Device>,
+    signatures: HashMap<String, SignatureRequest>,
     minute: i64,
     starts: u32,
 }
@@ -84,6 +95,8 @@ impl Pending {
         let now = Utc::now().timestamp();
         self.challenges.retain(|_, (expiry, _)| *expiry > now);
         self.devices.retain(|_, device| device.expires_at > now);
+        self.signatures
+            .retain(|_, request| request.expires_at > now);
     }
     fn allow_start(&mut self) -> Result<()> {
         self.prune();
@@ -93,7 +106,9 @@ impl Pending {
             self.starts = 0;
         }
         self.starts += 1;
-        if self.starts > 120 || self.challenges.len() + self.devices.len() >= MAX_PENDING {
+        if self.starts > 120
+            || self.challenges.len() + self.devices.len() + self.signatures.len() >= MAX_PENDING
+        {
             return Err(Error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many pending requests; retry later",
@@ -166,6 +181,7 @@ impl App {
             pending: Arc::new(Mutex::new(Pending {
                 challenges: HashMap::new(),
                 devices: HashMap::new(),
+                signatures: HashMap::new(),
                 minute: 0,
                 starts: 0,
             })),
@@ -339,6 +355,10 @@ pub fn router(app: App) -> Router {
         .route("/sync/v1/roster", get(roster))
         .route("/sync/v1/statements/prepare", post(statement_prepare))
         .route("/sync/v1/statements", post(statement_submit))
+        .route("/sync/v1/signatures", post(signature_start))
+        .route("/sync/v1/signatures/inspect", post(signature_inspect))
+        .route("/sync/v1/signatures/approve", post(signature_approve))
+        .route("/sync/v1/signatures/poll", post(signature_poll))
         .route("/sync/v1/vault", get(vault_get).put(vault_put))
         .route("/sync/v1/telegram", post(telegram::control))
         .route("/sync/v1/telegram/request", post(telegram::create))
@@ -926,6 +946,9 @@ async fn statement_submit(
         Statement::DeviceApprove { .. } => {
             return Err(bad("devices join through the approval page"));
         }
+        Statement::ManagementLogin { .. } => {
+            return Err(bad("login proofs are returned to the device, not recorded"));
+        }
         Statement::DeviceRevoke { device_id, .. } => {
             next.sessions
                 .retain(|_, session| session.device.as_deref() != Some(device_id.as_str()));
@@ -960,6 +983,147 @@ async fn statement_submit(
     // Wake long polls so revoked devices are rejected promptly.
     app.revision.send_replace(store.saved.vault.revision);
     Ok(Json(json!({"accepted":true})))
+}
+
+/// The roster device behind an authenticated device session.
+fn session_device(app: &App, store: &Store, headers: &HeaderMap) -> Result<(String, String)> {
+    let claims = app.authenticate(store, headers)?;
+    let forbidden = || Error(StatusCode::FORBIDDEN, "a joined device session is required");
+    let device = store.saved.sessions[&claims.sid]
+        .device
+        .clone()
+        .ok_or_else(forbidden)?;
+    let name = app
+        .roster(&store.saved)
+        .devices
+        .get(&device)
+        .ok_or_else(forbidden)?
+        .name
+        .clone();
+    Ok((device, name))
+}
+
+async fn signature_start(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<DeviceJoin>,
+) -> Result<Json<Value>> {
+    let mut pending = app.pending.lock().await;
+    pending.allow_start()?;
+    let store = app.store.lock().await;
+    let (device_id, device_name) = session_device(&app, &store, &headers)?;
+    let Ok(Statement::ManagementLogin {
+        device_id: signed_for,
+        issued_at,
+        ..
+    }) = Statement::parse(&body.statement)
+    else {
+        return Err(bad("only management login statements can be requested"));
+    };
+    if signed_for != device_id {
+        return Err(Error(
+            StatusCode::FORBIDDEN,
+            "a device can only request statements about itself",
+        ));
+    }
+    if (issued_at - Utc::now().timestamp()).abs() > JOIN_CLOCK_SKEW {
+        return Err(bad(
+            "device clock differs from the service by more than 10 minutes",
+        ));
+    }
+    let id = random();
+    let code = uuid::Uuid::new_v4().simple().to_string()[..12].to_uppercase();
+    pending.signatures.insert(
+        digest(&id),
+        SignatureRequest {
+            code: code.clone(),
+            device_id,
+            device_name,
+            statement: body.statement.clone(),
+            expires_at: Utc::now().timestamp() + 300,
+            assertion: None,
+        },
+    );
+    Ok(Json(json!({
+        "id":id,"code":code,"verification_uri":format!("{}/#sign={code}", app.origin),
+        "expires_in":300,"interval":2
+    })))
+}
+
+async fn signature_inspect(
+    State(app): State<App>,
+    Json(body): Json<UserCode>,
+) -> Result<Json<Value>> {
+    let mut pending = app.pending.lock().await;
+    pending.allow_start()?;
+    let request = pending
+        .signatures
+        .values()
+        .find(|r| r.code == body.user_code)
+        .ok_or_else(|| bad("signature request expired"))?;
+    let store = app.store.lock().await;
+    let Ok(statement) = Statement::parse(&request.statement) else {
+        return Err(internal());
+    };
+    let mut value = app.prepare(&store.saved, &statement);
+    value["statement"] = json!(request.statement);
+    value["challenge"] = json!(b64(&owner::challenge(&request.statement)));
+    value["device_name"] = json!(request.device_name);
+    value["device_id"] = json!(request.device_id);
+    value["user_code"] = json!(request.code);
+    value["purpose"] = json!("management_login");
+    value["approved"] = json!(request.assertion.is_some());
+    Ok(Json(value))
+}
+
+async fn signature_approve(
+    State(app): State<App>,
+    Json(body): Json<Approve>,
+) -> Result<Json<Value>> {
+    let mut pending = app.pending.lock().await;
+    pending.prune();
+    let request = pending
+        .signatures
+        .values_mut()
+        .find(|r| r.code == body.user_code)
+        .ok_or_else(|| bad("signature request expired"))?;
+    let store = app.store.lock().await;
+    let signed = SignedStatement {
+        statement: request.statement.clone(),
+        assertion: body.assertion,
+    };
+    // The device verifies again; checking here only keeps junk out.
+    signed
+        .verify(&app.owner(&store.saved), &app.roster(&store.saved).keys)
+        .map_err(|_| denied())?;
+    request.assertion = Some(signed.assertion);
+    Ok(Json(json!({"approved":true})))
+}
+
+#[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct SignatureId {
+    id: String,
+}
+async fn signature_poll(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<SignatureId>,
+) -> Result<Response> {
+    let mut pending = app.pending.lock().await;
+    pending.prune();
+    let store = app.store.lock().await;
+    let (device_id, _) = session_device(&app, &store, &headers)?;
+    let key = digest(&body.id);
+    let request = pending
+        .signatures
+        .get(&key)
+        .filter(|r| r.device_id == device_id)
+        .ok_or_else(|| bad("signature request expired or already used"))?;
+    let Some(assertion) = request.assertion.clone() else {
+        return Ok((StatusCode::ACCEPTED, Json(json!({"pending":true}))).into_response());
+    };
+    pending.signatures.remove(&key);
+    Ok(Json(json!({"assertion":assertion})).into_response())
 }
 
 /// Relay admission: a roster device presenting an access token of a live
