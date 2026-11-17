@@ -111,6 +111,7 @@ impl AppState {
                     .peer(&owner)
                     .await
                     .context("device was removed from the roster")?;
+                state.remote.permit(&owner, session.options.sudo).await?;
                 let entered = state
                     .enter_remote_granted(&owner, &session.keys, session.options)
                     .await?;

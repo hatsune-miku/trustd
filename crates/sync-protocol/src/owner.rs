@@ -42,6 +42,27 @@ pub struct Owner {
     pub keys: Vec<OwnerKey>,
 }
 
+/// What a one-way rule withholds from the `from` device on the `to` device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Deny {
+    /// No remote execution at all.
+    Execution,
+    /// Execution only as the current user; no Administrator/root.
+    Elevation,
+}
+
+/// A directed exception to the default trust between the owner's devices.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub from: String,
+    pub to: String,
+    pub deny: Deny,
+}
+
+const MAX_RULES: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Statement {
@@ -61,6 +82,8 @@ pub enum Statement {
         credential_id: Base64UrlSafeData,
         issued_at: i64,
     },
+    /// The complete set of one-way rules; the newest by `issued_at` applies.
+    RuleSet { rules: Vec<Rule>, issued_at: i64 },
     /// One-time login to a device's management page. Never stored in the
     /// roster; the device checks its own nonce and the statement's age.
     ManagementLogin {
@@ -146,6 +169,21 @@ impl Statement {
                     return Err(Error("invalid login nonce"));
                 }
             }
+            Self::RuleSet { rules, .. } => {
+                if rules.len() > MAX_RULES {
+                    return Err(Error("too many trust rules"));
+                }
+                let mut seen = BTreeSet::new();
+                for rule in rules {
+                    valid_device_id(&rule.from)?;
+                    valid_device_id(&rule.to)?;
+                    if rule.from == rule.to || !seen.insert((&rule.from, &rule.to)) {
+                        return Err(Error(
+                            "rules need distinct devices and one rule per direction",
+                        ));
+                    }
+                }
+            }
             Self::PasskeyAdd { .. } | Self::PasskeyRemove { .. } => {}
         }
         Ok(statement)
@@ -229,6 +267,20 @@ pub struct Roster {
     pub devices: BTreeMap<String, RosterDevice>,
     pub revoked: BTreeSet<String>,
     pub keys: Vec<OwnerKey>,
+    /// One-way exceptions to the default trust between devices.
+    pub rules: Vec<Rule>,
+    pub rules_issued_at: i64,
+}
+
+impl Roster {
+    /// Whether `from` may not run a request on `to`, given whether it asks
+    /// for Administrator/root. Absent a rule, the owner's devices trust each
+    /// other fully.
+    pub fn denies(&self, from: &str, to: &str, elevated: bool) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.from == from && rule.to == to && (rule.deny == Deny::Execution || elevated)
+        })
+    }
 }
 
 /// Derive the roster. Statements that fail verification are ignored, so a
@@ -239,6 +291,8 @@ pub fn roster(owner: &Owner, statements: &[SignedStatement]) -> Roster {
     let mut keys = owner.keys.clone();
     let mut approved = BTreeMap::new();
     let mut revoked = BTreeSet::new();
+    let mut rules = Vec::new();
+    let mut rules_issued_at = i64::MIN;
     for signed in statements {
         let Ok(statement) = signed.verify(owner, &keys) else {
             continue;
@@ -270,6 +324,16 @@ pub fn roster(owner: &Owner, statements: &[SignedStatement]) -> Roster {
                     keys.retain(|k| k.credential_id != credential_id);
                 }
             }
+            Statement::RuleSet {
+                rules: next,
+                issued_at,
+            } => {
+                // The newest rule set wins; a later statement wins a tie.
+                if issued_at >= rules_issued_at {
+                    rules = next;
+                    rules_issued_at = issued_at;
+                }
+            }
             // Login proofs are one-time and never change the roster.
             Statement::ManagementLogin { .. } => {}
         }
@@ -279,6 +343,8 @@ pub fn roster(owner: &Owner, statements: &[SignedStatement]) -> Roster {
         devices: approved,
         revoked,
         keys,
+        rules,
+        rules_issued_at: rules_issued_at.max(0),
     }
 }
 
@@ -531,5 +597,59 @@ mod tests {
         assert_eq!(removed.keys, vec![second.owner_key()]);
         let kept = roster(&owner, &[first.sign(&owner, &remove(&first))]);
         assert_eq!(kept.keys.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::{testing::*, *};
+
+    fn id(seed: u8) -> String {
+        device_id(&STANDARD.encode([seed; 32])).unwrap()
+    }
+
+    #[test]
+    fn newest_signed_rule_set_applies_one_direction_only() {
+        let passkey = Authenticator::new(b"owner-key");
+        let owner = owner(&passkey);
+        let (laptop, server) = (id(1), id(2));
+        let set = |rules: Vec<Rule>, issued_at| Statement::RuleSet { rules, issued_at };
+        let deny = |from: &str, to: &str, deny| Rule {
+            from: from.into(),
+            to: to.into(),
+            deny,
+        };
+        let newer = passkey.sign(
+            &owner,
+            &set(vec![deny(&server, &laptop, Deny::Elevation)], 5),
+        );
+        let older = passkey.sign(
+            &owner,
+            &set(vec![deny(&server, &laptop, Deny::Execution)], 3),
+        );
+        // Order does not matter: the newer rule set applies.
+        let roster = roster(&owner, &[newer, older]);
+        assert!(roster.denies(&server, &laptop, true));
+        assert!(!roster.denies(&server, &laptop, false));
+        assert!(!roster.denies(&laptop, &server, true));
+        // Unsigned rules are ignored, so default trust stays in place.
+        let forged = Authenticator::new(b"owner-key").sign(
+            &owner,
+            &set(vec![deny(&laptop, &server, Deny::Execution)], 9),
+        );
+        assert!(!super::roster(&owner, &[forged]).denies(&laptop, &server, false));
+        for invalid in [
+            set(vec![deny(&laptop, &laptop, Deny::Execution)], 1),
+            set(
+                vec![
+                    deny(&laptop, &server, Deny::Execution),
+                    deny(&laptop, &server, Deny::Elevation),
+                ],
+                1,
+            ),
+            set(vec![deny("bad", &server, Deny::Execution)], 1),
+        ] {
+            assert!(Statement::parse(&invalid.to_text()).is_err());
+        }
     }
 }

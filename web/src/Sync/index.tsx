@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from 'react'
 
-import { Button, CakeProvider, Field, TextBox } from '@a1knla/cakeui'
+import { Button, CakeProvider, ComboBox, Field, TextBox } from '@a1knla/cakeui'
 
 import { Feedback } from '../Feedback'
 import { api, dateTime } from '../api'
@@ -18,7 +18,8 @@ type JoinRequest = Prepared & { name: string; device_id: string; user_code: stri
 type SignRequest = Prepared & { device_name: string; device_id: string; user_code: string; approved: boolean }
 type Passkey = { id: string; name: string; trusted: boolean }
 type Device = { name: string; approved_at: number }
-type Roster = { devices: Record<string, Device> }
+type Rule = { from: string; to: string; deny: 'execution' | 'elevation' }
+type Roster = { devices: Record<string, Device>; rules: Rule[] }
 
 function fragment(name: string) {
   return new URLSearchParams(location.hash.slice(1)).get(name) ?? ''
@@ -47,6 +48,9 @@ export function Sync() {
   const [signature, setSignature] = useState<SignRequest | null>(null)
   const [passkeys, setPasskeys] = useState<Passkey[]>([])
   const [roster, setRoster] = useState<Roster | null>(null)
+  const [ruleFrom, setRuleFrom] = useState('')
+  const [ruleTo, setRuleTo] = useState('')
+  const [ruleDeny, setRuleDeny] = useState<Rule['deny']>('elevation')
   const action = useAction()
 
   useEffect(() => {
@@ -152,7 +156,7 @@ export function Sync() {
     }, '已确认登录，可以回到设备的管理页。')
   }
 
-  function signed(kind: 'device_revoke' | 'passkey_add' | 'passkey_remove', body: object, done: string) {
+  function signed(kind: 'device_revoke' | 'passkey_add' | 'passkey_remove' | 'rule_set', body: object, done: string) {
     void action.run(async () => {
       await submit(await api<Prepared>('/sync/v1/statements/prepare', { kind, ...body }, login?.access_token))
       await refresh()
@@ -171,6 +175,18 @@ export function Sync() {
   }
 
   const devices = Object.entries(roster?.devices ?? {})
+  const rules = roster?.rules ?? []
+  const deviceName = (id: string) => roster?.devices[id]?.name ?? `${id.slice(0, 12)}…`
+  /** Replace the whole rule set with one owner signature. */
+  function saveRules(next: Rule[], done: string) {
+    signed('rule_set', { rules: next }, done)
+  }
+  function addRule(event: FormEvent) {
+    event.preventDefault()
+    if (!ruleFrom || !ruleTo || ruleFrom === ruleTo) return
+    const next = rules.filter((rule) => !(rule.from === ruleFrom && rule.to === ruleTo))
+    saveRules([...next, { from: ruleFrom, to: ruleTo, deny: ruleDeny }], '规则已生效。')
+  }
   return (
     <CakeProvider mode="light" theme="blue" accentColor="#245aa8" className="app-theme">
       <main className="sync-page">
@@ -259,6 +275,88 @@ export function Sync() {
                   <Button variant="ghost" disabled={action.busy} onClick={() => void action.run(() => refresh())}>
                     刷新设备
                   </Button>
+                </section>
+              )}
+              {login && (
+                <section className="sync-section">
+                  <h2 className="section-title">设备之间的信任</h2>
+                  <p className="description">
+                    同一主人的设备默认互相信任，可以互相执行命令、申请管理员 / root
+                    身份并使用全部凭据。下列规则只在一个方向上收回权限。
+                  </p>
+                  <ul className="sync-list">
+                    {rules.map((rule) => (
+                      <li className="sync-row" key={`${rule.from}-${rule.to}`}>
+                        <span className="sync-row-name">
+                          {deviceName(rule.from)} → {deviceName(rule.to)}：
+                          {rule.deny === 'execution' ? '禁止执行' : '禁止管理员 / root'}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          disabled={action.busy}
+                          onClick={() =>
+                            saveRules(
+                              rules.filter((item) => item !== rule),
+                              '规则已移除。'
+                            )
+                          }
+                        >
+                          移除
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                  {devices.length > 1 && (
+                    <form className="form-stack sync-rule-form" onSubmit={addRule}>
+                      <Field htmlFor="rule-from" label="发起设备">
+                        <ComboBox
+                          id="rule-from"
+                          required
+                          value={ruleFrom}
+                          onChange={(event) => setRuleFrom(event.currentTarget.value)}
+                        >
+                          <option value="">选择设备</option>
+                          {devices.map(([id, device]) => (
+                            <option key={id} value={id}>
+                              {device.name}
+                            </option>
+                          ))}
+                        </ComboBox>
+                      </Field>
+                      <Field htmlFor="rule-to" label="目标设备">
+                        <ComboBox
+                          id="rule-to"
+                          required
+                          value={ruleTo}
+                          onChange={(event) => setRuleTo(event.currentTarget.value)}
+                        >
+                          <option value="">选择设备</option>
+                          {devices
+                            .filter(([id]) => id !== ruleFrom)
+                            .map(([id, device]) => (
+                              <option key={id} value={id}>
+                                {device.name}
+                              </option>
+                            ))}
+                        </ComboBox>
+                      </Field>
+                      <Field htmlFor="rule-deny" label="收回">
+                        <ComboBox
+                          id="rule-deny"
+                          value={ruleDeny}
+                          onChange={(event) => setRuleDeny(event.currentTarget.value as Rule['deny'])}
+                        >
+                          <option value="elevation">管理员 / root 身份</option>
+                          <option value="execution">全部执行</option>
+                        </ComboBox>
+                      </Field>
+                      <div className="form-actions">
+                        <Button type="submit" disabled={action.busy}>
+                          添加规则
+                        </Button>
+                      </div>
+                    </form>
+                  )}
                 </section>
               )}
               <section className="sync-section">

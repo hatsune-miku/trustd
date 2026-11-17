@@ -859,6 +859,7 @@ async fn roster(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value
     });
     // Display aid for the owner's page; devices derive the roster themselves.
     value["devices"] = json!(roster.devices);
+    value["rules"] = json!(roster.rules);
     value["trusted_keys"] = json!(
         roster
             .keys
@@ -873,6 +874,7 @@ async fn roster(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Prepare {
     DeviceRevoke { device_id: String },
+    RuleSet { rules: Vec<owner::Rule> },
     PasskeyAdd { id: String },
     PasskeyRemove { id: String },
 }
@@ -889,6 +891,11 @@ async fn statement_prepare(
             device_id,
             issued_at,
         },
+        Prepare::RuleSet { rules } => {
+            let statement = Statement::RuleSet { rules, issued_at };
+            Statement::parse(&statement.to_text()).map_err(|error| bad(error.0))?;
+            statement
+        }
         Prepare::PasskeyAdd { id } => Statement::PasskeyAdd {
             key: OwnerKey::from(
                 &store
@@ -949,6 +956,7 @@ async fn statement_submit(
         Statement::ManagementLogin { .. } => {
             return Err(bad("login proofs are returned to the device, not recorded"));
         }
+        Statement::RuleSet { .. } => {}
         Statement::DeviceRevoke { device_id, .. } => {
             next.sessions
                 .retain(|_, session| session.device.as_deref() != Some(device_id.as_str()));

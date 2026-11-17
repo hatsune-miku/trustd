@@ -137,6 +137,8 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 - `device_revoke`：`device_id`、`issued_at`。撤销是永久的，无论声明顺序如何都优先于批准；同一设备身份不能再次加入。
 - `passkey_add`：`key`（凭据 ID 与 COSE 公钥）、`issued_at`。必须由已信任的通行密钥签名，新密钥才会被设备信任。
 - `passkey_remove`：`credential_id`、`issued_at`。最后一个受信任的密钥不会被移除。
+- `rule_set`：`rules`（`[{from, to, deny}]`，`deny` 为 `execution` 或 `elevation`）、`issued_at`。完整替换设备之间的单向规则，`issued_at` 最新的一条生效。没有规则时，同一主人的设备互相完全信任。
+- `management_login`：`device_id`、`nonce`、`issued_at`。一次性的管理页登录证明，只返回给发起的设备，不进入名册。
 
 声明拒绝未知字段，签名要求 user presence 与 user verification，并校验 origin、RP ID 和 challenge。共享实现位于 `crates/sync-protocol/src/owner.rs`。
 
@@ -152,9 +154,9 @@ localshelld 默认使用本机离线凭据库，也可以连接自托管同步�
 
 ## 名册与撤销
 
-`GET /roster`（任意有效会话）返回 `owner` 和 `statements`，另附便于页面显示的 `devices` 与 `trusted_keys`；设备只采信自己从声明推导的结果。在线设备的长轮询在新声明到达时被唤醒，随后重新拉取名册。
+`GET /roster`（任意有效会话）返回 `owner` 和 `statements`，另附便于页面显示的 `devices`、`rules` 与 `trusted_keys`；设备只采信自己从声明推导的结果。在线设备的长轮询在新声明到达时被唤醒，随后重新拉取名册。声明只增不减：如果后端返回的列表缺少设备已经见过的声明（例如想隐藏一次撤销或更严格的规则），设备拒绝这次更新。
 
-撤销设备或增删通行密钥时，已登录的页面调用 `POST /statements/prepare`（浏览器 JWT），body 为 `{"kind":"device_revoke","device_id":"..."}`、`{"kind":"passkey_add","id":"..."}` 或 `{"kind":"passkey_remove","id":"..."}`，取得待签名原文与 challenge；签名后 `POST /statements`，body `{"statement":"...","assertion":...}`。签名本身即授权，此接口无需会话。撤销会立即删除该设备的会话，设备随之失去同步与中转。
+撤销设备或增删通行密钥时，已登录的页面调用 `POST /statements/prepare`（浏览器 JWT），body 为 `{"kind":"device_revoke","device_id":"..."}`、`{"kind":"rule_set","rules":[...]}`、`{"kind":"passkey_add","id":"..."}` 或 `{"kind":"passkey_remove","id":"..."}`，取得待签名原文与 challenge；签名后 `POST /statements`，body `{"statement":"...","assertion":...}`。签名本身即授权，此接口无需会话。撤销会立即删除该设备的会话，设备随之失去同步与中转。
 
 `GET /sessions` 要求浏览器 JWT，返回 `passkeys:[{id,name,trusted}]`；`trusted` 表示设备是否信任该密钥。在已登录页面新增通行密钥后，页面会立即请求一个已受信任的密钥签署 `passkey_add`。
 

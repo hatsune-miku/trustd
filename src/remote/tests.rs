@@ -316,3 +316,66 @@ async fn granted_credentials_reach_commands_but_are_never_returned() {
     assert!(!operations.contains(&"secrets_get"));
     state.shutdown().await;
 }
+
+#[tokio::test]
+async fn one_way_rules_withhold_execution_or_elevation_and_cannot_be_rolled_back() {
+    let (_directory, state, devices) = fixture().await;
+    let own = state.remote.identity().await.unwrap().id().unwrap();
+    let rule = |from: &str, deny| owner::Rule {
+        from: from.into(),
+        to: own.clone(),
+        deny,
+    };
+    let rules = devices.passkey.sign(
+        &devices.owner,
+        &owner::Statement::RuleSet {
+            rules: vec![
+                rule(&devices.bob, owner::Deny::Execution),
+                rule(&devices.alice, owner::Deny::Elevation),
+            ],
+            issued_at: 10,
+        },
+    );
+    let mut statements = devices.statements.clone();
+    statements.push(rules);
+    state
+        .apply_roster(localshelld_sync_protocol::RosterResponse {
+            owner: devices.owner.clone(),
+            statements: statements.clone(),
+        })
+        .await
+        .unwrap();
+    // Bob may not run anything here; Alice may, but never as Administrator/root.
+    assert!(state.remote_open(&devices.bob, &json!({})).await.is_err());
+    assert!(
+        state
+            .remote_dispatch(&devices.bob, json!({"operation":"host_info"}))
+            .await
+            .is_err()
+    );
+    assert!(state.remote_open(&devices.alice, &json!({})).await.is_ok());
+    let elevated = state
+        .remote_open(&devices.alice, &json!({"sudo":true}))
+        .await
+        .unwrap_err();
+    assert!(elevated.to_string().contains("Administrator/root"));
+    assert_eq!(
+        state.remote.status().await.unwrap()["rules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // A backend cannot drop the rule set (or any seen statement) to relax it.
+    assert!(
+        state
+            .apply_roster(localshelld_sync_protocol::RosterResponse {
+                owner: devices.owner.clone(),
+                statements: devices.statements.clone(),
+            })
+            .await
+            .is_err()
+    );
+    assert!(state.remote_open(&devices.bob, &json!({})).await.is_err());
+    state.shutdown().await;
+}

@@ -11,6 +11,7 @@ import { useAction } from '../../../useAction'
 import './index.scss'
 
 type Peer = { label: string; public_key: string }
+type Rule = { from: string; to: string; deny: 'execution' | 'elevation' }
 type Status = {
   device_id: string
   public_key: string
@@ -18,6 +19,7 @@ type Status = {
   backend: string | null
   connected: boolean
   peers: Record<string, Peer>
+  rules: Rule[]
 }
 
 export function Remote({ session }: { session: string }) {
@@ -35,6 +37,16 @@ export function Remote({ session }: { session: string }) {
   }, [session])
 
   const peers = Object.entries(status?.peers ?? {})
+  /** The owner's one-way exceptions between this device and `id`, if any. */
+  function restrictions(id: string) {
+    const label = (deny: Rule['deny']) => (deny === 'execution' ? '禁止执行' : '禁止管理员 / root')
+    return (status?.rules ?? [])
+      .filter(
+        (rule) =>
+          (rule.from === id && rule.to === status?.device_id) || (rule.to === id && rule.from === status?.device_id)
+      )
+      .map((rule) => `${rule.from === id ? '对方 → 本机' : '本机 → 对方'}：${label(rule.deny)}`)
+  }
   return (
     <section className="remote-view">
       <div className="remote-heading">
@@ -54,6 +66,7 @@ export function Remote({ session }: { session: string }) {
             <div className="remote-peer-identity">
               <strong>{peer.label}</strong>
               <code className="remote-peer-id">{id}</code>
+              <span>{restrictions(id).join('；') || '互相信任'}</span>
             </div>
             <div className="remote-actions">
               <Button onClick={() => setTarget(id)}>连接</Button>

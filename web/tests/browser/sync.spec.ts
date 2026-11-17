@@ -136,7 +136,9 @@ test('passkey initialization, device pairing and two-client credential synchroni
   expect(await a.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await a.screenshot({ path: 'test-results/sync-connected-mobile.png', fullPage: true })
   await cloud.getByRole('button', { name: '刷新设备', exact: true }).click()
-  await expect(cloud.getByText('Test laptop A', { exact: true })).toBeVisible()
+  await expect(cloud.locator('.sync-session-name', { hasText: 'Test laptop A' })).toBeVisible()
+  // Devices trust each other by default; the rule form lists both of them.
+  await expect(cloud.getByRole('heading', { name: '设备之间的信任' })).toBeVisible()
   await cloud.screenshot({ path: 'test-results/sync-trusted-devices.png', fullPage: true })
   await cloud.setViewportSize({ width: 390, height: 844 })
   expect(await cloud.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)

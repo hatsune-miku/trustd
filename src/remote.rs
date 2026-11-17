@@ -171,8 +171,30 @@ impl Runtime {
         Ok(
             json!({"protocol":3,"device_id":saved.identity.id()?,"public_key":saved.identity.public_key,
             "joined":saved.owner.is_some(),"backend":saved.owner.as_ref().map(|o| &o.origin),
+            "rules":saved.roster().map(|roster| roster.rules).unwrap_or_default(),
             "connected":self.node.read().await.as_ref().is_some_and(|n| n.connected()),"peers":saved.peers()}),
         )
+    }
+
+    /// Refuse a request from roster device `from` that the owner's one-way
+    /// rules withhold from this device.
+    async fn permit(&self, from: &str, elevated: bool) -> Result<()> {
+        let saved = self.saved.lock().await;
+        let saved = saved
+            .as_ref()
+            .context("this device has not joined a backend")?;
+        let own = saved.identity.id()?;
+        if saved
+            .roster()
+            .is_some_and(|roster| roster.denies(from, &own, elevated))
+        {
+            anyhow::bail!(if elevated {
+                "the owner does not allow this device to request Administrator/root here"
+            } else {
+                "the owner does not allow this device to run requests here"
+            });
+        }
+        Ok(())
     }
 
     async fn peer(&self, id: &str) -> Result<Peer> {
@@ -341,6 +363,15 @@ impl AppState {
             response.owner == *pinned,
             "the backend presented a different owner; roster update ignored"
         );
+        // Statements are append-only. A backend that drops one this device has
+        // already seen may be hiding a revocation or a stricter rule set.
+        ensure!(
+            current.statements.iter().all(|seen| response
+                .statements
+                .iter()
+                .any(|statement| statement.statement == seen.statement)),
+            "the backend omitted owner statements this device already saw; roster update ignored"
+        );
         let unchanged = response.statements.len() == current.statements.len()
             && response
                 .statements
@@ -418,10 +449,12 @@ impl AppState {
     }
 
     async fn remote_open(&self, owner: &str, args: &Value) -> Result<Value> {
-        // Devices of the same owner trust each other by default.
+        // Devices of the same owner trust each other by default, except where
+        // the owner's one-way rules withhold execution or elevation.
         self.remote.peer(owner).await?;
         let keys = crate::api::secret_keys_arg(args)?;
         let options = crate::api::enter_options_arg(args)?;
+        self.remote.permit(owner, options.sudo).await?;
         let entered = self
             .enter_remote_granted(owner, &keys, options.clone())
             .await?;
@@ -444,6 +477,7 @@ impl AppState {
 
     async fn remote_dispatch(&self, owner: &str, request: Value) -> Result<Value> {
         self.remote.peer(owner).await?;
+        self.remote.permit(owner, false).await?;
         let operation = string(&request, "operation")?;
         let args = request
             .get("arguments")

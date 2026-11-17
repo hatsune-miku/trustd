@@ -1038,3 +1038,66 @@ async fn devices_request_owner_signatures_only_about_themselves() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn owner_signed_rule_sets_are_recorded_and_invalid_ones_refused() {
+    let (_directory, state, app, browser, _) = setup().await;
+    let (passkey, owner) = initialize_owner(&state).await;
+    let laptop = trustd_remote::Identity::generate().unwrap();
+    let server = trustd_remote::Identity::generate().unwrap();
+    for identity in [&laptop, &server] {
+        join(
+            &app,
+            &state,
+            &passkey,
+            &owner,
+            &device_statement(identity, "Device"),
+        )
+        .await;
+    }
+    let rule = json!({"from":server.id().unwrap(),"to":laptop.id().unwrap(),"deny":"elevation"});
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/sync/v1/statements/prepare",
+        Some(json!({"kind":"rule_set","rules":[rule, rule]})),
+        Some(&browser.access_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, prepared) = call(
+        &app,
+        "POST",
+        "/sync/v1/statements/prepare",
+        Some(json!({"kind":"rule_set","rules":[rule]})),
+        Some(&browser.access_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let text = prepared["statement"].as_str().unwrap().to_owned();
+    let signed = SignedStatement {
+        assertion: passkey.assert(&owner, &owner::challenge(&text), 0x05),
+        statement: text,
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/sync/v1/statements",
+            Some(json!(signed)),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, roster) = call(
+        &app,
+        "GET",
+        "/sync/v1/roster",
+        None,
+        Some(&browser.access_token),
+    )
+    .await;
+    assert_eq!(roster["rules"], json!([rule]));
+}
