@@ -72,6 +72,9 @@ async function connect(local: Page, cloud: Page, name: string) {
   await expect(link).toBeVisible()
   const target = new URL((await link.getAttribute('href'))!)
   expect(new URLSearchParams(target.hash.slice(1)).get('join')).toBeTruthy()
+  // The link arrives on another device or tab: load it from scratch, not as a
+  // fragment change on an already loaded page.
+  await cloud.goto('about:blank')
   await cloud.goto(target.href)
   await expect(cloud.locator('.sync-device-name')).toHaveText(name)
   await cloud.getByRole('button', { name: '批准此设备', exact: true }).click()
@@ -135,6 +138,9 @@ test('passkey initialization, device pairing and two-client credential synchroni
   await a.setViewportSize({ width: 390, height: 844 })
   expect(await a.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await a.screenshot({ path: 'test-results/sync-connected-mobile.png', fullPage: true })
+  // Approval pages were fresh loads; sign in again to manage devices.
+  await cloud.getByRole('button', { name: '使用通行密钥登录', exact: true }).click()
+  await expect(cloud.getByRole('heading', { name: '我的设备', exact: true })).toBeVisible()
   await cloud.getByRole('button', { name: '刷新设备', exact: true }).click()
   await expect(cloud.locator('.sync-session-name', { hasText: 'Test laptop A' })).toBeVisible()
   // Devices trust each other by default; the rule form lists both of them.

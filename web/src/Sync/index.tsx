@@ -52,6 +52,10 @@ export function Sync() {
   const [ruleTo, setRuleTo] = useState('')
   const [ruleDeny, setRuleDeny] = useState<Rule['deny']>('elevation')
   const action = useAction()
+  // Link lookups run on page load alongside the info request; a shared action
+  // would silently drop them while that request is still in flight.
+  const joinLookup = useAction()
+  const signLookup = useAction()
 
   useEffect(() => {
     void action.run(async () => setInfo(await api<Info>('/sync/v1/info')))
@@ -65,12 +69,14 @@ export function Sync() {
   useEffect(() => {
     setRequest(null)
     if (code)
-      void action.run(async () => setRequest(await api<JoinRequest>('/sync/v1/device/inspect', { user_code: code })))
+      void joinLookup.run(async () =>
+        setRequest(await api<JoinRequest>('/sync/v1/device/inspect', { user_code: code }))
+      )
   }, [code])
   useEffect(() => {
     setSignature(null)
     if (signCode)
-      void action.run(async () =>
+      void signLookup.run(async () =>
         setSignature(await api<SignRequest>('/sync/v1/signatures/inspect', { user_code: signCode }))
       )
   }, [signCode])
@@ -201,6 +207,8 @@ export function Sync() {
         </header>
         <div className="sync-content">
           <Feedback {...action} />
+          {joinLookup.message && <Feedback {...joinLookup} />}
+          {signLookup.message && <Feedback {...signLookup} />}
           {!info && <p className="description">正在连接后端。</p>}
           {request && (
             <section className="sync-section sync-join">
