@@ -204,6 +204,51 @@ async fn powershell_errors_still_fail_after_error_history_is_full() {
     shell.terminate().await;
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_formats_a_command_like_a_console() {
+    let shell = shell().await;
+    // Format-* output followed by other output must not break formatting.
+    let result = shell
+        .execute(
+            "Get-Item $env:SystemRoot | Format-List Name; 'after the list'",
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "{result:?}");
+    assert!(result.stderr.is_empty(), "{result:?}");
+    assert!(result.stdout.contains("Name : Windows"), "{result:?}");
+    assert!(result.stdout.contains("after the list"), "{result:?}");
+    // A table shares one header instead of repeating it for every row.
+    let result = shell
+        .execute(
+            "[pscustomobject]@{Fixture=1}, [pscustomobject]@{Fixture=22}, [pscustomobject]@{Fixture=333}",
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.stdout.matches("Fixture").count(), 1, "{result:?}");
+    for value in ["1", "22", "333"] {
+        assert!(
+            result.stdout.lines().any(|line| line.trim() == value),
+            "{result:?}"
+        );
+    }
+    // Rows the formatter already received survive a timeout.
+    let result = shell
+        .execute(
+            "[pscustomobject]@{Partial='row'}; Start-Sleep -Seconds 30",
+            Some(2),
+        )
+        .await
+        .unwrap();
+    assert!(result.timed_out && result.session_alive, "{result:?}");
+    assert!(result.stdout.contains("row"), "{result:?}");
+    shell.terminate().await;
+}
+
 #[tokio::test]
 async fn timeout_retains_partial_output_and_preserves_session() {
     let shell = shell().await;

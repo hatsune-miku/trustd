@@ -120,11 +120,16 @@ foreach ($path in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PR
 $__localshelld_wrapper = @'
     $__localshelld_ec = 0
     $__localshelld_input = $null
+    # One formatter for the whole command, as in a console: Format-* output is
+    # a sequence of records and a table shares one header, so objects must not
+    # be formatted one at a time.
+    $__localshelld_format = { Out-String -Stream -Width 32767 }.GetSteppablePipeline()
     try {
         $__localshelld_input = [LocalshelldInput]::new($__localshelld_stdin)
         $global:LASTEXITCODE = 0
         $__localshelld_had_error = $false
         $__localshelld_errors = $global:Error.Count
+        $__localshelld_format.Begin($true)
         . ([ScriptBlock]::Create($__localshelld_s)) 2>&1 | ForEach-Object {
             if ($_ -is [System.Management.Automation.ErrorRecord]) {
                 # Native stderr is wrapped as ErrorRecord by a PowerShell
@@ -134,7 +139,9 @@ $__localshelld_wrapper = @'
                 }
                 [Console]::Error.Write(($_ | Out-String -Width 32767))
             } else {
-                $_ | Out-String -Stream -Width 32767 | ForEach-Object { [Console]::Out.WriteLine($_) }
+                foreach ($__localshelld_line in $__localshelld_format.Process($_)) {
+                    [Console]::Out.WriteLine($__localshelld_line)
+                }
             }
         }
         $__localshelld_ec = if ($LASTEXITCODE -ne 0) {
@@ -148,6 +155,14 @@ $__localshelld_wrapper = @'
         $__localshelld_ec = 1
         [Console]::Error.Write(($_ | Out-String -Width 32767))
     } finally {
+        # Flush rows the formatter still buffers (a table waits for a few rows
+        # to size its columns), also when a timeout interrupts the command.
+        try {
+            foreach ($__localshelld_line in $__localshelld_format.End()) {
+                [Console]::Out.WriteLine($__localshelld_line)
+            }
+        } catch { }
+        $__localshelld_format.Dispose()
         if ($null -ne $__localshelld_input) { $__localshelld_input.Dispose() }
     }
 '@
