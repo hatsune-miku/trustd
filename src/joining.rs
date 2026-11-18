@@ -42,15 +42,30 @@ fn post(
     let status = response.status();
     let value: Value = response.json().unwrap_or(Value::Null);
     if !status.is_success() {
-        bail!(
-            "{}",
-            value["error"]
+        return Err(Refused {
+            transient: status.is_server_error(),
+            message: value["error"]
                 .as_str()
-                .map_or_else(|| format!("HTTP {status}"), str::to_owned)
-        );
+                .map_or_else(|| format!("HTTP {status}"), str::to_owned),
+        }
+        .into());
     }
     Ok(value)
 }
+
+/// A refusal from the daemon; `transient` when the backend was briefly
+/// unavailable (for example restarting) rather than rejecting the request.
+#[derive(Debug)]
+struct Refused {
+    transient: bool,
+    message: String,
+}
+impl std::fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for Refused {}
 
 /// A management session on this user's running daemon, opened with a local
 /// single-use ticket. Logged out when dropped.
@@ -206,7 +221,22 @@ pub(crate) fn join_with(
     let interval = Duration::from_secs(request["interval"].as_u64().unwrap_or(3).max(3));
     while Instant::now() < deadline {
         thread::sleep(interval);
-        let result = local.post("/v1/admin/sync", json!({"action":"poll"}))?;
+        let result = match local.post("/v1/admin/sync", json!({"action":"poll"})) {
+            Ok(result) => result,
+            // Keep waiting through a backend restart; anything else is final.
+            Err(error)
+                if error
+                    .downcast_ref::<Refused>()
+                    .is_some_and(|refused| refused.transient) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(
+                    error.context("the join request was refused or lost; run `trustd join` again")
+                );
+            }
+        };
         if result["connected"] == true {
             return Ok(());
         }
