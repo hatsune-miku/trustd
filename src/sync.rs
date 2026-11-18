@@ -38,6 +38,42 @@ struct PendingConnection {
     joined: Option<Joined>,
 }
 
+/// Ask the backend to admit `identity`; returns the exact statement to sign.
+async fn start_join(
+    url: &str,
+    name: &str,
+    identity: &trustd_remote::Identity,
+) -> (String, Result<DeviceStart, ApiError>) {
+    let statement = match identity.id() {
+        Ok(device_id) => Statement::DeviceApprove {
+            device_id,
+            public_key: identity.public_key.clone(),
+            name: name.trim().into(),
+            issued_at: Utc::now().timestamp(),
+        }
+        .to_text(),
+        Err(_) => {
+            return (
+                String::new(),
+                Err(ApiError::internal("invalid device identity")),
+            );
+        }
+    };
+    if let Err(error) = Statement::parse(&statement) {
+        return (statement, Err(ApiError::bad_request(error.to_string())));
+    }
+    let started = request(
+        Method::POST,
+        url,
+        "device/start",
+        None,
+        Some(&json!({"statement":statement})),
+        None,
+    )
+    .await;
+    (statement, started)
+}
+
 /// Check an approved join without trusting the backend: the owner is for the
 /// origin this device chose, and the owner's passkey signed this device's own
 /// statement. The owner pinned here then verifies every later roster update.
@@ -149,15 +185,26 @@ async fn request<T: DeserializeOwned>(
         .map_err(|_| ApiError::unavailable("同步服务不可用，凭据未离线修改。"))?;
     let status = response.status();
     if !status.is_success() {
+        let summary = match status.as_u16() {
+            401 => "后端登录已失效，请重新加入后端。",
+            403 => "后端拒绝了此设备。",
+            409 => "云端凭据已变化，请同步后重试。",
+            429 => "后端请求过于频繁，请稍后重试。",
+            _ => "后端拒绝请求，请检查连接后重试。",
+        };
+        // The backend's own reason is a fixed message, never a credential.
+        let reason = response
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| body["error"].as_str().map(str::to_owned))
+            .filter(|reason| reason.len() <= 300);
         return Err(ApiError::with_status(
             status.as_u16(),
-            match status.as_u16() {
-                401 | 403 => "同步登录已失效，请重新连接服务。",
-                409 => "云端凭据已变化，请同步后重试。",
-                429 => "同步请求过于频繁，请稍后重试。",
-                _ => "同步服务拒绝请求，请检查连接后重试。",
-            }
-            .into(),
+            match reason {
+                Some(reason) => format!("{summary}（{reason}）"),
+                None => summary.into(),
+            },
         ));
     }
     if response
@@ -459,26 +506,23 @@ impl AppState {
                     .identity()
                     .await
                     .map_err(|_| ApiError::internal("device identity is unavailable"))?;
-                let statement = Statement::DeviceApprove {
-                    device_id: identity
-                        .id()
-                        .map_err(|_| ApiError::internal("invalid device identity"))?,
-                    public_key: identity.public_key.clone(),
-                    name: name.trim().into(),
-                    issued_at: Utc::now().timestamp(),
+                let (mut statement, mut started) = start_join(&url, &name, &identity).await;
+                // A revoked identity can never rejoin. A device that is not joined
+                // replaces it once and asks again; the owner still approves the
+                // new identity, and the old one stays revoked.
+                if started
+                    .as_ref()
+                    .is_err_and(|error| error.status_code() == 403)
+                    && self.remote.joined_device_id().await.is_none()
+                {
+                    let identity = self
+                        .remote
+                        .reset_identity()
+                        .await
+                        .map_err(|error| ApiError::internal(error.to_string()))?;
+                    (statement, started) = start_join(&url, &name, &identity).await;
                 }
-                .to_text();
-                Statement::parse(&statement)
-                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
-                let device: DeviceStart = request(
-                    Method::POST,
-                    &url,
-                    "device/start",
-                    None,
-                    Some(&json!({"statement":statement})),
-                    None,
-                )
-                .await?;
+                let device = started?;
                 // Do not open an arbitrary remote-supplied URL with a token.
                 let verification = reqwest::Url::parse(&device.verification_uri)
                     .map_err(|_| ApiError::bad_request("invalid device verification URL"))?;

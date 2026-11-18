@@ -196,3 +196,59 @@ async fn devices_join_with_one_owner_signature_and_reach_each_other_over_the_bac
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn a_revoked_identity_is_replaced_when_the_device_joins_again() {
+    let backend = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+    let app = localshelld_sync_server::App::open(backend.path(), &url).unwrap();
+    let passkey = Authenticator::new(b"owner");
+    let owner = owner_for(&passkey, &url);
+    app.initialize_owner_for_tests(owner.keys.clone()).await;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, localshelld_sync_server::router(app))
+            .await
+            .unwrap()
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let state = daemon(directory.path());
+    let revoked = state.remote.identity().await.unwrap().id().unwrap();
+    // The owner revokes this identity before it ever finished joining.
+    let revoke = passkey.sign(
+        &owner,
+        &owner::Statement::DeviceRevoke {
+            device_id: revoked.clone(),
+            issued_at: chrono::Utc::now().timestamp(),
+        },
+    );
+    let response = reqwest::Client::new()
+        .post(format!("{url}/sync/v1/statements"))
+        .json(&revoke)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    // Joining again asks with a new identity instead of failing.
+    let started = state
+        .sync_action(Action::Start {
+            url: url.clone(),
+            name: "laptop".into(),
+        })
+        .await
+        .unwrap();
+    let replaced = state.remote.identity().await.unwrap().id().unwrap();
+    assert_ne!(replaced, revoked);
+    let inspected: Value = reqwest::Client::new()
+        .post(format!("{url}/sync/v1/device/inspect"))
+        .json(&json!({"user_code":started["user_code"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inspected["device_id"], replaced.as_str());
+    state.shutdown().await;
+    server.abort();
+}

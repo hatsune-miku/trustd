@@ -255,6 +255,26 @@ impl Runtime {
         Ok(self.saved.lock().await.as_ref().unwrap().identity.clone())
     }
 
+    /// Replace this device's identity after the owner revoked it. Only while
+    /// not joined; the owner must approve the new identity before it is trusted.
+    pub(crate) async fn reset_identity(&self) -> Result<Identity> {
+        self.initialize().await?;
+        let mut guard = self.saved.lock().await;
+        ensure!(
+            guard.as_ref().is_some_and(|saved| saved.owner.is_none()),
+            "leave the backend before replacing this device's identity"
+        );
+        let next = Saved {
+            identity: Identity::generate()?,
+            owner: None,
+            statements: vec![],
+        };
+        self.persist(&next)?;
+        let identity = next.identity.clone();
+        *guard = Some(next);
+        Ok(identity)
+    }
+
     /// Pin the owner and adopt the statements of a verified join.
     pub(crate) async fn join(&self, owner: Owner, statements: Vec<SignedStatement>) -> Result<()> {
         self.initialize().await?;
