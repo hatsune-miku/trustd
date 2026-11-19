@@ -78,7 +78,7 @@ fn shell_and_native_children_have_no_visible_console() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let shell = Shell::spawn("pwsh", 8192).await.unwrap();
         let result = shell.execute(CONSOLE_PROBE, Some(20)).await.unwrap();
-        assert!(result.success, "{}", result.output);
+        assert!(result.success, "{}", result.combined());
         // Native children must also inherit a windowless execution environment.
         let encoded = {
             use base64::Engine;
@@ -95,8 +95,12 @@ fn shell_and_native_children_have_no_visible_console() {
             )
             .await
             .unwrap();
-        assert!(result.success, "{}", result.output);
-        assert!(result.output.contains("child output"), "{}", result.output);
+        assert!(result.success, "{}", result.combined());
+        assert!(
+            result.combined().contains("child output"),
+            "{}",
+            result.combined()
+        );
         let result = shell.execute("cmd /c exit 7", Some(20)).await.unwrap();
         assert_eq!(result.exit_code, Some(7));
         shell.terminate().await;

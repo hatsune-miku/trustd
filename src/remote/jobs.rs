@@ -200,7 +200,7 @@ impl AppState {
         object.retain(|_, field| !field.is_null());
         for stream in ["stdout", "stderr"] {
             let path = directory.join(stream);
-            object.insert(format!("{stream}_path"), json!(path.to_string_lossy()));
+            object.insert(format!("{stream}_path"), json!(shell_path(&path)));
             let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
             object.insert(format!("{stream}_size"), json!(size));
         }
@@ -374,6 +374,17 @@ impl AppState {
         for (_, agent) in agents {
             agent.stop().await;
         }
+    }
+}
+
+/// A path as a shell on this host should be given it. Installed Windows
+/// paths are canonicalized with the verbatim `\\?\` prefix, which Windows
+/// PowerShell's file cmdlets reject; a drive path works everywhere.
+pub(super) fn shell_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => text.into_owned(),
     }
 }
 

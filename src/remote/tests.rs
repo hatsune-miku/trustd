@@ -561,3 +561,18 @@ async fn targets_resolve_by_id_name_or_id_prefix() {
     assert!(state.remote.resolve(&devices.bob[..4]).await.is_err());
     state.shutdown().await;
 }
+
+#[test]
+fn job_output_paths_are_given_in_a_form_shells_accept() {
+    let path = |text: &str| jobs::shell_path(std::path::Path::new(text));
+    assert_eq!(path(r"\\?\C:\Users\iris\stdout"), r"C:\Users\iris\stdout");
+    // Network shares keep the prefix; they have no drive form to fall back to.
+    assert_eq!(
+        path(r"\\?\UNC\server\share\stdout"),
+        r"\\?\UNC\server\share\stdout"
+    );
+    assert_eq!(
+        path("/home/miku/.config/stdout"),
+        "/home/miku/.config/stdout"
+    );
+}
