@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::{
     execution::{EnterOptions, PrivilegeLevel, RunOptions},
-    mcp_text::{INVALID_TIMEOUT, SERIALIZATION_FAILED, missing_string_argument, tool_definitions},
+    mcp_text::{INVALID_TIMEOUT, missing_string_argument, tool_definitions},
     server::{ApiError, AppState},
 };
 
@@ -241,7 +241,7 @@ async fn execute_inner(
                     },
                 )
                 .await?;
-            serde_json::to_value(result).map_err(|_| ApiError::internal(SERIALIZATION_FAILED))
+            Ok(result.view())
         }
         Operation::Destroy => {
             state

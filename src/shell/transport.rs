@@ -320,19 +320,15 @@ impl Process {
         };
         let (stdout, stdout_truncated) = capture.stdout.finish();
         let (stderr, stderr_truncated) = capture.stderr.finish();
-        let output = format!("{stdout}{stderr}");
         Ok(ExecutionResult {
-            output,
             stdout,
             stderr,
             exit_code,
             success: !timed_out && ended_reason != Some("cancelled") && exit_code == Some(0),
-            truncated: stdout_truncated || stderr_truncated,
             stdout_truncated,
             stderr_truncated,
             duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             timed_out,
-            session_alive: ended_reason.is_none(),
             session_ended: ended_reason.is_some(),
             session_ended_reason: ended_reason.map(str::to_owned),
             cwd: capture.cwd,

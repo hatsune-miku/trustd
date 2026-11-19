@@ -79,7 +79,10 @@ fn write_chunk(path: PathBuf, args: &Value, receipts: &std::path::Path) -> Resul
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("missing offset"))?;
     let bytes = STANDARD.decode(args["data"].as_str().unwrap_or_default())?;
-    ensure!(bytes.len() <= 48 * 1024, "file chunk exceeds 48 KiB");
+    ensure!(
+        bytes.len() <= super::jobs::MAX_BASE64_CHUNK,
+        "file chunk exceeds 1 MiB"
+    );
     let complete = args["complete"].as_bool() == Some(true);
     std::fs::create_dir_all(receipts)?;
     crate::config::set_private_dir(receipts)?;
@@ -174,8 +177,13 @@ fn write_chunk(path: PathBuf, args: &Value, receipts: &std::path::Path) -> Resul
             std::io::copy(&mut std::fs::File::open(&stage)?, &mut temporary)?;
             temporary.as_file().sync_all()?;
             temporary.persist(&path)?;
-        } else {
-            std::fs::hard_link(&stage, &path)?;
+        } else if let Err(error) = std::fs::hard_link(&stage, &path) {
+            // The upload is over either way; do not leave its stage behind.
+            let _ = std::fs::remove_file(&stage);
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::bail!("destination exists; pass replace to overwrite it");
+            }
+            return Err(error.into());
         }
         let result = json!({"complete":true,"size":length,"sha256":actual});
         crate::storage::save_json(

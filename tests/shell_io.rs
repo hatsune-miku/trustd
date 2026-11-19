@@ -112,7 +112,7 @@ async fn input_eof_streams_and_state_are_separate() {
         .unwrap();
     assert_eq!(result.stdout, "你好\nsecond\0last");
     assert_eq!(result.stderr, "stderr-only");
-    assert!(result.success && result.session_alive, "{result:?}");
+    assert!(result.success && !result.session_ended, "{result:?}");
     assert!(result.cwd.as_ref().is_some_and(|value| !value.is_empty()));
     assert!(result.identity["user"].is_string());
     let next = shell
@@ -172,7 +172,7 @@ async fn stream_truncation_is_independent_and_does_not_poison_next_command() {
         .unwrap();
     assert_eq!(result.stdout, "o".repeat(128));
     assert_eq!(result.stderr, "e".repeat(128));
-    assert!(result.stdout_truncated && result.stderr_truncated && result.truncated);
+    assert!(result.stdout_truncated && result.stderr_truncated);
     assert!(
         shell
             .execute("echo after-truncation", Some(10))
@@ -199,7 +199,7 @@ async fn powershell_errors_still_fail_after_error_history_is_full() {
         .await
         .unwrap();
     assert_eq!(result.exit_code, Some(1));
-    assert!(!result.success && result.session_alive);
+    assert!(!result.success && !result.session_ended);
     assert!(result.stderr.contains("newest-error"));
     shell.terminate().await;
 }
@@ -244,7 +244,7 @@ async fn powershell_formats_a_command_like_a_console() {
         )
         .await
         .unwrap();
-    assert!(result.timed_out && result.session_alive, "{result:?}");
+    assert!(result.timed_out && !result.session_ended, "{result:?}");
     assert!(result.stdout.contains("row"), "{result:?}");
     shell.terminate().await;
 }
@@ -262,7 +262,7 @@ async fn timeout_retains_partial_output_and_preserves_session() {
     // Bash 3.2 also reports the foreground child's SIGKILL on stderr. Preserve
     // that native diagnostic as well as the command's output before timeout.
     assert!(result.stderr.starts_with("partial-err"), "{result:?}");
-    assert!(result.timed_out && !result.session_ended && result.session_alive);
+    assert!(result.timed_out && !result.session_ended);
     assert!(!result.success);
     assert_eq!(result.exit_code, None);
     assert_eq!(result.session_ended_reason, None);
@@ -285,7 +285,7 @@ async fn native_command_timeout_never_runs_the_remaining_statements() {
         "pwsh -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 60'; 'must-not-run'",
         "sleep 60; echo must-not-run",
     ), Some(1)).await.unwrap();
-    assert!(result.timed_out && result.session_alive, "{result:?}");
+    assert!(result.timed_out && !result.session_ended, "{result:?}");
     assert!(!result.stdout.contains("must-not-run"));
     assert!(
         shell
@@ -323,7 +323,7 @@ $priorChild.Id
         .execute("Start-Sleep -Seconds 30", Some(1))
         .await
         .unwrap();
-    assert!(timeout.timed_out && timeout.session_alive);
+    assert!(timeout.timed_out && !timeout.session_ended);
     let previous = shell
         .execute("$priorChild.Refresh(); $priorChild.HasExited", Some(10))
         .await
@@ -381,7 +381,7 @@ $child = [Diagnostics.Process]::Start($childInfo)
         if !timeout {
             shell.terminate().await;
         } else {
-            assert!(result.session_alive && !result.session_ended);
+            assert!(!result.session_ended);
             assert!(shell.execute("echo next", Some(10)).await.unwrap().success);
         }
         let output = localshelld::process::background_command("pwsh")

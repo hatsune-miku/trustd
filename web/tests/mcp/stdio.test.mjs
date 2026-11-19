@@ -49,7 +49,18 @@ test('delegated Codex adapter exposes scoped tools without its capability or ses
     assert.doesNotThrow(() => ListToolsResultSchema.parse({ tools }))
     assert.deepEqual(
       tools.map((tool) => tool.name),
-      ['run', 'job_start', 'job_get', 'job_list', 'job_cancel', 'job_output', 'file_stat', 'file_read', 'file_write']
+      [
+        'run',
+        'job_start',
+        'job_get',
+        'job_wait',
+        'job_list',
+        'job_cancel',
+        'job_output',
+        'file_stat',
+        'file_read',
+        'file_write',
+      ]
     )
     assert.equal(JSON.stringify(tools).includes('fixture-private-capability'), false)
     for (const tool of tools) {

@@ -13,7 +13,10 @@ type Job = {
   result?: { exit_code: number | null; stderr?: string }
   error?: string
 }
-type Chunk = { text: string; next_offset: number }
+// Output arrives as text, or as base64 data when it is not valid UTF-8.
+type Chunk = { text?: string; data?: string; next_offset: number }
+const decode = (chunk: Chunk) =>
+  chunk.text ?? new TextDecoder().decode(Uint8Array.from(atob(chunk.data ?? ''), (value) => value.charCodeAt(0)))
 
 export function Jobs({
   invoke,
@@ -53,7 +56,7 @@ export function Jobs({
         const chunk = await invoke<Chunk>('job_output', { job_id: selected, stream, offset: cursor.current })
         if (active) {
           cursor.current = chunk.next_offset
-          setOutput((value) => (value + chunk.text).slice(-131072))
+          setOutput((value) => (value + decode(chunk)).slice(-131072))
         }
       } catch {
         /* The task remains available after reconnect. */

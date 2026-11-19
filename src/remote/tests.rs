@@ -1,5 +1,6 @@
 use super::*;
 use crate::{auth::AuthManager, config::Config};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use localshelld_sync_protocol::owner::testing::{Authenticator, owner_for};
 
 /// Roster device IDs of the two other devices the fixture's owner approved.
@@ -377,5 +378,186 @@ async fn one_way_rules_withhold_execution_or_elevation_and_cannot_be_rolled_back
             .is_err()
     );
     assert!(state.remote_open(&devices.bob, &json!({})).await.is_err());
+    state.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_job_wakes_its_waiters_and_leaves_its_session_usable() {
+    let (_directory, state, devices) = fixture().await;
+    let session = state.remote_open(&devices.alice, &json!({})).await.unwrap();
+    let reference = session["session_ref"].clone();
+    let mut args = execution(if cfg!(windows) {
+        "Start-Sleep -Seconds 30"
+    } else {
+        "sleep 30"
+    });
+    args["session_ref"] = reference.clone();
+    args["idempotency_key"] = json!("long");
+    let job = state.remote_job_start(&devices.alice, &args).await.unwrap();
+    let query = json!({"job_id":job["id"]});
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while state
+            .remote_job_action(&devices.alice, "job_get", &query)
+            .await
+            .unwrap()["status"]
+            != "running"
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A wait that elapses reports the job as still running.
+    let brief = json!({"job_id":job["id"],"timeout_seconds":1});
+    let waited = state
+        .remote_job_action(&devices.alice, "job_wait", &brief)
+        .await
+        .unwrap();
+    assert_eq!(waited["status"], "running", "{waited}");
+    let patient = json!({"job_id":job["id"],"timeout_seconds":60});
+    let waiter = {
+        let state = state.clone();
+        let alice = devices.alice.clone();
+        tokio::spawn(async move {
+            state
+                .remote_job_action(&alice, "job_wait", &patient)
+                .await
+                .unwrap()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    state
+        .remote_dispatch(
+            &devices.alice,
+            json!({"operation":"job_cancel","arguments":query}),
+        )
+        .await
+        .unwrap();
+    let woken = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("cancelling wakes job_wait")
+        .unwrap();
+    assert_eq!(woken["status"], "cancelled");
+    let mut run = execution("echo still-here");
+    run["session_ref"] = reference;
+    let result = state
+        .remote_dispatch(&devices.alice, json!({"operation":"run","arguments":run}))
+        .await
+        .unwrap();
+    assert!(
+        result["stdout"].as_str().unwrap().contains("still-here"),
+        "{result}"
+    );
+    state.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_finished_job_can_be_awaited_and_its_output_read_in_the_remote_shell() {
+    let (_directory, state, devices) = fixture().await;
+    let session = state.remote_open(&devices.alice, &json!({})).await.unwrap();
+    let mut args = execution("echo first-line; echo job-output-tail");
+    args["session_ref"] = session["session_ref"].clone();
+    args["idempotency_key"] = json!("awaited");
+    let job = state.remote_job_start(&devices.alice, &args).await.unwrap();
+    for internal in ["fingerprint", "owner"] {
+        assert!(job.get(internal).is_none(), "{job}");
+    }
+    let wait = json!({"job_id":job["id"],"timeout_seconds":30});
+    let finished = state
+        .remote_job_action(&devices.alice, "job_wait", &wait)
+        .await
+        .unwrap();
+    assert_eq!(finished["status"], "succeeded", "{finished}");
+    assert!(finished["stdout_size"].as_u64().unwrap() > 0, "{finished}");
+    assert!(finished["result"].get("identity").is_none(), "{finished}");
+    // The job's output stays on the target; a shell there can process it.
+    let path = finished["stdout_path"].as_str().unwrap();
+    let mut read = execution(&if cfg!(windows) {
+        format!("Get-Content -LiteralPath '{}'", path.replace('\'', "''"))
+    } else {
+        format!("cat '{}'", path.replace('\'', "'\\''"))
+    });
+    read["session_ref"] = session["session_ref"].clone();
+    let result = state
+        .remote_dispatch(&devices.alice, json!({"operation":"run","arguments":read}))
+        .await
+        .unwrap();
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("job-output-tail"),
+        "{result}"
+    );
+    let tail = state
+        .remote_job_action(
+            &devices.alice,
+            "job_output",
+            &json!({"job_id":job["id"],"tail":18}),
+        )
+        .await
+        .unwrap();
+    let text = tail["text"].as_str().unwrap();
+    assert!(
+        text.contains("tail") && !text.contains("first-line"),
+        "{tail}"
+    );
+    assert!(tail.get("data").is_none() && tail["eof"] == true, "{tail}");
+    state.shutdown().await;
+}
+
+#[test]
+fn chunks_are_text_or_base64_and_never_split_a_character() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chunk");
+    std::fs::write(&path, "aé😀z").unwrap();
+    let read = |args: Value| jobs::read_chunk(path.clone(), &args).unwrap();
+    let whole = read(json!({}));
+    assert_eq!(whole["text"], "aé😀z");
+    assert!(whole.get("data").is_none());
+    // "a" plus half of "é": the chunk stops before the split character.
+    let first = read(json!({"limit":2}));
+    assert_eq!(
+        (first["text"].as_str(), first["next_offset"].as_u64()),
+        (Some("a"), Some(1))
+    );
+    let second = read(json!({"offset":1,"limit":6}));
+    assert_eq!(second["text"], "é😀");
+    // A tail that begins inside the emoji starts at the next character.
+    let tail = read(json!({"tail":3}));
+    assert_eq!(
+        (tail["text"].as_str(), tail["offset"].as_u64()),
+        (Some("z"), Some(7))
+    );
+    let base64 = read(json!({"encoding":"base64"}));
+    assert_eq!(base64["data"], STANDARD.encode("aé😀z"));
+    assert!(base64.get("text").is_none());
+    std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+    let binary = read(json!({}));
+    assert_eq!(
+        (binary["encoding"].as_str(), binary["data"].as_str()),
+        (Some("base64"), Some("//4A"))
+    );
+    assert!(jobs::read_chunk(path.clone(), &json!({"encoding":"hex"})).is_err());
+}
+
+#[tokio::test]
+async fn targets_resolve_by_id_name_or_id_prefix() {
+    let (_directory, state, devices) = fixture().await;
+    for target in [
+        devices.alice.as_str(),
+        "alice",
+        "ALICE",
+        &devices.alice[..8],
+    ] {
+        assert_eq!(state.remote.resolve(target).await.unwrap(), devices.alice);
+    }
+    let unknown = state.remote.resolve("carol").await.unwrap_err().to_string();
+    assert!(
+        unknown.contains("alice (") && unknown.contains("bob ("),
+        "{unknown}"
+    );
+    // A short prefix could name a different device tomorrow.
+    assert!(state.remote.resolve(&devices.bob[..4]).await.is_err());
     state.shutdown().await;
 }

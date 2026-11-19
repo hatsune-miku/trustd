@@ -1,6 +1,6 @@
 use super::{string, timeout};
 use crate::{execution::RunOptions, server::AppState, storage};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -9,7 +9,20 @@ use std::{
     collections::BTreeMap,
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
+    time::Duration,
 };
+
+/// Largest chunk a caller may ask for. Base64 grows data by a third and JSON
+/// escaping can grow control characters sixfold; both must stay under the
+/// relay's 2 MiB payload limit.
+pub(super) const MAX_BASE64_CHUNK: usize = 1024 * 1024;
+const MAX_TEXT_CHUNK: usize = 256 * 1024;
+const DEFAULT_WAIT_SECONDS: u64 = 300;
+const MAX_WAIT_SECONDS: u64 = 3600;
+
+fn running(status: &str) -> bool {
+    matches!(status, "starting" | "running" | "cancelling")
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Job {
@@ -53,7 +66,7 @@ impl AppState {
                 job.fingerprint == fingerprint,
                 "idempotency key was already used with different arguments"
             );
-            return Ok(serde_json::to_value(job)?);
+            return self.job_view(&job);
         }
         let session = self
             .remote
@@ -98,6 +111,7 @@ impl AppState {
             .insert(id.clone(), job.clone());
         self.audit("remote.job.accepted", json!({"peer":owner,"job_id":id}))
             .await;
+        let view = self.job_view(&job)?;
         let state = self.clone();
         let owner = owner.to_owned();
         tokio::spawn(async move {
@@ -137,7 +151,7 @@ impl AppState {
                     .run_command(&entered.handle, &wrapped, level, options)
                     .await;
                 let _ = state.destroy_session(&entered.handle).await;
-                Ok(serde_json::to_value(result?)?)
+                Ok(result?.view())
             }
             .await;
             if let Some(handle) = state.remote.job_handles.lock().await.remove(&id) {
@@ -163,6 +177,7 @@ impl AppState {
             }
             let status = job.status.clone();
             drop(jobs);
+            state.remote.job_finished.notify_waiters();
             state
                 .audit(
                     "remote.job.finished",
@@ -170,7 +185,51 @@ impl AppState {
                 )
                 .await;
         });
-        Ok(serde_json::to_value(job)?)
+        Ok(view)
+    }
+
+    /// A job as callers see it: the bookkeeping fields stay on disk, and the
+    /// output files are named so a shell on the target can process them in
+    /// place (for example compress them before reading them back).
+    fn job_view(&self, job: &Job) -> Result<Value> {
+        let directory = self.remote.directory()?.join("jobs").join(&job.id);
+        let mut value = serde_json::to_value(job)?;
+        let object = value.as_object_mut().unwrap();
+        object.remove("fingerprint");
+        object.remove("owner");
+        object.retain(|_, field| !field.is_null());
+        for stream in ["stdout", "stderr"] {
+            let path = directory.join(stream);
+            object.insert(format!("{stream}_path"), json!(path.to_string_lossy()));
+            let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            object.insert(format!("{stream}_size"), json!(size));
+        }
+        Ok(value)
+    }
+
+    /// Block until the job finishes or the wait elapses, whichever is first.
+    async fn wait_for_job(&self, id: &str, args: &Value) -> Result<Value> {
+        let seconds = timeout(args)?
+            .unwrap_or(DEFAULT_WAIT_SECONDS)
+            .min(MAX_WAIT_SECONDS);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+        loop {
+            // Register before reading the status so a finish in between still wakes us.
+            let finished = self.remote.job_finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            let job = self
+                .remote
+                .jobs
+                .lock()
+                .await
+                .get(id)
+                .cloned()
+                .context("job not found")?;
+            if !running(&job.status) || tokio::time::timeout_at(deadline, finished).await.is_err() {
+                return self.job_view(&job);
+            }
+        }
     }
 
     pub(super) async fn remote_job_action(
@@ -199,7 +258,12 @@ impl AppState {
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
             let limit = args["limit"].as_u64().unwrap_or(30).clamp(1, 100) as usize;
             let total = values.len();
-            let page: Vec<_> = values.into_iter().skip(offset).take(limit).collect();
+            let page = values
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .map(|job| self.job_view(job))
+                .collect::<Result<Vec<_>>>()?;
             return Ok(
                 json!({"jobs":page,"total":total,"next_offset":(offset+limit < total).then_some(offset+limit)}),
             );
@@ -227,6 +291,9 @@ impl AppState {
         if operation == "job_cancel" {
             self.cancel_remote_job(id).await?;
         }
+        if operation == "job_wait" {
+            return self.wait_for_job(id, args).await;
+        }
         if operation == "job_output" {
             let stream = args["stream"].as_str().unwrap_or("stdout");
             ensure!(
@@ -238,13 +305,14 @@ impl AppState {
                 args,
             );
         }
-        Ok(serde_json::to_value(self.remote.jobs.lock().await.get(id))?)
+        let job = self.remote.jobs.lock().await.get(id).cloned();
+        job.map_or(Ok(Value::Null), |job| self.job_view(&job))
     }
 
     async fn cancel_remote_job(&self, id: &str) -> Result<()> {
         let mut jobs = self.remote.jobs.lock().await;
         let job = jobs.get_mut(id).context("job not found")?;
-        if !matches!(job.status.as_str(), "starting" | "running" | "cancelling") {
+        if !running(&job.status) {
             return Ok(());
         }
         job.status = "cancelled".into();
@@ -259,6 +327,7 @@ impl AppState {
             job,
         )?;
         drop(jobs);
+        self.remote.job_finished.notify_waiters();
         let handle = self.remote.job_handles.lock().await.get(id).cloned();
         if let Some(handle) = handle {
             self.destroy_session(&handle).await?;
@@ -308,22 +377,75 @@ impl AppState {
     }
 }
 
+/// Read part of a file as UTF-8 `text`, or as base64 `data` when the caller
+/// asks for it or the bytes are not text. Never both: callers pay for every
+/// byte. `tail` reads the end of the file when no offset is given.
 pub(super) fn read_chunk(path: PathBuf, args: &Value) -> Result<Value> {
-    let offset = args["offset"].as_u64().unwrap_or(0);
+    let base64 = match args["encoding"].as_str() {
+        None | Some("text") => false,
+        Some("base64") => true,
+        Some(_) => bail!("encoding must be text or base64"),
+    };
+    let maximum = if base64 {
+        MAX_BASE64_CHUNK
+    } else {
+        MAX_TEXT_CHUNK
+    };
     let limit = args["limit"]
         .as_u64()
         .unwrap_or(16 * 1024)
-        .clamp(1, 48 * 1024) as usize;
+        .clamp(1, maximum as u64) as usize;
     let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
+    let tail = args["offset"].is_null() && args["tail"].is_u64();
+    let mut offset = match args["offset"].as_u64() {
+        Some(offset) => offset,
+        None => size.saturating_sub(args["tail"].as_u64().unwrap_or(size)),
+    };
     ensure!(offset <= size, "offset exceeds file size");
     file.seek(SeekFrom::Start(offset))?;
-    let mut bytes = vec![0; limit];
-    let count = file.read(&mut bytes)?;
-    bytes.truncate(count);
-    Ok(
-        json!({"offset":offset,"next_offset":offset+count as u64,"size":size,"data":STANDARD.encode(&bytes),"text":String::from_utf8_lossy(&bytes),"eof":offset+count as u64 == size}),
-    )
+    let mut bytes = Vec::with_capacity(limit);
+    file.take(limit as u64).read_to_end(&mut bytes)?;
+    let mut value = json!({});
+    let mut text = None;
+    if !base64 {
+        if tail {
+            // The tail may begin inside a character; start at the next one.
+            let skip = bytes
+                .iter()
+                .take(3)
+                .take_while(|byte| *byte & 0xc0 == 0x80)
+                .count();
+            bytes.drain(..skip);
+            offset += skip as u64;
+        }
+        let more = offset + (bytes.len() as u64) < size;
+        let end = match std::str::from_utf8(&bytes) {
+            Ok(_) => Some(bytes.len()),
+            // A chunk may end inside a character; the next read resumes there.
+            Err(error) if error.error_len().is_none() && more && error.valid_up_to() > 0 => {
+                Some(error.valid_up_to())
+            }
+            Err(_) => None,
+        };
+        if let Some(end) = end.filter(|end| *end > 0 || bytes.is_empty()) {
+            bytes.truncate(end);
+            text = Some(String::from_utf8(std::mem::take(&mut bytes)).unwrap());
+        }
+    }
+    let count = text.as_ref().map_or(bytes.len(), String::len) as u64;
+    match text {
+        Some(text) => value["text"] = json!(text),
+        None => {
+            value["data"] = json!(STANDARD.encode(&bytes));
+            value["encoding"] = json!("base64");
+        }
+    }
+    value["offset"] = json!(offset);
+    value["next_offset"] = json!(offset + count);
+    value["size"] = json!(size);
+    value["eof"] = json!(offset + count == size);
+    Ok(value)
 }
 
 fn redirect(command: &str, directory: &std::path::Path) -> String {

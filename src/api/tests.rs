@@ -880,7 +880,7 @@ async fn http_destroy_cancels_an_inflight_run_and_invalidates_its_handle() {
         .unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(result["session_ended_reason"], "cancelled");
-    assert_eq!(result["session_alive"], false);
+    assert_eq!(result["session_ended"], true);
     assert_eq!(
         http(&app, Operation::Run, run_arguments(handle, "echo never"))
             .await

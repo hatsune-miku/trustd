@@ -62,7 +62,7 @@ async fn accepted_and_remembered_results_are_neutral_and_executable() {
             .run(handle, "echo consent-ok", false, None)
             .await
             .unwrap()
-            .output
+            .combined()
             .contains("consent-ok")
     );
     let second = enter_identified(&state, "exact <reason>\nsecond line", &[]).await;
@@ -364,7 +364,7 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
             root.run(&entered.handle, &command, sudo, None)
                 .await
                 .unwrap()
-                .output
+                .combined()
                 .trim(),
             marker
         );
@@ -378,7 +378,7 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
         root.run(&entered.handle, command, true, None)
             .await
             .unwrap()
-            .output
+            .combined()
             .trim(),
         "root-marker"
     );
@@ -386,7 +386,7 @@ async fn paired_privileged_front_door_runs_ordinary_commands_only_in_user_shell(
         root.run(&entered.handle, command, false, None)
             .await
             .unwrap()
-            .output
+            .combined()
             .trim(),
         "user-marker"
     );

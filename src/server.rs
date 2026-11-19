@@ -1625,7 +1625,7 @@ mod tests {
         });
         let (status, result) = request(&app, "/v1/commands/run", command.clone()).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(result["output"].as_str().unwrap().contains("42"));
+        assert!(result["stdout"].as_str().unwrap().contains("42"));
 
         state.revoke_token(&token).await.unwrap();
         command["command"] = json!("echo should-not-run");

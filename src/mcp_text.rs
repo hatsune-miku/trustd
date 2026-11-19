@@ -2,7 +2,6 @@ use serde_json::{Value, json};
 
 pub const SERVER_INSTRUCTIONS: &str = "trustd provides user-authorized shell access through a current-user daemon and a privileged daemon. Suggest it when useful and let the user decide whether to authorize it. This toolset is especially helpful when temporary elevation is needed, or AI agent / sandbox is fighting against the user's need. Remember: the user shall always in control.";
 pub const MISSING_TOOL_NAME: &str = "missing tool name";
-pub const SERIALIZATION_FAILED: &str = "serialization failed";
 pub const INVALID_TIMEOUT: &str =
     "timeout_seconds must be a positive integer or null; omit it for unlimited execution";
 
@@ -74,19 +73,19 @@ fn enter_output() -> Value {
 }
 fn run_output() -> Value {
     json!({
-        "type":"object","properties":{
+        "type":"object",
+        "description":"stderr and the flags below appear only when non-empty or true.",
+        "properties":{
             "stdout":{"type":"string"}, "stderr":{"type":"string"},
-            "output":{"type":"string","description":"Compatibility field: stdout followed by stderr; not an interleaving timeline."},
             "exit_code":{"type":["integer","null"],"description":"Actual exit code; null when interrupted without a command exit code."},
             "success":{"type":"boolean"},
-            "truncated":{"type":"boolean"}, "stdout_truncated":{"type":"boolean"}, "stderr_truncated":{"type":"boolean"},
+            "stdout_truncated":{"type":"boolean"}, "stderr_truncated":{"type":"boolean"},
             "duration_ms":{"type":"integer","minimum":0},
-            "timed_out":{"type":"boolean"}, "session_alive":{"type":"boolean"}, "session_ended":{"type":"boolean"},
-            "session_ended_reason":{"type":["string","null"],"description":"cancelled, shell_exited, shell_unresponsive, or null. A normally interrupted command timeout leaves this null; shell_unresponsive means interruption could not restore the protocol."},
-            "cwd":{"type":["string","null"],"description":"Shell directory after completion; null if interruption prevented reporting it."},
-            "identity":{"type":"object","description":"Actual operating-system execution identity, not a requested or inferred account."}
+            "timed_out":{"type":"boolean"}, "session_ended":{"type":"boolean","description":"The shell is gone; later commands on this session fail."},
+            "session_ended_reason":{"type":"string","description":"cancelled, shell_exited, or shell_unresponsive. A normally interrupted command timeout leaves the session running; shell_unresponsive means interruption could not restore the protocol."},
+            "cwd":{"type":["string","null"],"description":"Shell directory after completion; null if interruption prevented reporting it."}
         },
-        "required":["stdout","stderr","output","exit_code","success","truncated","stdout_truncated","stderr_truncated","duration_ms","timed_out","session_alive","session_ended","session_ended_reason","cwd","identity"]
+        "required":["stdout","exit_code","success","duration_ms","cwd"]
     })
 }
 pub fn tool_definitions() -> Value {
@@ -97,7 +96,7 @@ pub fn tool_definitions() -> Value {
             "handle":{"type":"string","description":"Secret handle returned by enter_interactive."},
             "command":{"type":"string","description":format!("{shell} source code, passed verbatim to the parser; NUL bytes rejected.")},
             "stdin":{"type":"string","description":"Optional UTF-8 standard input for this command only. EOF follows the supplied text; omitted means immediate EOF. No subsequent input or terminal is available."},
-            "timeout_seconds":{"type":["integer","null"],"minimum":1,"description":"Positive execution deadline, or omitted/null for unlimited. Timeout interrupts only this execution and its new child processes, returns partial output, and preserves the persistent shell and session. Inspect session_alive before continuing if the shell cannot recover."}
+            "timeout_seconds":{"type":["integer","null"],"minimum":1,"description":"Positive execution deadline, or omitted/null for unlimited. Timeout interrupts only this execution and its new child processes, returns partial output, and preserves the persistent shell and session. Check session_ended before continuing if the shell cannot recover."}
         }, "required":["handle","command"], "additionalProperties":false
     });
     if cfg!(windows) {
@@ -154,8 +153,8 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name":"remote","title":"Use a paired remote host",
-            "description":"Requires local authorization. Call host_info for target platform and operation schemas, then session_open. Session references are routing IDs, not bearer credentials. Use job_start with a stable idempotency_key for durable work and job_get/job_output to observe it. Disconnecting or closing this adapter does not cancel remote jobs. Never retry run or agent_send after an ambiguous failure. Identities and cwd refer to the target. agent_start/resume manage trustd-owned Codex conversations. Answer approval requests in the management UI.",
-            "inputSchema":{"type":"object","properties":{"handle":{"type":"string"},"target":{"type":"string"},"operation":{"type":"string"},"arguments":{"type":"object"}},"required":["handle","target","operation"],"additionalProperties":false},
+            "description":"Requires local authorization. target is a device ID or name from remote_hosts. Call host_info for target platform and operation schemas, then session_open. Session references are routing IDs, not bearer credentials. Use job_start with a stable idempotency_key for durable work, job_wait to wait for it, and job_output to read it; its output files can also be processed on the target with run. Copy files with file_push {session_ref, local_path, path, replace} and file_pull {session_ref, path, local_path, replace}: this device moves the bytes, so they never pass through you; paths are absolute. Cancelling a remote call only stops waiting for it; close the session_ref or use job_cancel to stop remote work. Disconnecting or closing this adapter does not cancel remote jobs. Never retry run or agent_send after an ambiguous failure. Identities and cwd refer to the target. agent_start/resume manage trustd-owned Codex conversations. Answer approval requests in the management UI.",
+            "inputSchema":{"type":"object","properties":{"handle":{"type":"string"},"target":{"type":"string","description":"Device ID or name from remote_hosts."},"operation":{"type":"string"},"arguments":{"type":"object"}},"required":["handle","target","operation"],"additionalProperties":false},
             "outputSchema":{"type":"object","properties":{},"additionalProperties":true}
         }
     ])

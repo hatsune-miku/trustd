@@ -86,7 +86,7 @@ class Hosts:
             self.job_finished(source, target, job["id"])
             output = bytearray()
             while True:
-                chunk = self.call(source, target, "job_output", {"job_id": job["id"], "offset": len(output)})
+                chunk = self.call(source, target, "job_output", {"job_id": job["id"], "offset": len(output), "encoding": "base64"})
                 output.extend(base64.b64decode(chunk["data"]))
                 if chunk["eof"]:
                     break
@@ -105,7 +105,7 @@ class Hosts:
                 assert result["sha256"] == hashlib.sha256(payload).hexdigest()
                 output = bytearray()
                 while True:
-                    chunk = self.call(source, target, "file_read", {"session_ref": session, "path": path, "offset": len(output)})
+                    chunk = self.call(source, target, "file_read", {"session_ref": session, "path": path, "offset": len(output), "encoding": "base64"})
                     output.extend(base64.b64decode(chunk["data"]))
                     if chunk["eof"]:
                         break

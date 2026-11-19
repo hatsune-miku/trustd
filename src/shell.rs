@@ -35,20 +35,21 @@ impl ShellKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Fields missing from a serialized result take their defaults, so this also
+/// reads the compact [`ExecutionResult::view`] that the privileged daemon's run
+/// endpoint returns to the user daemon. The identity is then unknown on the
+/// user side; the privileged daemon records it in its own command log.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExecutionResult {
-    /// Compatibility text; stdout followed by stderr, not interleaving order.
-    pub output: String,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub success: bool,
-    pub truncated: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
     pub duration_ms: u64,
     pub timed_out: bool,
-    pub session_alive: bool,
     pub session_ended_reason: Option<String>,
     pub cwd: Option<String>,
     pub identity: serde_json::Value,
@@ -57,6 +58,44 @@ pub struct ExecutionResult {
     /// shell's own exit code are still returned, but the session is now gone and
     /// further commands on this handle will fail.
     pub session_ended: bool,
+}
+
+impl ExecutionResult {
+    /// stdout followed by stderr, for diagnostics; not an interleaving order.
+    pub fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+
+    /// What an agent receives. Every field costs the caller tokens on every
+    /// command, so empty stderr and false flags are left out, and the identity
+    /// (already checked against the requested level, and reported when the
+    /// session was authorized) is kept for the daemons' own records.
+    pub fn view(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "stdout": self.stdout,
+            "exit_code": self.exit_code,
+            "success": self.success,
+            "duration_ms": self.duration_ms,
+            "cwd": self.cwd,
+        });
+        if !self.stderr.is_empty() {
+            value["stderr"] = self.stderr.clone().into();
+        }
+        for (name, set) in [
+            ("stdout_truncated", self.stdout_truncated),
+            ("stderr_truncated", self.stderr_truncated),
+            ("timed_out", self.timed_out),
+            ("session_ended", self.session_ended),
+        ] {
+            if set {
+                value[name] = true.into();
+            }
+        }
+        if let Some(reason) = &self.session_ended_reason {
+            value["session_ended_reason"] = reason.clone().into();
+        }
+        value
+    }
 }
 
 #[derive(Debug, Error)]
@@ -368,7 +407,7 @@ mod tests {
                 ),
             )
             .await;
-            assert_eq!(result.output.trim(), "1");
+            assert_eq!(result.combined().trim(), "1");
             shell.terminate().await;
         }
     }
@@ -428,12 +467,12 @@ mod tests {
                 "for value in 4 5; do printf '值=%s\\n' \"$value\"; done | cat\nprintf '%s\\n' Cargo.*\ncat <<'EOF'\nheredoc value\nEOF",
             );
             let result = run(&shell, script).await;
-            assert!(result.success, "{kind:?}: {}", result.output);
+            assert!(result.success, "{kind:?}: {}", result.combined());
             for expected in ["值=4", "值=5", "Cargo.toml"] {
                 assert!(
-                    result.output.contains(expected),
+                    result.combined().contains(expected),
                     "{kind:?}: {}",
-                    result.output
+                    result.combined()
                 );
             }
             run(&shell, source(kind,
@@ -450,9 +489,9 @@ mod tests {
             .await;
             for expected in ["persisted/yes", "function-ok", "src"] {
                 assert!(
-                    result.output.contains(expected),
+                    result.combined().contains(expected),
                     "{kind:?}: {}",
-                    result.output
+                    result.combined()
                 );
             }
             shell.terminate().await;
@@ -472,7 +511,11 @@ mod tests {
                 ),
             )
             .await;
-            assert!(result.output.contains("direct-without-newline:captured"));
+            assert!(
+                result
+                    .combined()
+                    .contains("direct-without-newline:captured")
+            );
             let controls = run(
                 &shell,
                 source(
@@ -482,7 +525,7 @@ mod tests {
                 ),
             )
             .await;
-            assert_eq!(controls.output, "a\0b\u{001e}other\u{001f}c");
+            assert_eq!(controls.combined(), "a\0b\u{001e}other\u{001f}c");
             let result = run(
                 &shell,
                 source(
@@ -492,12 +535,12 @@ mod tests {
                 ),
             )
             .await;
-            assert!(result.success && result.truncated);
-            assert_eq!(result.output.len(), 1024);
+            assert!(result.success && (result.stdout_truncated || result.stderr_truncated));
+            assert_eq!(result.combined().len(), 1024);
             assert!(
                 run(&shell, "echo next-command")
                     .await
-                    .output
+                    .combined()
                     .contains("next-command")
             );
             let error = run(
@@ -510,7 +553,7 @@ mod tests {
             )
             .await;
             assert!(!error.success);
-            assert!(error.output.contains("expected failure"));
+            assert!(error.combined().contains("expected failure"));
             let native = run(
                 &shell,
                 source(kind, "pwsh -NoProfile -Command 'exit 7'", "(exit 7)"),
@@ -559,7 +602,7 @@ mod tests {
                 .await;
             let result = result.unwrap();
             assert!(
-                result.timed_out && !result.session_ended && result.session_alive,
+                result.timed_out && !result.session_ended,
                 "{kind:?}: {result:?}"
             );
             assert_eq!(result.session_ended_reason, None);
@@ -606,7 +649,7 @@ mod tests {
                 "{kind:?}: {next:?}"
             );
             let timed_out = running.await.unwrap().unwrap();
-            assert!(timed_out.timed_out && timed_out.session_alive);
+            assert!(timed_out.timed_out && !timed_out.session_ended);
             assert!(!timed_out.stdout.contains("must-not-run"));
             shell.terminate().await;
         }
@@ -676,8 +719,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
             request.abort();
             let result = run(&shell, "echo second").await;
-            assert!(result.output.contains("second"));
-            assert!(!result.output.contains("first"));
+            assert!(result.combined().contains("second"));
+            assert!(!result.combined().contains("first"));
             shell.terminate().await;
         }
     }
@@ -712,7 +755,7 @@ mod tests {
                 Err(ShellError::Rejected(_))
             ));
             // A rejected command must leave the session usable.
-            assert!(run(&shell, "echo alive").await.output.contains("alive"));
+            assert!(run(&shell, "echo alive").await.combined().contains("alive"));
             shell.terminate().await;
         }
     }
@@ -731,7 +774,7 @@ mod tests {
             .expect("a clean exit is a result");
         assert!(exited.session_ended);
         assert_eq!(exited.exit_code, Some(5));
-        assert!(exited.output.contains("important-diagnostic"));
+        assert!(exited.combined().contains("important-diagnostic"));
 
         let shell = bash_backend()
             .expect("the configured Bash backend is available")
@@ -742,8 +785,8 @@ mod tests {
             .expect("a set -e failure is a result");
         assert!(sete.session_ended);
         assert_eq!(sete.exit_code, Some(1));
-        assert!(sete.output.contains("before"));
-        assert!(!sete.output.contains("after"));
+        assert!(sete.combined().contains("before"));
+        assert!(!sete.combined().contains("after"));
     }
 
     #[cfg(unix)]
@@ -769,7 +812,7 @@ mod tests {
         // child does not keep running with the shell's privileges.
         #[cfg(unix)]
         {
-            let pid: i32 = result.output.trim().parse().expect("a background PID");
+            let pid: i32 = result.combined().trim().parse().expect("a background PID");
             let mut waited = 0;
             while process_is_alive(pid) && waited < 50 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -789,11 +832,19 @@ mod tests {
             None => return,
         };
         // `exec >/dev/null` must only affect its own command, not the session.
-        assert_eq!(run(&shell, "exec >/dev/null; echo hidden").await.output, "");
-        assert!(run(&shell, "echo visible").await.output.contains("visible"));
+        assert_eq!(
+            run(&shell, "exec >/dev/null; echo hidden").await.combined(),
+            ""
+        );
+        assert!(
+            run(&shell, "echo visible")
+                .await
+                .combined()
+                .contains("visible")
+        );
         // A user function named `read` must not break the protocol reader.
         run(&shell, "read() { echo NO; }; echo defined").await;
-        assert!(run(&shell, "echo next").await.output.contains("next"));
+        assert!(run(&shell, "echo next").await.combined().contains("next"));
         shell.terminate().await;
     }
 
@@ -836,14 +887,14 @@ mod tests {
         assert_eq!(result.exit_code, Some(expected_exit));
         assert!(!result.success);
         assert!(!result.session_ended);
-        assert!(!result.output.starts_with("SHOULD_NOT_RUN"));
+        assert!(!result.combined().starts_with("SHOULD_NOT_RUN"));
         // An invalid pipeline must not execute its left side or poison the next call.
         let result = run(&shell, "localshelld_pipe_test=changed |").await;
         assert!(!result.success);
         assert_eq!(
             run(&shell, "printf '%s' \"${localshelld_pipe_test-unset}\"")
                 .await
-                .output,
+                .combined(),
             "unset"
         );
         shell.terminate().await;
@@ -858,7 +909,7 @@ mod tests {
         };
         let pid: i32 = run(&shell, "sleep 300 & echo $!")
             .await
-            .output
+            .combined()
             .trim()
             .parse()
             .expect("a background PID");

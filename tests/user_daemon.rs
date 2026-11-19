@@ -234,7 +234,7 @@ async fn verify_user_daemon(headless: bool) {
     let expected = Command::new("whoami").output().unwrap();
     assert!(expected.status.success());
     assert_eq!(
-        result["output"].as_str().unwrap().trim(),
+        result["stdout"].as_str().unwrap().trim(),
         String::from_utf8_lossy(&expected.stdout).trim()
     );
     let mut body = localshelld::execution::execution_argument(

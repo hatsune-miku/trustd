@@ -150,6 +150,46 @@ async fn devices_join_with_one_owner_signature_and_reach_each_other_over_the_bac
         .unwrap();
     assert_eq!(info["platform"], std::env::consts::OS);
 
+    // Devices answer to their names, and files move between them through the
+    // daemons, in several relay-sized chunks, without the caller carrying them.
+    let session = laptop
+        .remote_invoke(&json!({"target":"SERVER","operation":"session_open","arguments":{}}))
+        .await
+        .unwrap()["session_ref"]
+        .clone();
+    let files = tempfile::tempdir().unwrap();
+    let payload: Vec<u8> = (0..2 * 1024 * 1024 + 12345)
+        .map(|i: usize| (i * 7 % 251) as u8)
+        .collect();
+    let source = files.path().join("source.bin");
+    std::fs::write(&source, &payload).unwrap();
+    let remote = files.path().join("remote.bin");
+    let transfer = |operation: &'static str, arguments: Value| async move {
+        laptop
+            .remote_invoke(&json!({"target":"server","operation":operation,"arguments":arguments}))
+            .await
+    };
+    let push = json!({"session_ref":session,"local_path":source,"path":remote});
+    let pushed = transfer("file_push", push.clone()).await.unwrap();
+    assert_eq!(pushed["size"], payload.len());
+    assert_eq!(std::fs::read(&remote).unwrap(), payload);
+    let back = files.path().join("back.bin");
+    let pull = json!({"session_ref":session,"path":remote,"local_path":back});
+    let pulled = transfer("file_pull", pull.clone()).await.unwrap();
+    assert_eq!(pulled["sha256"], pushed["sha256"]);
+    assert_eq!(std::fs::read(&back).unwrap(), payload);
+    // Neither direction overwrites an existing file unless asked to.
+    assert!(transfer("file_pull", pull.clone()).await.is_err());
+    std::fs::write(&source, b"replacement").unwrap();
+    assert!(transfer("file_push", push.clone()).await.is_err());
+    let mut replace = push;
+    replace["replace"] = json!(true);
+    transfer("file_push", replace).await.unwrap();
+    let mut replace = pull;
+    replace["replace"] = json!(true);
+    transfer("file_pull", replace).await.unwrap();
+    assert_eq!(std::fs::read(&back).unwrap(), b"replacement");
+
     // Management login: the daemon has its own one-time statement signed by
     // the owner's passkey on the backend, and verifies the signature itself.
     let app = crate::server::router(laptop.clone());

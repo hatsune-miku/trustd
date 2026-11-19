@@ -273,8 +273,13 @@ impl Adapter {
                 let result = tokio::select! {
                     result = request => result,
                     _ = cancelled.changed() => {
-                        self.destroy_handle(&handle).await?;
-                        self.forget(&handle).await;
+                        // Only a local command needs its shell torn down to stop
+                        // it. A remote call merely waits on another device, so
+                        // abandoning it keeps this session and its approval.
+                        if name == "run" {
+                            self.destroy_handle(&handle).await?;
+                            self.forget(&handle).await;
+                        }
                         bail!("request cancelled");
                     }
                 };
@@ -347,7 +352,7 @@ impl Adapter {
                             json!({"jsonrpc":"2.0","id":id,"result":{
                                 "protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false}},
                                 "serverInfo":{"name":"trustd-stdio","version":crate::VERSION},
-                                "instructions":"trustd holds one authorization session inside this adapter process. Request only the identities and credential keys needed for the user's task. Handles and configured tokens never appear in tools. One process is one isolation boundary, not necessarily one chat. Closing stdin or cancelling a run attempts to destroy the entire session; forced process termination cannot guarantee cleanup. No tool reads credential values; reference the injected environment variables in commands."
+                                "instructions":"trustd holds one authorization session inside this adapter process. Request only the identities and credential keys needed for the user's task. Handles and configured tokens never appear in tools. One process is one isolation boundary, not necessarily one chat. Closing stdin or cancelling a local run attempts to destroy the entire session (cancelling a remote call only stops waiting for it); forced process termination cannot guarantee cleanup. No tool reads credential values; reference the injected environment variables in commands."
                             }})
                         }
                         "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),

@@ -105,23 +105,17 @@ Linux/macOS 保持原有 boolean `sudo`，不接受 `privilege_level`：
 
 `stdin` 是可选 UTF-8 字符串，按字节供本次命令读取，写完即 EOF；省略等于空输入。允许 stdin 内含 NUL，但 command 内 NUL 被拒绝。子程序负责按其自身编码约定解码；本服务不重写用户命令。不提供后续 write_stdin、PTY、实时输出、后台任务或任务轮询接口。
 
-正常返回示例（identity 内账户为示意）：
+正常返回示例：
 
 ```json
-{
-  "stdout":"hello\n","stderr":"","output":"hello\n",
-  "exit_code":0,"success":true,
-  "truncated":false,"stdout_truncated":false,"stderr_truncated":false,
-  "duration_ms":120,"timed_out":false,
-  "session_alive":true,"session_ended":false,"session_ended_reason":null,
-  "cwd":"C:\\Users\\owner",
-  "identity":{"user":"PC\\owner","sid":"S-1-5-21-...","is_system":false,"elevated":true,"integrity":"High","session_id":0}
-}
+{"stdout":"hello\n","exit_code":0,"success":true,"duration_ms":120,"cwd":"C:\\Users\\owner"}
 ```
 
-stdout、stderr 分别捕获，各最多保存 `max_output_bytes` 字节；非 UTF-8 输出用替换字符解码。超过上限继续排空，以维持会话协议。旧 `output` 兼容字段是 stdout 后接 stderr，不表示两者的时间交错顺序。PowerShell error 流进入 stderr，其它逻辑流暂不提供独立字段。原生程序 stderr 有文本不意味着失败；以 exit_code/success 判断。PowerShell 保留原生进程退出码，PowerShell 非终止错误返回 1；Bash 遵循最后命令及当前 pipefail 设置。
+`stdout`、`exit_code`、`success`、`duration_ms`、`cwd` 总会返回；`stderr` 只在非空时出现，`stdout_truncated`、`stderr_truncated`、`timed_out`、`session_ended` 只在为真时出现，`session_ended_reason` 只在会话结束时出现。每个字段都会在每次调用时计入调用方的 token，因此不返回可推导或重复的内容。
 
-`cwd` 是完成时 shell 工作目录，不能在中断后可靠获取时为 null。`identity` 是承载脚本的 shell 的真实 OS 身份，不是脚本自行另起的任意程序身份。`duration_ms` 为该命令开始执行后的耗时，不含串行队列等待时间。
+stdout、stderr 分别捕获，各最多保存 `max_output_bytes` 字节；非 UTF-8 输出用替换字符解码。超过上限继续排空，以维持会话协议。PowerShell error 流进入 stderr，其它逻辑流暂不提供独立字段。原生程序 stderr 有文本不意味着失败；以 exit_code/success 判断。PowerShell 保留原生进程退出码，PowerShell 非终止错误返回 1；Bash 遵循最后命令及当前 pipefail 设置。
+
+`cwd` 是完成时 shell 工作目录，不能在中断后可靠获取时为 null。承载脚本的 shell 的真实 OS 身份在授权响应的 `identities` 中给出，每次执行前都会核对它与所选身份一致，结果中不再重复；命令日志仍记录该身份。`duration_ms` 为该命令开始执行后的耗时，不含串行队列等待时间。
 
 ## 超时、断连与取消
 

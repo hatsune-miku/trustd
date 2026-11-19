@@ -68,12 +68,26 @@ async fn run(
     ))
 }
 
+/// A remote call that never answers, like a device that has gone quiet.
+async fn remote(
+    State(state): State<Arc<Fake>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let handle = args["handle"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    if !state.sessions.lock().await.contains(handle) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    state.requests.lock().await.push(args.clone());
+    std::future::pending().await
+}
+
 async fn fake() -> (SocketAddr, Arc<Fake>, tokio::task::JoinHandle<()>) {
     let state = Arc::new(Fake::default());
     let router = Router::new()
         .route("/v1/sessions/enter/interactive", post(enter))
         .route("/v1/sessions/destroy", post(destroy))
         .route("/v1/commands/run", post(run))
+        .route("/v2/remote/invoke", post(remote))
         .route(
             "/v1/secrets/keys",
             post(
@@ -377,6 +391,33 @@ async fn cancellation_closes_only_the_originating_adapters_session() {
     assert_eq!(state.sessions.lock().await.len(), 1);
     call(&second, command("echo")).await.unwrap();
     second.close().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelling_a_remote_call_keeps_the_session() {
+    let (address, state, server) = fake().await;
+    let adapter = Arc::new(Adapter::new(address).unwrap());
+    call(&adapter, approval()).await.unwrap();
+    let (cancel, receiver) = watch::channel(false);
+    let worker = adapter.clone();
+    let waiting = json!({"name":"remote","arguments":{"target":"iris","operation":"job_wait","arguments":{"job_id":"long"}}});
+    let running = tokio::spawn(async move { worker.call(waiting, receiver).await });
+    while state.requests.lock().await.len() < 2 {
+        tokio::task::yield_now().await;
+    }
+    cancel.send(true).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(adapter.handle.lock().await.is_some());
+    assert_eq!(state.sessions.lock().await.len(), 1);
+    call(&adapter, command("echo")).await.unwrap();
+    adapter.close().await.unwrap();
     server.abort();
 }
 

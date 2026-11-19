@@ -170,12 +170,14 @@ fn elevated_daemon_supervises_only_a_medium_same_user_child() {
     let result: Value = http.post(format!("{base}/v1/commands/run"))
         .json(&json!({"handle":handle,"privilege_level":"current-user","command":"[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"}))
         .send().unwrap().error_for_status().unwrap().json().unwrap();
-    assert_eq!(result["identity"]["elevated"], owner.elevated);
-    assert_eq!(result["identity"]["restricted_user"], true);
-    assert_eq!(result["identity"]["is_system"], false);
-    assert_eq!(result["identity"]["integrity"], "Medium");
-    assert_eq!(result["identity"]["sid"], owner.sid);
-    assert_eq!(result["identity"]["session_id"], owner.session_id);
+    // The run checks the shell against this identity; results no longer repeat it.
+    let identity = &entered["identities"]["current-user"];
+    assert_eq!(identity["elevated"], owner.elevated);
+    assert_eq!(identity["restricted_user"], true);
+    assert_eq!(identity["is_system"], false);
+    assert_eq!(identity["integrity"], "Medium");
+    assert_eq!(identity["sid"], owner.sid);
+    assert_eq!(identity["session_id"], owner.session_id);
     assert_eq!(result["stdout"].as_str().unwrap().trim(), owner.sid);
     let protected = protected.to_str().unwrap().replace('\'', "''");
     let command = format!(

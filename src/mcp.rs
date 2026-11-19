@@ -230,7 +230,7 @@ async fn call_tool_from(
 
 fn tool_json(value: Value) -> Result<Value, ApiError> {
     Ok(json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
+        "content": [{ "type": "text", "text": serde_json::to_string(&value).unwrap_or_default() }],
         "structuredContent": value,
         "isError": false
     }))

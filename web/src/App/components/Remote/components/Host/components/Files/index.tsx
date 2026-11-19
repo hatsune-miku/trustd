@@ -70,7 +70,13 @@ export function Files({ invoke, sessionRef }: { invoke: Invoke; sessionRef?: str
       if (!picker && metadata.size > 64 * 1024 * 1024)
         throw new Error('此浏览器不支持大文件流式保存，请使用 Chrome 或 Edge。')
       for (;;) {
-        const chunk = await invoke<Chunk>('file_read', { session_ref: sessionRef, path, offset, limit: 32768 })
+        const chunk = await invoke<Chunk>('file_read', {
+          session_ref: sessionRef,
+          path,
+          offset,
+          limit: 1024 * 1024,
+          encoding: 'base64',
+        })
         const bytes = Uint8Array.from(atob(chunk.data), (value) => value.charCodeAt(0))
         if (writable) await writable.write(bytes)
         else chunks.push(bytes)

@@ -30,6 +30,7 @@ mod jobs;
 mod join_tests;
 #[cfg(test)]
 mod tests;
+mod transfer;
 
 /// Another device of the same owner, from the verified roster. Devices of one
 /// owner trust each other by default: execution, elevation and credentials.
@@ -116,6 +117,8 @@ pub struct Runtime {
     sessions: Mutex<BTreeMap<String, Session>>,
     jobs: Mutex<BTreeMap<String, jobs::Job>>,
     job_handles: Mutex<BTreeMap<String, String>>,
+    /// Woken whenever a job reaches a final state, for `job_wait`.
+    job_finished: tokio::sync::Notify,
     submit: Mutex<()>,
     agent_start: Mutex<()>,
     agents: Mutex<BTreeMap<String, Arc<codex::Agent>>>,
@@ -152,6 +155,49 @@ impl Runtime {
             jobs: Mutex::new(jobs),
             ..Self::default()
         })
+    }
+
+    /// A device ID, a device name from `remote_hosts` (ignoring case), or an
+    /// unambiguous ID prefix of at least eight characters.
+    async fn resolve(&self, target: &str) -> Result<String> {
+        let peers = self
+            .saved
+            .lock()
+            .await
+            .as_ref()
+            .map(Saved::peers)
+            .unwrap_or_default();
+        if peers.contains_key(target) {
+            return Ok(target.to_owned());
+        }
+        let mut matches: Vec<_> = peers
+            .iter()
+            .filter(|(_, peer)| peer.label.eq_ignore_ascii_case(target))
+            .collect();
+        if matches.is_empty() && target.len() >= 8 {
+            matches = peers
+                .iter()
+                .filter(|(id, _)| id.starts_with(target))
+                .collect();
+        }
+        let describe = |devices: &[(&String, &Peer)]| {
+            devices
+                .iter()
+                .map(|(id, peer)| format!("{} ({id})", peer.label))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match matches.as_slice() {
+            [(id, _)] => Ok((*id).clone()),
+            [] => anyhow::bail!(
+                "no device is named {target:?}; known devices: {}",
+                describe(&peers.iter().collect::<Vec<_>>())
+            ),
+            several => anyhow::bail!(
+                "several devices match {target:?}; pass one of their IDs: {}",
+                describe(several)
+            ),
+        }
     }
 
     fn directory(&self) -> Result<PathBuf> {
@@ -576,7 +622,7 @@ impl AppState {
                         },
                     )
                     .await?;
-                Ok(serde_json::to_value(result)?)
+                Ok(result.view())
             }
             "job_start" => self.remote_job_start(owner, &args).await,
             "job_get" | "job_list" | "job_cancel" | "job_output" => {
@@ -596,23 +642,47 @@ impl AppState {
     }
 
     pub(crate) async fn remote_invoke(&self, args: &Value) -> Result<Value> {
+        let operation = string(args, "operation")?;
         ensure!(
-            args["operation"] != "agent_respond",
+            operation != "agent_respond",
             "answer Codex requests in the management UI"
         );
-        self.remote_invoke_human(args).await
+        if !matches!(operation, "file_push" | "file_pull") {
+            return self.remote_invoke_human(args).await;
+        }
+        // Remote work runs only in the user daemon, so the local file is read
+        // or written as the same user the local session runs commands as.
+        let target = self.remote.resolve(string(args, "target")?).await?;
+        let node = self.remote_node().await?;
+        let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let result = if operation == "file_push" {
+            transfer::push(&node, &target, &arguments).await
+        } else {
+            transfer::pull(&node, &target, &arguments).await
+        };
+        self.audit(
+            "remote.transfer",
+            json!({"peer":target,"operation":operation,"path":arguments.get("path"),
+                "local_path":arguments.get("local_path"),"size":result.as_ref().ok().map(|r| &r["size"]),
+                "success":result.is_ok()}),
+        )
+        .await;
+        result
     }
 
-    async fn remote_invoke_human(&self, args: &Value) -> Result<Value> {
-        let target = string(args, "target")?;
-        let node = self
-            .remote
+    async fn remote_node(&self) -> Result<Arc<Node>> {
+        self.remote
             .node
             .read()
             .await
             .clone()
-            .context("remote connection is not configured")?;
-        node.call(target, json!({"operation":string(args,"operation")?,"arguments":args.get("arguments").cloned().unwrap_or_else(|| json!({}))})).await
+            .context("remote connection is not configured")
+    }
+
+    async fn remote_invoke_human(&self, args: &Value) -> Result<Value> {
+        let target = self.remote.resolve(string(args, "target")?).await?;
+        let node = self.remote_node().await?;
+        node.call(&target, json!({"operation":string(args,"operation")?,"arguments":args.get("arguments").cloned().unwrap_or_else(|| json!({}))})).await
     }
 
     pub(crate) async fn remote_hosts(&self) -> Result<Value> {

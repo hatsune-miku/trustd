@@ -10,6 +10,7 @@ pub(super) fn allowed(operation: &str) -> bool {
         "run"
             | "job_start"
             | "job_get"
+            | "job_wait"
             | "job_list"
             | "job_cancel"
             | "job_output"
@@ -69,7 +70,7 @@ pub fn operation_schemas() -> Value {
         ),
         (
             "job_start",
-            "Submit a durable task with a stable idempotency_key. Poll job_get and job_output. No default runtime limit.",
+            "Submit a durable task with a stable idempotency_key. Wait with job_wait instead of polling. Output goes to stdout_path/stderr_path on the target: read it with job_output, or process it there with run (for example compress it first). No default runtime limit.",
             job,
             job_required,
         ),
@@ -77,6 +78,12 @@ pub fn operation_schemas() -> Value {
             "job_get",
             "Inspect task status and result.",
             json!({"job_id":text}),
+            vec!["job_id"],
+        ),
+        (
+            "job_wait",
+            "Wait until the task finishes or timeout_seconds pass (default 300, at most 3600), then return it; check status to tell which.",
+            json!({"job_id":text,"timeout_seconds":{"type":"integer","minimum":1}}),
             vec!["job_id"],
         ),
         (
@@ -93,8 +100,8 @@ pub fn operation_schemas() -> Value {
         ),
         (
             "job_output",
-            "Read stdout/stderr. data is base64; next_offset supports lossless continuation.",
-            json!({"job_id":text,"stream":{"type":"string","enum":["stdout","stderr"]},"offset":number,"limit":number}),
+            "Read stdout/stderr as text, or as base64 data when the bytes are not text or encoding is base64. tail reads the last N bytes; next_offset continues losslessly.",
+            json!({"job_id":text,"stream":{"type":"string","enum":["stdout","stderr"]},"offset":number,"tail":number,"limit":number,"encoding":{"type":"string","enum":["text","base64"]}}),
             vec!["job_id"],
         ),
         (
@@ -105,13 +112,13 @@ pub fn operation_schemas() -> Value {
         ),
         (
             "file_read",
-            "Read at most 48 KiB from an absolute remote path as base64.",
-            json!({"session_ref":text,"path":text,"offset":number,"limit":number}),
+            "Read an absolute remote path as text (at most 256 KiB), or as base64 data (at most 1 MiB) when the bytes are not text or encoding is base64. tail reads the last N bytes.",
+            json!({"session_ref":text,"path":text,"offset":number,"tail":number,"limit":number,"encoding":{"type":"string","enum":["text","base64"]}}),
             vec!["session_ref", "path"],
         ),
         (
             "file_write",
-            "Upload a base64 chunk. Stable transfer_id is a UUID; complete returns sha256 and verifies it when supplied. Existing files require replace.",
+            "Upload a base64 chunk of at most 1 MiB. Stable transfer_id is a UUID; complete returns sha256 and verifies it when supplied. Existing files require replace.",
             json!({"session_ref":text,"path":text,"transfer_id":text,"offset":number,"data":text,"complete":boolean,"sha256":text,"replace":boolean}),
             vec!["session_ref", "path", "transfer_id", "offset", "data"],
         ),
@@ -192,7 +199,7 @@ pub async fn serve(endpoint: SocketAddr, token_file: &Path) -> Result<()> {
         };
         let result:Result<Value> = async {
             match request["method"].as_str() {
-                Some("initialize") => Ok(json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"trustd-remote-jobs","version":crate::VERSION},"instructions":"Execute on this host. Durable jobs survive this conversation; poll by job_id. Use explicit cancellation to stop them."})),
+                Some("initialize") => Ok(json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"trustd-remote-jobs","version":crate::VERSION},"instructions":"Execute on this host. Durable jobs survive this conversation; wait for them with job_wait. Use explicit cancellation to stop them."})),
                 Some("ping") => Ok(json!({})),
                 Some("tools/list") => {
                     let tools: Vec<_> = operation_schemas().as_array().unwrap().iter().filter(|d| allowed(d["name"].as_str().unwrap())).map(|d| {

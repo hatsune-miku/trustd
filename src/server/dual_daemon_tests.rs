@@ -68,7 +68,7 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
         user.run(&local.handle, "echo local-only", false, None)
             .await
             .unwrap()
-            .output
+            .combined()
             .contains("local-only")
     );
     let entered = enter_linked(&root, &user, &root_token).await.unwrap();
@@ -98,7 +98,7 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
             user.run(&entered.handle, &script, sudo, None)
                 .await
                 .unwrap()
-                .output
+                .combined()
                 .trim(),
             marker
         );
@@ -113,7 +113,7 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
             )
             .await
             .unwrap()
-            .output
+            .combined()
             .trim(),
             marker
         );
@@ -125,7 +125,7 @@ async fn routes_explicit_sudo_and_isolates_persistent_shell_state() {
         user.run(&local.handle, "echo standalone", false, None)
             .await
             .unwrap()
-            .output
+            .combined()
             .contains("standalone")
     );
     user.shutdown().await;
@@ -289,7 +289,7 @@ async fn http_and_mcp_require_platform_identity_and_only_expose_short_names() {
     args["command"] = json!("echo ordinary");
     let (_, rpc) = super::tests::request(&app, "/mcp", json!({"jsonrpc":"2.0", "id":4, "method":"tools/call", "params":{"name":"run", "arguments":args}})).await;
     assert!(
-        rpc["result"]["structuredContent"]["output"]
+        rpc["result"]["structuredContent"]["stdout"]
             .as_str()
             .unwrap()
             .contains("ordinary")
@@ -313,7 +313,7 @@ async fn either_backend_timeout_preserves_both_backends_and_the_handle() {
             )
             .await
             .unwrap();
-        assert!(result.timed_out && !result.session_ended && result.session_alive);
+        assert!(result.timed_out && !result.session_ended);
         for identity in [sudo, !sudo] {
             let next = user
                 .run(&entered.handle, "echo alive", identity, Some(10))
