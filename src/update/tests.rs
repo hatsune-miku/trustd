@@ -56,24 +56,34 @@ fn release(tag: &str, prerelease: bool, draft: bool) -> Release {
 }
 
 #[test]
-fn selects_by_semver_not_api_order_or_promoted_rc() {
+fn selects_by_semver_among_releases_published_as_full_releases() {
     let versions = || {
         vec![
             release("v0.1.0-rc.10.1", false, false),
-            release("v0.1.0-rc.9.1", true, false),
+            release("v0.1.0-rc.11.1", true, false),
+            release("v0.1.0-rc.9.1", false, false),
             release("v0.0.9", false, false),
             release("v9.0.0", false, true),
         ]
     };
+    // A release candidate published as a full release (GitHub's Latest) is
+    // eligible by default; rc.10 outranks rc.9 numerically, whatever the API order.
     assert_eq!(
         select_release(versions(), false).unwrap().tag_name,
-        "v0.0.9"
+        "v0.1.0-rc.10.1"
     );
     assert_eq!(
         select_release(versions(), true).unwrap().tag_name,
-        "v0.1.0-rc.10.1"
+        "v0.1.0-rc.11.1"
     );
-    assert!(select_release(vec![release("v0.1.0-rc.8.1", false, false)], false).is_err());
+    assert_eq!(
+        select_release(vec![release("v0.1.0-rc.8.1", false, false)], false)
+            .unwrap()
+            .tag_name,
+        "v0.1.0-rc.8.1"
+    );
+    assert!(select_release(vec![release("v0.1.0-rc.8.1", true, false)], false).is_err());
+    assert!(select_release(vec![release("v9.0.0", false, true)], true).is_err());
     assert!(version("../latest?x=y").is_err());
 }
 

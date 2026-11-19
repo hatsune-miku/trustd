@@ -47,7 +47,7 @@ pub struct Options {
     /// Download and verify the complete bundle without opening the maintenance wizard.
     #[arg(long, conflicts_with = "check")]
     pub download_only: bool,
-    /// Include prereleases (stable versions are eligible too).
+    /// Also include releases GitHub marks as prereleases.
     #[arg(long, conflicts_with = "tag")]
     pub prerelease: bool,
     /// Install this exact release tag, including a prerelease tag.
@@ -83,14 +83,15 @@ fn select_release(releases: Vec<Release>, prerelease: bool) -> Result<Release> {
         .into_iter()
         .filter_map(|release| {
             let parsed = version(&release.tag_name).ok()?;
-            // GitHub Latest is a display policy; an RC tag is still prerelease
-            // by semantic version, even when promoted to a full GitHub release.
-            (!release.draft && (prerelease || (!release.prerelease && parsed.pre.is_empty())))
-                .then_some((parsed, release))
+            // How the publisher released it is the channel. Release candidates
+            // are published as full releases and marked Latest, so a `-rc`
+            // version is eligible by default; only releases GitHub marks as
+            // prereleases need --prerelease.
+            (!release.draft && (prerelease || !release.prerelease)).then_some((parsed, release))
         })
         .max_by(|a, b| a.0.cmp_precedence(&b.0))
         .map(|(_, release)| release)
-        .context("no eligible release found; use --prerelease to include release candidates")
+        .context("no eligible release found; use --prerelease to include releases GitHub marks as prereleases")
 }
 
 fn client() -> Result<Client> {

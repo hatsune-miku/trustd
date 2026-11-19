@@ -122,7 +122,7 @@ Linux 无图形会话时，`trustd update` 会在当前终端运行新版本的 
 
 从旧的四程序套件升级到五程序套件，请重新运行在线安装命令或下载完整发布包。旧更新器只解压它认识的四个程序，无法补齐新增的 `trustd-user-headless`。
 
-稳定通道排除所有 RC；要包含 RC 使用 `--prerelease`。降级必须显式指定 `--tag` 与 `--allow-downgrade`。发布源为 `hatsune-miku/trustd` GitHub Releases；下载使用系统/环境 HTTP 代理、HTTPS 和发布包校验值，尚无独立发布签名。
+默认通道跟随 GitHub 上的发布方式：凡是作为正式版发布的版本（GitHub 标为 Latest 的就是其中最新的一个）都可选，版本号带 `-rc` 也一样，按语义化版本取最高者；GitHub 标为 prerelease 的版本需要加 `--prerelease` 才会纳入。降级必须显式指定 `--tag` 与 `--allow-downgrade`。发布源为 `hatsune-miku/trustd` GitHub Releases；下载使用系统/环境 HTTP 代理、HTTPS 和发布包校验值，尚无独立发布签名。
 
 从 localshelld 迁移时，解压完整 trustd 套件并运行维护向导，不要用旧的单文件更新器替换某个 exe。已有数据与部署使用以下兼容标识：
 
