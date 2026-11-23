@@ -157,6 +157,24 @@ impl Runtime {
         })
     }
 
+    /// This device's name and the requesting device's name, both from the
+    /// device owner's signed roster.
+    async fn device_names(&self, caller: &str) -> Result<(String, String)> {
+        let saved = self.saved.lock().await;
+        let saved = saved
+            .as_ref()
+            .context("this device has not joined a backend")?;
+        let roster = saved
+            .roster()
+            .context("this device has no verified roster")?;
+        let own = saved.identity.id()?;
+        let name = |id: &str| roster.devices.get(id).map(|device| device.name.clone());
+        Ok((
+            name(&own).unwrap_or(own.clone()),
+            name(caller).context("device is not in the device owner's roster")?,
+        ))
+    }
+
     /// A device ID, a device name from `remote_hosts` (ignoring case), or an
     /// unambiguous ID prefix of at least eight characters.
     async fn resolve(&self, target: &str) -> Result<String> {

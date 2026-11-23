@@ -142,7 +142,7 @@ pub fn operation_schemas() -> Value {
         ),
         (
             "agent_send",
-            "Start one turn; observe events and status. Do not repeat after an unknown outcome.",
+            "Start one turn; observe events and status. Write the message as your own task brief, not as the device owner's words. Do not repeat after an unknown outcome.",
             json!({"agent_id":text,"message":text}),
             vec!["agent_id", "message"],
         ),
