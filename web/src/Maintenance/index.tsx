@@ -296,7 +296,7 @@ export function Maintenance({ token }: { token: string }) {
                 {needsBackend ? (
                   <>
                     <p className="description">
-                      安装后，此设备加入你的后端：在后端页面按一次通行密钥批准即可，同一主人的设备会自动互相信任。管理页也使用该通行密钥登录，不再设置主密码。
+                      安装后，此设备加入你的后端：在后端页面按一次通行密钥批准即可，同一机主的设备会自动互相信任。管理页也使用该通行密钥登录，不再设置主密码。
                     </p>
                     <Field htmlFor="setup-backend" label="后端地址">
                       <TextBox

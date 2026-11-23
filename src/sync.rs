@@ -98,10 +98,10 @@ fn verify_join(url: &str, statement: &str, joined: &Joined) -> Result<(), ApiErr
     joined
         .approval
         .verify(&joined.owner, &roster.keys)
-        .map_err(|_| ApiError::unavailable("the owner's signature did not verify"))?;
+        .map_err(|_| ApiError::unavailable("the device owner's signature did not verify"))?;
     if !roster.devices.contains_key(&device_id) {
         return Err(ApiError::unavailable(
-            "this device is missing from the owner's roster",
+            "this device is missing from the device owner's roster",
         ));
     }
     Ok(())
@@ -605,7 +605,7 @@ impl AppState {
                 self.remote
                     .join(joined.owner.clone(), joined.statements.clone())
                     .await
-                    .map_err(|_| ApiError::internal("could not save the owner's roster"))?;
+                    .map_err(|_| ApiError::internal("could not save the device owner's roster"))?;
                 runtime.pending = None;
                 runtime.last_error = None;
                 runtime.last_sync = Some(Utc::now().timestamp());
@@ -642,10 +642,9 @@ impl AppState {
                 settings.save(next).await?;
                 drop(settings);
                 self.stop_remote_worker().await;
-                self.remote
-                    .leave()
-                    .await
-                    .map_err(|_| ApiError::internal("could not leave the owner's devices"))?;
+                self.remote.leave().await.map_err(|_| {
+                    ApiError::internal("could not leave the device owner's devices")
+                })?;
                 runtime.pending = None;
                 runtime.last_error = None;
                 runtime.last_sync = None;

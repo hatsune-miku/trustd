@@ -350,7 +350,7 @@ async fn login(
     } else if state.mode == DaemonMode::User {
         // There is no static password: the owner's backend passkey signs in.
         return Err(ApiError::bad_request(
-            "sign in with the owner's passkey; run `trustd login-url` if the backend is unreachable",
+            "sign in with the device owner's passkey; run `trustd login-url` if the backend is unreachable",
         ));
     } else {
         state.authenticate(&body.credential).await?;

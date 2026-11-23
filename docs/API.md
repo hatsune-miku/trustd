@@ -222,7 +222,7 @@ Master/TOTP 失败在每个进程实例内限制为 5 次/分钟；成功验证�
 
 用户 daemon 没有静态密码，也没有本机（localhost）通行密钥。登录方式只有两种：
 
-- **主人的通行密钥**：`POST /v1/admin/login/passkey/start`（无需 session）要求本机已加入后端。daemon 生成一次性登录声明（`management_login`，含本机 device ID、随机 nonce 与时间），交给后端发起签名请求，返回 `login_id`、`verification_uri`、`user_code`、`expires_in` 和 `interval`。主人在后端页面核对验证码并按一次通行密钥。页面轮询 `POST /v1/admin/login/passkey/poll`，body `{"login_id":"..."}`：未确认时返回 `{"pending":true}`；确认后 daemon 用加入时固定的主人公钥验证签名、核对声明原文和 5 分钟有效期，再返回管理 session。同一次登录只能使用一次。
+- **机主的通行密钥**：`POST /v1/admin/login/passkey/start`（无需 session）要求本机已加入后端。daemon 生成一次性登录声明（`management_login`，含本机 device ID、随机 nonce 与时间），交给后端发起签名请求，返回 `login_id`、`verification_uri`、`user_code`、`expires_in` 和 `interval`。机主在后端页面核对验证码并按一次通行密钥。页面轮询 `POST /v1/admin/login/passkey/poll`，body `{"login_id":"..."}`：未确认时返回 `{"pending":true}`；确认后 daemon 用加入时固定的机主公钥验证签名、核对声明原文和 5 分钟有效期，再返回管理 session。同一次登录只能使用一次。
 - **本机一次性链接**：以 daemon 所属用户运行 `trustd login-url`，在配置旁写入 5 分钟内有效的一次性票据并打印 `http://localhost:<port>/#ticket=...`。打开后页面以 `{"credential":{"type":"ticket","value":"..."}}` 调用 `POST /v1/admin/login`。任何一次尝试都会删除票据。能运行此命令的进程本来就能读取该用户的配置和密钥，因此它不扩大访问范围；后端不可用时用于应急管理或加入后端。
 
 用户 daemon 拒绝 `password` 和 `totp` 登录。未配对的系统 daemon（仅安装系统服务时）仍使用 Master Password，可另加 TOTP；配对后系统 daemon 不提供管理登录。

@@ -55,8 +55,8 @@ You can also download the full package for your platform from [Releases](https:/
 
 ## Getting started
 
-1. Deploy your own backend (see [Backend protocol](docs/SYNC.md#部署参考实现)) and create a passkey with the setup code. One backend serves exactly one owner.
-2. Run the maintenance wizard on each device, enter the backend address, and select the AI clients to connect (Codex, Claude Code, Claude Desktop, Cursor, and others). After installation, approve the device with one passkey tap on the backend page. Devices of the same owner trust each other automatically and share one credential vault, and the user and system processes are already paired.
+1. Deploy your own backend (see [Backend protocol](docs/SYNC.md#部署参考实现)) and create a passkey with the setup code. One backend serves exactly one device owner.
+2. Run the maintenance wizard on each device, enter the backend address, and select the AI clients to connect (Codex, Claude Code, Claude Desktop, Cursor, and others). After installation, approve the device with one passkey tap on the backend page. Devices of the same device owner trust each other automatically and share one credential vault, and the user and system processes are already paired.
 3. Open the [management page](http://localhost:32120/) and sign in with the same passkey. Headless servers can join with `trustd join <backend address>`; if the backend is unreachable, use `trustd login-url` to sign in as a fallback.
 
 ## Remote execution
@@ -68,7 +68,7 @@ The devices that join your backend form your device network. Once an AI is autho
 - **File transfer**: copy files between this device and the target. The two trustd instances move and verify the data themselves, so it never passes through the AI or uses up the conversation's tokens.
 - **Remote Codex**: start a subagent with the Codex CLI already signed in on the target device and hand it a whole piece of work to finish there.
 
-Every device connects out to your backend, so no ports need to be opened and the devices never need to reach each other directly. Connections are end-to-end encrypted; the backend only relays them and cannot see commands or results. Devices of the same owner trust each other by default; for exceptions, the backend page lets you withdraw, in one direction, a device's right to run commands at all or only its administrator / root identity. The 远端主机 (Remote hosts) section of the management page lets you view and work with tasks, files, logs, and Codex conversations by hand. See [Remote execution and Codex](docs/REMOTE.md) for details.
+Every device connects out to your backend, so no ports need to be opened and the devices never need to reach each other directly. Connections are end-to-end encrypted; the backend only relays them and cannot see commands or results. Devices of the same device owner trust each other by default; for exceptions, the backend page lets you withdraw, in one direction, a device's right to run commands at all or only its administrator / root identity. The 远端主机 (Remote hosts) section of the management page lets you view and work with tasks, files, logs, and Codex conversations by hand. See [Remote execution and Codex](docs/REMOTE.md) for details.
 
 ## Uninstall
 

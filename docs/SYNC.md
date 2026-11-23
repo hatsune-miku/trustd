@@ -1,6 +1,6 @@
 # 后端协议 v1
 
-每台设备都加入主人自托管的后端，不再有单机模式。后端负责主人的通行密钥、设备名册、凭据与 Telegram bot 配置同步，以及设备之间的加密中转。不同步执行令牌、桌面授权记忆或设备私钥。
+每台设备都加入机主自托管的后端，不再有单机模式。后端负责机主的通行密钥、设备名册、凭据与 Telegram bot 配置同步，以及设备之间的加密中转。不同步执行令牌、桌面授权记忆或设备私钥。
 
 参考实现位于 `crates/sync-server`，共享数据类型与校验位于 `crates/sync-protocol`。实现采用单实例、单所有者模型；不同客户端可以按本文独立实现。
 
@@ -9,12 +9,12 @@
 ## 使用
 
 1. 在本机“凭据”页导出需要保留的数据。
-2. 部署后端，打开其 HTTPS 地址。读取服务器数据目录的 `bootstrap-code`，创建第一个通行密钥。它是所有设备固定信任的主人密钥。
+2. 部署后端，打开其 HTTPS 地址。读取服务器数据目录的 `bootstrap-code`，创建第一个通行密钥。它是所有设备固定信任的机主密钥。
 3. 在设备管理页“凭据 → 后端”填入后端地址和设备名称，选择“加入后端”。
 4. 打开批准链接，核对设备上显示的验证码，按一次通行密钥批准。无需先登录后端。
-5. 设备在本机验证这次批准，下载云端整库并替换本机库，并与同一主人的其他设备互相信任。新服务的云端库为空；需要迁移原数据时，再导入第 1 步的文件。
+5. 设备在本机验证这次批准，下载云端整库并替换本机库，并与同一机主的其他设备互相信任。新服务的云端库为空；需要迁移原数据时，再导入第 1 步的文件。
 
-一个后端只服务一位主人。通行密钥属于后端的域名，不属于 localhost。私钥不上传至服务端。
+一个后端只服务一位机主。通行密钥属于后端的域名，不属于 localhost。私钥不上传至服务端。
 
 ## 一致性
 
@@ -127,9 +127,9 @@
 
 此实现不是 OAuth/OIDC 服务；设备授权流程借鉴其交互方式，但端点和字段以本文为准。
 
-## 主人签名的声明
+## 机主签名的声明
 
-设备不把后端的结论当作授权依据。设备加入、撤销以及通行密钥的增删，都是主人通行密钥签名的“声明”：一段 JSON 文本，WebAuthn challenge 为 `SHA-256("trustd-owner-statement-v1\n" + 声明文本)`。每台设备用加入时固定的主人公钥自行验证每条声明，从而在本机推导设备名册。后端只保存和转发声明，无法伪造或改写它们，但可以扣留声明，例如不转发某条撤销。
+设备不把后端的结论当作授权依据。设备加入、撤销以及通行密钥的增删，都是机主通行密钥签名的“声明”：一段 JSON 文本，WebAuthn challenge 为 `SHA-256("trustd-owner-statement-v1\n" + 声明文本)`。每台设备用加入时固定的机主公钥自行验证每条声明，从而在本机推导设备名册。后端只保存和转发声明，无法伪造或改写它们，但可以扣留声明，例如不转发某条撤销。
 
 声明类型（`kind`）：
 
@@ -137,7 +137,7 @@
 - `device_revoke`：`device_id`、`issued_at`。撤销是永久的，无论声明顺序如何都优先于批准；同一设备身份不能再次加入。
 - `passkey_add`：`key`（凭据 ID 与 COSE 公钥）、`issued_at`。必须由已信任的通行密钥签名，新密钥才会被设备信任。
 - `passkey_remove`：`credential_id`、`issued_at`。最后一个受信任的密钥不会被移除。
-- `rule_set`：`rules`（`[{from, to, deny}]`，`deny` 为 `execution` 或 `elevation`）、`issued_at`。完整替换设备之间的单向规则，`issued_at` 最新的一条生效。没有规则时，同一主人的设备互相完全信任。
+- `rule_set`：`rules`（`[{from, to, deny}]`，`deny` 为 `execution` 或 `elevation`）、`issued_at`。完整替换设备之间的单向规则，`issued_at` 最新的一条生效。没有规则时，同一机主的设备互相完全信任。
 - `management_login`：`device_id`、`nonce`、`issued_at`。一次性的管理页登录证明，只返回给发起的设备，不进入名册。
 
 声明拒绝未知字段，签名要求 user presence 与 user verification，并校验 origin、RP ID 和 challenge。共享实现位于 `crates/sync-protocol/src/owner.rs`。
@@ -146,11 +146,11 @@
 
 1. 设备生成自己的加入声明（`device_approve`，含本机公钥），`POST /device/start`，body `{"statement":"..."}`，无需认证。设备时钟与服务端相差超过 10 分钟、声明无效或身份已被撤销时拒绝。返回 `device_code`、`user_code`、`verification_uri`（`https://sync.example.com/#join=<USER_CODE>`）、`expires_in` 和 `interval`。
 2. `device_code` 仅保留在设备进程内。页面打开 verification URI，`POST /device/inspect`，body `{"user_code":"..."}`，返回待签名的原文 `statement`、`challenge`、`rp_id`、`allow_credentials` 以及设备名称和验证码。此接口无需登录；`user_code` 只能用于查看这一项请求。
-3. 主人核对验证码后按一次通行密钥。页面 `POST /device/approve`，body `{"user_code":"...","assertion":<WebAuthn 断言>}`。服务端用当前受信任的主人密钥验证签名后记录这条声明。
-4. 设备每 3 秒 `POST /device/poll`，body `{"device_code":"..."}`。未批准返回 202 和 `{"pending":true}`；批准后一次性返回 `tokens`、`owner`（RP ID、origin 与主人基础公钥）、`approval` 和全部 `statements`。
+3. 机主核对验证码后按一次通行密钥。页面 `POST /device/approve`，body `{"user_code":"...","assertion":<WebAuthn 断言>}`。服务端用当前受信任的机主密钥验证签名后记录这条声明。
+4. 设备每 3 秒 `POST /device/poll`，body `{"device_code":"..."}`。未批准返回 202 和 `{"pending":true}`；批准后一次性返回 `tokens`、`owner`（RP ID、origin 与机主基础公钥）、`approval` 和全部 `statements`。
 5. 设备核对 `owner` 的 origin 与 RP ID 是否就是自己选择的后端，确认 `approval` 正是自己的声明并通过签名验证、本机已出现在推导出的名册中，然后固定 `owner`，读取 `/vault` 并保存。此前不覆盖本机库。
 
-首次加入时，设备从后端获得主人公钥，这一步属于首次信任；此后的名册更新都必须通过已固定公钥的验证。
+首次加入时，设备从后端获得机主公钥，这一步属于首次信任；此后的名册更新都必须通过已固定公钥的验证。
 
 ## 名册与撤销
 
@@ -164,7 +164,7 @@
 
 ## 签名请求
 
-设备可以请主人签署关于自己的一次性声明，目前用于管理页登录（`management_login`）。设备以自己的会话 `POST /signatures`，body `{"statement":"..."}`，只能请求关于本机 device ID 的声明，返回私有的 `id`、给页面用的 `code` 和 `verification_uri`（`https://sync.example.com/#sign=<CODE>`），5 分钟内有效。页面 `POST /signatures/inspect`（无需登录）显示设备名称与待签名原文，主人签名后 `POST /signatures/approve`。设备 `POST /signatures/poll`，body `{"id":"..."}` 取回断言，只有发起请求的设备能取回，且只能取回一次。设备自行验证签名与声明原文；后端只做转发。
+设备可以请机主签署关于自己的一次性声明，目前用于管理页登录（`management_login`）。设备以自己的会话 `POST /signatures`，body `{"statement":"..."}`，只能请求关于本机 device ID 的声明，返回私有的 `id`、给页面用的 `code` 和 `verification_uri`（`https://sync.example.com/#sign=<CODE>`），5 分钟内有效。页面 `POST /signatures/inspect`（无需登录）显示设备名称与待签名原文，机主签名后 `POST /signatures/approve`。设备 `POST /signatures/poll`，body `{"id":"..."}` 取回断言，只有发起请求的设备能取回，且只能取回一次。设备自行验证签名与声明原文；后端只做转发。
 
 ## 设备中转
 

@@ -61,7 +61,7 @@ export function SyncSettings({ session, onChanged }: { session: string; onChange
     event.preventDefault()
     if (
       !window.confirm(
-        '加入后，后端的凭据将覆盖本机全部凭据，本机也会与同一主人的其他设备互相信任。请先导出需要保留的本机凭据。继续加入？'
+        '加入后，后端的凭据将覆盖本机全部凭据，本机也会与同一机主的其他设备互相信任。请先导出需要保留的本机凭据。继续加入？'
       )
     )
       return

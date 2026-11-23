@@ -56,10 +56,10 @@ export function Remote({ session }: { session: string }) {
       <Feedback {...action} />
       {status && !status.joined && (
         <p className="description remote-join-hint">
-          本机尚未加入后端。在“凭据”中加入后端后，同一主人的其他设备会自动出现在这里，彼此默认信任。
+          本机尚未加入后端。在“凭据”中加入后端后，同一机主的其他设备会自动出现在这里，彼此默认信任。
         </p>
       )}
-      {status?.joined && !peers.length && <p className="empty-state">同一主人的其他设备加入后端后会自动出现在这里。</p>}
+      {status?.joined && !peers.length && <p className="empty-state">同一机主的其他设备加入后端后会自动出现在这里。</p>}
       <div className="remote-peers">
         {peers.map(([id, peer]) => (
           <article className="remote-peer" key={id}>

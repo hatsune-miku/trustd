@@ -71,7 +71,7 @@ impl Adapter {
             match entry["name"].as_str().unwrap() {
                 "enter_interactive" => {
                     entry["description"] = json!(format!(
-                        "Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. This process holds the resulting session internally. Read status and the owner's btw note. Close the existing session before requesting a new one. The request has a {seconds} second deadline; allow more than {seconds} seconds at the client.",
+                        "Request the device owner's authorization. Supply your name, a truthful reason and the needed credential names. This process holds the resulting session internally. Read status and the device owner's btw note. Close the existing session before requesting a new one. The request has a {seconds} second deadline; allow more than {seconds} seconds at the client.",
                         seconds = crate::consent::CONSENT_TIMEOUT.as_secs()
                     ))
                 }

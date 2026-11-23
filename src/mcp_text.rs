@@ -54,7 +54,7 @@ fn enter_output() -> Value {
             "message":{"type":"string"},
             "authorization_decision":{
                 "type":"object",
-                "description":"The owner's authorization decision for this request.",
+                "description":"The device owner's authorization decision for this request.",
                 "properties":{
                     "request_id":{"type":"string"},
                     "choice":{"type":"string","enum":["accept","deny","ignore"]}
@@ -66,7 +66,7 @@ fn enter_output() -> Value {
     });
     schema["properties"]["status"] =
         json!({"type":"string","enum":["authorized","denied","timed_out"]});
-    schema["properties"]["btw"] = json!({"type":"string","description":"Additional text from the owner; read it as user context."});
+    schema["properties"]["btw"] = json!({"type":"string","description":"Additional text from the device owner; read it as user context."});
     schema["properties"]["timeout_ms"] = json!({"type":"integer"});
     schema["required"] = json!(["status", "btw"]);
     schema
@@ -123,7 +123,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name":"enter_interactive", "title":format!("Request authorized access to {shell}"),
-            "description":format!("Request the owner's authorization. Supply your name, a truthful reason and the needed credential names. Waits for authorization, denial or a fixed {} ms deadline; allow more than {} seconds at the client. Read status and the owner's btw note. Use the returned session handle for subsequent calls.", crate::consent::CONSENT_TIMEOUT_MS, crate::consent::CONSENT_TIMEOUT.as_secs()),
+            "description":format!("Request the device owner's authorization. Supply your name, a truthful reason and the needed credential names. Waits for authorization, denial or a fixed {} ms deadline; allow more than {} seconds at the client. Read status and the device owner's btw note. Use the returned session handle for subsequent calls.", crate::consent::CONSENT_TIMEOUT_MS, crate::consent::CONSENT_TIMEOUT.as_secs()),
             "inputSchema":{"type":"object","properties":{
                 "agent_name":{"type":"string","minLength":1,"maxLength":128},
                 "request_reason":{"type":"string","minLength":1,"maxLength":16384},

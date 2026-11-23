@@ -192,10 +192,10 @@ pub fn status(path: Option<PathBuf>) -> Result<()> {
 pub fn join(url: String, name: Option<String>, path: Option<PathBuf>) -> Result<()> {
     join_with(url, name, path, |uri, code| {
         println!(
-            "Open this link in any browser and approve this device with the owner's passkey:\n{uri}\nVerification code: {code}"
+            "Open this link in any browser and approve this device with the device owner's passkey:\n{uri}\nVerification code: {code}"
         );
     })?;
-    println!("Joined. This device now trusts the owner's other devices.");
+    println!("Joined. This device now trusts the device owner's other devices.");
     Ok(())
 }
 

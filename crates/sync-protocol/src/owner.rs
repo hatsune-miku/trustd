@@ -205,7 +205,9 @@ pub fn verify_assertion(
     let key = keys
         .iter()
         .find(|key| key.credential_id.as_ref() == credential.raw_id.as_ref())
-        .ok_or(Error("assertion is not from a trusted owner passkey"))?;
+        .ok_or(Error(
+            "assertion is not from a trusted device owner passkey",
+        ))?;
     let client_data: &[u8] = credential.response.client_data_json.as_ref();
     #[derive(Deserialize)]
     struct ClientData {

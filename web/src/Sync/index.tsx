@@ -289,7 +289,7 @@ export function Sync() {
                 <section className="sync-section">
                   <h2 className="section-title">设备之间的信任</h2>
                   <p className="description">
-                    同一主人的设备默认互相信任，可以互相执行命令、申请管理员 / root
+                    同一机主的设备默认互相信任，可以互相执行命令、申请管理员 / root
                     身份并使用全部凭据。下列规则只在一个方向上收回权限。
                   </p>
                   <ul className="sync-list">

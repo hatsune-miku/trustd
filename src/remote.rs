@@ -252,9 +252,9 @@ impl Runtime {
             .is_some_and(|roster| roster.denies(from, &own, elevated))
         {
             anyhow::bail!(if elevated {
-                "the owner does not allow this device to request Administrator/root here"
+                "the device owner does not allow this device to request Administrator/root here"
             } else {
-                "the owner does not allow this device to run requests here"
+                "the device owner does not allow this device to run requests here"
             });
         }
         Ok(())
@@ -266,7 +266,7 @@ impl Runtime {
             .await
             .as_ref()
             .and_then(|s| s.peers().remove(id))
-            .context("device is not in the owner's roster")
+            .context("device is not in the device owner's roster")
     }
 
     /// This device's ID once it has joined a backend.
@@ -435,7 +435,7 @@ impl AppState {
         };
         ensure!(
             response.owner == *pinned,
-            "the backend presented a different owner; roster update ignored"
+            "the backend presented a different device owner; roster update ignored"
         );
         // Statements are append-only. A backend that drops one this device has
         // already seen may be hiding a revocation or a stricter rule set.
@@ -444,7 +444,7 @@ impl AppState {
                 .statements
                 .iter()
                 .any(|statement| statement.statement == seen.statement)),
-            "the backend omitted owner statements this device already saw; roster update ignored"
+            "the backend omitted device owner statements this device already saw; roster update ignored"
         );
         let unchanged = response.statements.len() == current.statements.len()
             && response
