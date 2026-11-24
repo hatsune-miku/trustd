@@ -1,10 +1,7 @@
 import { expect, test } from '@playwright/test'
 
-test('remote task errors, credential-only sessions, Codex approval and event pagination stay usable', async ({
-  page,
-}) => {
+test('remote task errors and credential-only sessions stay usable', async ({ page }) => {
   const calls: { operation: string; arguments: Record<string, unknown> }[] = []
-  let answered = false
   await page.route('**/health', async (route) => {
     const response = await route.fetch()
     await route.fulfill({ json: { ...(await response.json()), daemon: 'user' } })
@@ -25,21 +22,6 @@ test('remote task errors, credential-only sessions, Codex approval and event pag
     const body = route.request().postDataJSON()
     calls.push(body)
     let result: unknown = {}
-    const agent = {
-      id: 'agent-1',
-      cwd: '/work',
-      status: answered ? 'idle' : 'waiting_user',
-      last_message: '',
-      questions: answered
-        ? []
-        : [
-            {
-              id: 1,
-              method: 'item/permissions/requestApproval',
-              params: { reason: 'Test network access', permissions: { network: { enabled: true } } },
-            },
-          ],
-    }
     if (body.operation === 'host_info') result = { platform: 'linux', arch: 'x86_64', version: 'test', identities: {} }
     if (body.operation === 'session_open')
       result = { session_ref: 'remote-session', privilege_levels: ['current-user'] }
@@ -55,22 +37,6 @@ test('remote task errors, credential-only sessions, Codex approval and event pag
         ],
         next_offset: null,
       }
-    if (body.operation === 'agent_start' || body.operation === 'agent_get') result = agent
-    if (body.operation === 'agent_respond') {
-      answered = true
-      result = { accepted: true }
-    }
-    if (body.operation === 'agent_events')
-      result = {
-        events: [
-          {
-            method: 'item/completed',
-            params: { item: { type: 'agentMessage', text: body.arguments.offset ? 'second page' : 'first page' } },
-          },
-        ],
-        next_offset: body.arguments.offset ? 20 : 10,
-        eof: Boolean(body.arguments.offset),
-      }
     await route.fulfill({ json: result })
   })
   // A user daemon has no password; sign in through a `trustd login-url` link.
@@ -85,25 +51,11 @@ test('remote task errors, credential-only sessions, Codex approval and event pag
   await page.locator('#remote-session-keys').fill('TEST_KEY')
   await expect(page.getByLabel('申请管理员 / root 身份')).not.toBeChecked()
   await page.getByRole('button', { name: '进入远端会话', exact: true }).click()
-  await page.getByRole('navigation', { name: '远端功能' }).getByRole('button', { name: 'Codex', exact: true }).click()
-  await page.getByRole('button', { name: '新建对话', exact: true }).click()
-  await expect(page.getByText('Test network access', { exact: true })).toBeVisible()
-  expect(calls.some((call) => call.operation === 'agent_respond')).toBe(false)
-  await page.getByRole('button', { name: '允许', exact: true }).click()
-  await expect(page.getByText('Test network access', { exact: true })).toHaveCount(0)
   expect(calls.find((call) => call.operation === 'session_open')?.arguments).toEqual({
     cwd: '/work',
     sudo: false,
     secret_keys: ['TEST_KEY'],
   })
-  expect(calls.find((call) => call.operation === 'agent_respond')?.arguments.result).toEqual({
-    permissions: { network: { enabled: true } },
-    scope: 'turn',
-  })
-  await page.getByRole('button', { name: '读取记录', exact: true }).click()
-  await expect(page.getByText('first page', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '继续读取记录', exact: true }).click()
-  await expect(page.locator('.remote-output').last()).toContainText('second page')
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })

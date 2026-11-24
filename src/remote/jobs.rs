@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
     time::Duration,
@@ -30,8 +29,6 @@ pub(super) struct Job {
     pub owner: String,
     #[serde(default)]
     pub session_ref: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
     pub fingerprint: String,
     pub status: String,
     pub created_at: i64,
@@ -45,21 +42,8 @@ impl AppState {
     pub(super) async fn remote_job_start(&self, owner: &str, args: &Value) -> Result<Value> {
         let key = string(args, "idempotency_key")?;
         ensure!(key.len() <= 128, "idempotency key is too long");
-        let namespace = args["_agent_id"]
-            .as_str()
-            .map_or_else(|| owner.to_owned(), |agent| format!("{owner}/{agent}"));
-        let id = format!("{:x}", Sha256::digest(format!("{namespace}/{key}")));
-        let mut fingerprint_args = args.clone();
-        if args["_agent_id"].is_string() {
-            fingerprint_args
-                .as_object_mut()
-                .unwrap()
-                .remove("session_ref");
-        }
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&fingerprint_args)?)
-        );
+        let id = format!("{:x}", Sha256::digest(format!("{owner}/{key}")));
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(args)?));
         let _gate = self.remote.submit.lock().await;
         if let Some(job) = self.remote.jobs.lock().await.get(&id).cloned() {
             ensure!(
@@ -94,7 +78,6 @@ impl AppState {
             id: id.clone(),
             owner: owner.into(),
             session_ref: string(args, "session_ref")?.into(),
-            agent_id: args["_agent_id"].as_str().map(str::to_owned),
             fingerprint,
             status: "starting".into(),
             created_at: chrono::Utc::now().timestamp(),
@@ -244,13 +227,9 @@ impl AppState {
                 .values()
                 .filter(|j| {
                     j.owner == owner
-                        && if let Some(agent) = args["_agent_id"].as_str() {
-                            j.agent_id.as_deref() == Some(agent)
-                        } else {
-                            args["session_ref"]
-                                .as_str()
-                                .is_none_or(|id| j.session_ref == id)
-                        }
+                        && args["session_ref"]
+                            .as_str()
+                            .is_none_or(|id| j.session_ref == id)
                 })
                 .cloned()
                 .collect();
@@ -279,14 +258,10 @@ impl AppState {
             .context("job not found")?;
         ensure!(job.owner == owner, "job belongs to another device");
         ensure!(
-            if let Some(agent) = args["_agent_id"].as_str() {
-                job.agent_id.as_deref() == Some(agent)
-            } else {
-                args["session_ref"]
-                    .as_str()
-                    .is_none_or(|id| job.session_ref == id)
-            },
-            "job is outside this agent's delegated session"
+            args["session_ref"]
+                .as_str()
+                .is_none_or(|id| job.session_ref == id),
+            "job belongs to another session"
         );
         if operation == "job_cancel" {
             self.cancel_remote_job(id).await?;
@@ -361,18 +336,6 @@ impl AppState {
         drop(sessions);
         for handle in handles {
             let _ = self.destroy_session(&handle).await;
-        }
-        let agents: BTreeMap<_, _> = self
-            .remote
-            .agents
-            .lock()
-            .await
-            .iter()
-            .filter(|(_, a)| a.owner == owner)
-            .map(|(id, a)| (id.clone(), a.clone()))
-            .collect();
-        for (_, agent) in agents {
-            agent.stop().await;
         }
     }
 }

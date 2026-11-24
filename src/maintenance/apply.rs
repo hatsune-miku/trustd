@@ -156,6 +156,14 @@ fn apply_plan(plan: &Plan, paths: &MachinePaths) -> Result<()> {
         protect(&directory.join(name), false, true)?;
     }
     plan.binaries.verify(directory)?;
+    // Programs earlier releases installed and this one no longer ships. They
+    // were stopped above with the other managed executables.
+    for name in super::super::bundle::RETIRED {
+        let path = directory.join(super::super::bundle::filename(name));
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            fs::remove_file(&path)?;
+        }
+    }
     let system_executable =
         super::super::bundle::beside(&executable, super::super::bundle::PRIVILEGED)?;
 

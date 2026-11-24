@@ -1,33 +1,5 @@
 use super::*;
 
-#[test]
-fn old_updater_bundles_gain_only_verified_matching_extension_roles() {
-    let source = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
-    for name in super::super::bundle::names(cfg!(windows)) {
-        fs::write(source.path().join(&name), name.as_bytes()).unwrap();
-        if !name.starts_with("trustd-agent-stdio") && !name.starts_with("trustd-relay") {
-            fs::write(target.path().join(&name), name.as_bytes()).unwrap();
-        }
-    }
-    assert!(needs_extension_roles(target.path()));
-    let main = super::super::bundle::filename("trustd");
-    fs::write(target.path().join(&main), b"different version").unwrap();
-    assert!(complete_from_verified_bundle(target.path(), source.path()).is_err());
-    assert!(
-        !target
-            .path()
-            .join(super::super::bundle::filename("trustd-relay"))
-            .exists()
-    );
-    fs::write(target.path().join(&main), main.as_bytes()).unwrap();
-    complete_from_verified_bundle(target.path(), source.path()).unwrap();
-    assert!(!needs_extension_roles(target.path()));
-    super::super::bundle::Manifest::read(source.path())
-        .unwrap()
-        .verify(target.path())
-        .unwrap();
-}
 use std::io::Write;
 
 #[test]

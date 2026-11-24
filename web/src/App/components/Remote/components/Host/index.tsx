@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 
 import { Button, Field, TextBox } from '@a1knla/cakeui'
 
-import { Codex } from './components/Codex'
 import { Files } from './components/Files'
 import { Jobs } from './components/Jobs'
 import { RemoteLogs } from './components/RemoteLogs'
@@ -118,7 +117,6 @@ export function Host({ target, label, session }: { target: string; label: string
       <nav className="remote-actions" aria-label="远端功能">
         {[
           ['jobs', '任务'],
-          ['codex', 'Codex'],
           ['files', '文件'],
           ['logs', '日志'],
         ].map(([id, text]) => (
@@ -128,9 +126,6 @@ export function Host({ target, label, session }: { target: string; label: string
         ))}
       </nav>
       {info && section === 'jobs' && <Jobs invoke={invoke} sessionRef={opened?.session_ref} execution={execution} />}
-      {info && section === 'codex' && (
-        <Codex invoke={invoke} sessionRef={opened?.session_ref} target={target} cwd={cwd} />
-      )}
       {info && section === 'files' && <Files invoke={invoke} sessionRef={opened?.session_ref} />}
       {info && section === 'logs' && <RemoteLogs invoke={invoke} />}
     </section>

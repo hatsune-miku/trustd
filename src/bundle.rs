@@ -31,7 +31,6 @@ pub fn names(windows: bool) -> Vec<String> {
             "trustd-root"
         },
         "trustd-stdio",
-        "trustd-agent-stdio",
     ]
     .into_iter()
     .map(|name| {
@@ -43,6 +42,10 @@ pub fn names(windows: bool) -> Vec<String> {
     })
     .collect()
 }
+
+/// Programs earlier releases installed beside these. The installer removes
+/// them, and they still count as managed programs so they can be stopped.
+pub const RETIRED: &[&str] = &["trustd-agent-stdio"];
 
 pub fn filename(role: &str) -> String {
     if cfg!(windows) {

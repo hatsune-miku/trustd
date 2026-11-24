@@ -10,7 +10,7 @@ trustd (pronounced "trusted") gives you a simple, safe way to hand authority to 
 
 - Let AI temporarily elevate to `root`, `Administrator`, or `NT AUTHORITY\SYSTEM` when it needs to
 - Inject credentials, such as passwords, into the AI's shell
-- Let AI run commands, transfer files, and run long tasks on your other devices, or start a Codex subagent on one of them
+- Let AI run commands, transfer files, and run long tasks on your other devices
 
 ## Before you install...
 
@@ -66,9 +66,9 @@ The devices that join your backend form your device network. Once an AI is autho
 - **Run commands**: open a session on the target device and run commands as the regular user or as administrator / root, using that device's credentials.
 - **Long tasks**: submit time-consuming work as a task; it keeps running through network drops and after the AI client closes. The AI can wait for a task to finish instead of polling, and the output stays on the target device, where it can be processed or compressed before only the needed parts are fetched.
 - **File transfer**: copy files between this device and the target. The two trustd instances move and verify the data themselves, so it never passes through the AI or uses up the conversation's tokens.
-- **Remote Codex**: start a subagent with the Codex CLI already signed in on the target device and hand it a whole piece of work to finish there.
+- **Subagents**: the AI can hand a whole piece of work to a subagent that carries it out on the target device. The subagent thinks on this device and acts on the target; long output stays with the subagent and on the target, and only a summary reaches the main conversation.
 
-Every device connects out to your backend, so no ports need to be opened and the devices never need to reach each other directly. Connections are end-to-end encrypted; the backend only relays them and cannot see commands or results. Devices of the same device owner trust each other by default; for exceptions, the backend page lets you withdraw, in one direction, a device's right to run commands at all or only its administrator / root identity. The 远端主机 (Remote hosts) section of the management page lets you view and work with tasks, files, logs, and Codex conversations by hand. See [Remote execution and Codex](docs/REMOTE.md) for details.
+Every device connects out to your backend, so no ports need to be opened and the devices never need to reach each other directly. Connections are end-to-end encrypted; the backend only relays them and cannot see commands or results. Devices of the same device owner trust each other by default; for exceptions, the backend page lets you withdraw, in one direction, a device's right to run commands at all or only its administrator / root identity. The 远端主机 (Remote hosts) section of the management page lets you view and work with tasks, files, and logs by hand. See [Remote execution](docs/REMOTE.md) for details.
 
 ## Uninstall
 
@@ -98,6 +98,6 @@ trustd's main design goal is to let AI, which today is already bound in shackles
 
 The programs that make up trustd, installation directories, MCP configuration, authorization policy, execution identities, credential storage, and build and verification commands are all described in [Technical details](docs/TECHNICAL.md).
 
-[API](docs/API.md) · [Architecture](docs/ARCHITECTURE.md) · [Credential sync](docs/SYNC.md) · [Remote execution and Codex](docs/REMOTE.md) · [MIT License](LICENSE-MIT)
+[API](docs/API.md) · [Architecture](docs/ARCHITECTURE.md) · [Credential sync](docs/SYNC.md) · [Remote execution](docs/REMOTE.md) · [MIT License](LICENSE-MIT)
 
 The linked documents are written in Chinese.

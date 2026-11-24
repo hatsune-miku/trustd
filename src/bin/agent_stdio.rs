@@ -1,23 +1,12 @@
-use anyhow::Result;
-use clap::Parser;
-use std::{net::SocketAddr, path::PathBuf};
-
-#[derive(Parser)]
-#[command(name="trustd-agent-stdio",version=localshelld::VERSION,about="Scoped MCP adapter for a trustd-owned Codex conversation")]
-struct Options {
-    #[arg(long)]
-    endpoint: SocketAddr,
-    #[arg(long)]
-    token_file: PathBuf,
-}
-
-fn main() -> Result<()> {
-    let options = Options::parse();
-    let runtime = tokio::runtime::Runtime::new()?;
-    let result = runtime.block_on(localshelld::remote::agent_stdio::serve(
-        options.endpoint,
-        &options.token_file,
-    ));
-    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    result
+//! Placeholder that release packages keep while devices update from versions
+//! that still shipped this program: their `trustd update` checks every
+//! program it knows, including this one, by its `--version`. It is never
+//! installed, and installation removes an earlier copy.
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("trustd-agent-stdio {}", localshelld::VERSION);
+        return;
+    }
+    eprintln!("trustd-agent-stdio is no longer used; remote Codex conversations were removed.");
+    std::process::exit(2);
 }

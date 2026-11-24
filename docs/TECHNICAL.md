@@ -15,7 +15,7 @@
 | `trustd-user-headless` | 当前普通用户 daemon 与用户凭据库，不包含桌面授权依赖 |
 | `trustd-stdio`  | Agent 宿主启动的 MCP stdio 接入程序，内部保管 handle    |
 
-Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个平台/架构只有一个发布包，包含五个程序。两个用户 daemon 共用配置和服务名，安装时只启动其中一个。不要只复制其中一个程序。独立云同步后端为 `localshelld-sync-server`。
+Windows 包含 `trustd-system.exe`，macOS/Linux 包含 `trustd-root`；每个平台/架构只有一个发布包，包含五个程序。包内另有一个只回答 `--version` 的 `trustd-agent-stdio`，供仍带有这个程序的旧版本执行 `trustd update` 时校验安装包；它不会被安装，安装时还会删除旧版留下的副本。两个用户 daemon 共用配置和服务名，安装时只启动其中一个。不要只复制其中一个程序。独立云同步后端为 `localshelld-sync-server`。
 
 系统 daemon 默认监听 `127.0.0.1:32119`，用户 daemon 默认监听 `127.0.0.1:32120`。维护向导使用临时本机端口，stdio 不监听端口。安装、更新不通过 daemon 的 HTTP/MCP 执行接口提供。
 

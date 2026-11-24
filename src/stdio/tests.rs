@@ -271,7 +271,7 @@ async fn command_timeout_keeps_the_adapters_authorized_handle() {
 fn all_transport_schemas_omit_empty_required_and_require_only_declared_fields() {
     let mut definitions = vec![
         crate::mcp_text::tool_definitions(),
-        crate::remote::agent_stdio::operation_schemas(),
+        crate::remote::operations::operation_schemas(),
     ];
     definitions.push(
         Adapter::new("127.0.0.1:1".parse().unwrap())

@@ -22,12 +22,11 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 use trustd_remote::{Identity, Node};
 
-pub mod agent_stdio;
-mod codex;
 mod files;
 mod jobs;
 #[cfg(test)]
 mod join_tests;
+pub(crate) mod operations;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -120,8 +119,6 @@ pub struct Runtime {
     /// Woken whenever a job reaches a final state, for `job_wait`.
     job_finished: tokio::sync::Notify,
     submit: Mutex<()>,
-    agent_start: Mutex<()>,
-    agents: Mutex<BTreeMap<String, Arc<codex::Agent>>>,
 }
 
 impl Runtime {
@@ -132,6 +129,9 @@ impl Runtime {
         } else {
             None
         };
+        // Remote Codex conversations were removed; their event logs and
+        // capability files have no remaining reader.
+        let _ = std::fs::remove_dir_all(config.with_extension("remote").join("agents"));
         let mut jobs = BTreeMap::new();
         let directory = config.with_extension("remote").join("jobs");
         if directory.exists() {
@@ -155,24 +155,6 @@ impl Runtime {
             jobs: Mutex::new(jobs),
             ..Self::default()
         })
-    }
-
-    /// This device's name and the requesting device's name, both from the
-    /// device owner's signed roster.
-    async fn device_names(&self, caller: &str) -> Result<(String, String)> {
-        let saved = self.saved.lock().await;
-        let saved = saved
-            .as_ref()
-            .context("this device has not joined a backend")?;
-        let roster = saved
-            .roster()
-            .context("this device has no verified roster")?;
-        let own = saved.identity.id()?;
-        let name = |id: &str| roster.devices.get(id).map(|device| device.name.clone());
-        Ok((
-            name(&own).unwrap_or(own.clone()),
-            name(caller).context("device is not in the device owner's roster")?,
-        ))
     }
 
     /// A device ID, a device name from `remote_hosts` (ignoring case), or an
@@ -439,7 +421,7 @@ impl AppState {
     }
 
     /// Adopt a roster update after verifying it against the pinned owner.
-    /// Devices that left the roster lose their sessions, jobs and agents.
+    /// Devices that left the roster lose their sessions and jobs.
     pub(crate) async fn apply_roster(
         &self,
         response: localshelld_sync_protocol::RosterResponse,
@@ -600,25 +582,13 @@ impl AppState {
             "host_info" => Ok(
                 json!({"protocol":2,"version":crate::VERSION,"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
                 "shell":crate::shell::ShellKind::native(),"identities":self.execution_identities().await,
-                "operations":agent_stdio::operation_schemas()}),
+                "operations":operations::operation_schemas()}),
             ),
             "secrets_list" => Ok(json!({"keys":self.secret_keys().await?})),
             "session_open" => self.remote_open(owner, &args).await,
             "session_close" => {
                 let id = string(&args, "session_ref")?;
                 let session = self.remote.session(owner, id).await?;
-                let agents: Vec<_> = self
-                    .remote
-                    .agents
-                    .lock()
-                    .await
-                    .values()
-                    .filter(|agent| agent.parent_session_ref == id)
-                    .cloned()
-                    .collect();
-                for agent in agents {
-                    agent.stop().await;
-                }
                 self.destroy_session(&session.handle).await?;
                 self.remote.sessions.lock().await.remove(id);
                 Ok(json!({"closed":true}))
@@ -649,22 +619,14 @@ impl AppState {
             "file_stat" | "file_read" | "file_write" => {
                 self.remote_file(owner, operation, &args).await
             }
-            "agent_list" | "agent_start" | "agent_resume" | "agent_send" | "agent_get"
-            | "agent_events" | "agent_interrupt" | "agent_respond" | "agent_close" => {
-                self.remote_codex(owner, operation, &args).await
-            }
             _ => anyhow::bail!("unknown remote operation"),
         };
-        self.audit("remote.request", json!({"peer":owner,"operation":operation,"success":result.is_ok(),"job_id":args.get("job_id"),"agent_id":args.get("agent_id")})).await;
+        self.audit("remote.request", json!({"peer":owner,"operation":operation,"success":result.is_ok(),"job_id":args.get("job_id")})).await;
         result
     }
 
     pub(crate) async fn remote_invoke(&self, args: &Value) -> Result<Value> {
         let operation = string(args, "operation")?;
-        ensure!(
-            operation != "agent_respond",
-            "answer Codex requests in the management UI"
-        );
         if !matches!(operation, "file_push" | "file_pull") {
             return self.remote_invoke_human(args).await;
         }
@@ -717,10 +679,6 @@ impl AppState {
         if let Some(node) = self.remote.node.write().await.take() {
             node.disconnect().await;
         }
-        let agents: Vec<_> = self.remote.agents.lock().await.values().cloned().collect();
-        for agent in agents {
-            agent.stop().await;
-        }
     }
 }
 
@@ -728,7 +686,6 @@ pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v2/admin/remote", get(status))
         .route("/v2/admin/remote/invoke", post(admin_invoke))
-        .route("/v2/agent/invoke", post(agent_invoke))
 }
 
 fn api(error: anyhow::Error) -> ApiError {
@@ -769,41 +726,6 @@ async fn admin_invoke(
     crate::management::authorize(&state, &headers, None).await?;
     state
         .remote_invoke_human(&args)
-        .await
-        .map(Json)
-        .map_err(api)
-}
-async fn agent_invoke(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(mut args): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    if !args["arguments"].is_object() {
-        return Err(ApiError::bad_request("arguments must be an object"));
-    }
-    let token = headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    let agent = state
-        .remote
-        .agents
-        .lock()
-        .await
-        .values()
-        .find(|a| a.capability == token && a.is_running())
-        .cloned()
-        .ok_or_else(|| ApiError::forbidden("invalid agent capability"))?;
-    if !agent_stdio::allowed(args["operation"].as_str().unwrap_or_default()) {
-        return Err(ApiError::forbidden(
-            "operation is not delegated to this agent",
-        ));
-    }
-    args["arguments"]["session_ref"] = json!(agent.session_ref);
-    args["arguments"]["_agent_id"] = json!(agent.id);
-    state
-        .remote_dispatch(&agent.owner, args)
         .await
         .map(Json)
         .map_err(api)
