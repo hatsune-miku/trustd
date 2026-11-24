@@ -643,7 +643,7 @@ impl AppState {
                 Ok(result.view())
             }
             "job_start" => self.remote_job_start(owner, &args).await,
-            "job_get" | "job_list" | "job_cancel" | "job_output" => {
+            "job_get" | "job_wait" | "job_list" | "job_cancel" | "job_output" => {
                 self.remote_job_action(owner, operation, &args).await
             }
             "file_stat" | "file_read" | "file_write" => {

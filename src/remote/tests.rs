@@ -410,7 +410,10 @@ async fn cancelling_a_job_wakes_its_waiters_and_leaves_its_session_usable() {
     // A wait that elapses reports the job as still running.
     let brief = json!({"job_id":job["id"],"timeout_seconds":1});
     let waited = state
-        .remote_job_action(&devices.alice, "job_wait", &brief)
+        .remote_dispatch(
+            &devices.alice,
+            json!({"operation":"job_wait","arguments":brief}),
+        )
         .await
         .unwrap();
     assert_eq!(waited["status"], "running", "{waited}");
@@ -420,7 +423,7 @@ async fn cancelling_a_job_wakes_its_waiters_and_leaves_its_session_usable() {
         let alice = devices.alice.clone();
         tokio::spawn(async move {
             state
-                .remote_job_action(&alice, "job_wait", &patient)
+                .remote_dispatch(&alice, json!({"operation":"job_wait","arguments":patient}))
                 .await
                 .unwrap()
         })
@@ -464,7 +467,10 @@ async fn a_finished_job_can_be_awaited_and_its_output_read_in_the_remote_shell()
     }
     let wait = json!({"job_id":job["id"],"timeout_seconds":30});
     let finished = state
-        .remote_job_action(&devices.alice, "job_wait", &wait)
+        .remote_dispatch(
+            &devices.alice,
+            json!({"operation":"job_wait","arguments":wait}),
+        )
         .await
         .unwrap();
     assert_eq!(finished["status"], "succeeded", "{finished}");
